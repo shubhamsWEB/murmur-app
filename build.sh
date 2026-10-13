@@ -5,7 +5,7 @@
 #                                    after each build)
 #   SIGN_ID="<identity>" ./build.sh  this identity instead
 #   RELEASE=1 SIGN_ID="Developer ID Application: …" ./build.sh   plus the secure timestamp notarization needs
-#                                    (scripts/release.sh does that, then notarizes and makes the DMG)
+#                                    (scripts/make-dmg.sh does that, then notarizes and makes the DMG)
 # There's no install step: run it from build.noindex (see scripts/dev-run.sh).
 # For testing in-app updates with a copy of its own (never the installed Murmur's settings or updates), these replace
 # Info.plist values: BUNDLE_ID, VERSION, BUILD_NUMBER, SPARKLE_FEED (the appcast URL), SPARKLE_KEY (the EdDSA public key).

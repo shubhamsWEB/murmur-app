@@ -23,3 +23,4 @@ evals/*.local.json
 # The Tauri shell (shell/): Cargo builds and the schemas tauri-build writes
 shell/src-tauri/target/
 shell/src-tauri/gen/
+dist/
