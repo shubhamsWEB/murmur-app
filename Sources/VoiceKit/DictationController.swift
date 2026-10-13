@@ -82,6 +82,20 @@ public final class DictationController {
     }
 
     public var key: DictationKeyMonitor.Key { monitor.key }
+    /// The speech model in use.
+    public var speechModel: ParakeetTranscriber.Model { transcriber.model }
+    /// Whether the dictation key is being watched (needs Accessibility).
+    public var isListeningForKey: Bool { monitor.isRunning }
+    /// Whether Murmur may paste into other apps (Accessibility).
+    public var canPaste: Bool { AXIsProcessTrusted() }
+    /// The local (Ollama) router model.
+    public var localRouterModel: String {
+        get { agent.routerModel }
+        set { agent.routerModel = newValue }
+    }
+    /// Opens System Settings at Accessibility or Microphone.
+    public func openAccessibilitySettings() { Self.openPrivacyPane("Privacy_Accessibility") }
+    public func openMicrophoneSettings() { Self.openPrivacyPane("Privacy_Microphone") }
 
     /// Asks for the microphone and Accessibility, starts watching the key, and loads the speech model.
     public func start() {
@@ -361,6 +375,7 @@ public final class DictationController {
                 }
                 if decision.intent == .command {
                     log("command: \"\(text)\"")
+                    DictationHistory.shared.add(text, app: frontApp, kind: .command)
                     hud.show(.working("“\(text.prefix(60))”"))
                     await agent.run(text, frontApp: frontApp, selection: selection, explicit: decision.explicit)
                     if hud.isWorking { hud.hide() }
@@ -368,6 +383,7 @@ public final class DictationController {
                 }
                 lastText = text
                 hud.hide()
+                DictationHistory.shared.add(text, app: frontApp, kind: .dictation)
                 report(TextInserter.insert(text))
             } catch {
                 phase = .idle
@@ -438,7 +454,7 @@ public final class DictationController {
         log("dictation: Accessibility granted, watching \(monitor.key.display)")
     }
 
-    private static func openPrivacyPane(_ anchor: String) {
+    static func openPrivacyPane(_ anchor: String) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
             NSWorkspace.shared.open(url)
         }
@@ -470,7 +486,7 @@ extension DictationController {
 
     /// Asks for an API key and saves it in the Keychain. An empty field removes the key. Returns true when a key is set.
     @discardableResult
-    func askForKey(_ choice: RouterChoice) -> Bool {
+    public func askForKey(_ choice: RouterChoice) -> Bool {
         guard let account = choice.keyAccount else { return true }
         let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
         let alert = NSAlert()

@@ -22,6 +22,8 @@ final class AppController {
     private(set) var panel: SearchPanelController!
     private(set) var searchWindow: SearchWindowController!
     private(set) var settingsWindow: SettingsWindowController!
+    /// Murmur's main window (Home, Search, Dictation, Commands & AI, Folders, About).
+    private(set) var home: HomeWindowController!
     private(set) var statusMenu: StatusMenuController!
     private(set) var onboarding: OnboardingController?
     private var observers: [NSObjectProtocol] = []
@@ -63,10 +65,11 @@ final class AppController {
         panel = SearchPanelController(app: self)
         searchWindow = SearchWindowController(app: self)
         settingsWindow = SettingsWindowController(app: self)
+        home = HomeWindowController(app: self)
         statusMenu = StatusMenuController(model: model)
         statusMenu.onSearch = { [weak self] in self?.panel.show() }
-        statusMenu.onOpenWindow = { [weak self] in self?.showSearchWindow() }
-        statusMenu.onSettings = { [weak self] in self?.showSettings() }
+        statusMenu.onOpenWindow = { [weak self] in self?.showHome() }
+        statusMenu.onSettings = { [weak self] in self?.showHome(.dictation) }
         statusMenu.onChooseFolders = { [weak self] in self?.chooseFolders() }
         statusMenu.onPauseChanged = { [weak self] paused in self?.engine.setPaused(paused) }
         statusMenu.onCheckForUpdates = { [weak self] in self?.updates.checkNow() }
@@ -104,7 +107,7 @@ final class AppController {
         } else {
             // Set up already (the go-ahead came with onboarding), so a missing model just downloads.
             if !download.isReady { download.start() }
-            if showWindow { showSearchWindow() }
+            if showWindow { showHome() }
         }
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil,
@@ -286,6 +289,10 @@ final class AppController {
         searchWindow.show(query: query, kind: kind)
     }
 
+    func showHome(_ section: HomeSection? = nil) {
+        home.show(section)
+    }
+
     func showSettings(_ tab: SettingsTab = .general) {
         settingsWindow.show(tab)
     }
@@ -318,7 +325,7 @@ final class AppController {
     /// A window closed: the Dock icon goes once none is left.
     func windowClosed() {
         DispatchQueue.main.async { [self] in
-            let open = [searchWindow?.isVisible, settingsWindow?.isVisible, onboarding?.isVisible]
+            let open = [searchWindow?.isVisible, settingsWindow?.isVisible, onboarding?.isVisible, home?.isVisible]
                 .contains { $0 == true }
             if !open {
                 NSApp.setActivationPolicy(.accessory)

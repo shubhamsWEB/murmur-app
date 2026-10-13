@@ -160,7 +160,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(ActionMenuItem("Settings…", key: ",") { [weak self] in self?.onSettings() })
-        if model.updateAvailable == nil {
+        if model.updateAvailable == nil, Updates.hasFeed {
             menu.addItem(ActionMenuItem("Check for Updates…") { [weak self] in self?.onCheckForUpdates() })
         }
         menu.addItem(ActionMenuItem("Quit Murmur", key: "q") { NSApp.terminate(nil) })

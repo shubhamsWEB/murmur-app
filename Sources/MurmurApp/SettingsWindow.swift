@@ -168,7 +168,7 @@ final class SettingsState {
 }
 
 /// One tab's content, at the width every tab shares.
-private struct SettingsPane: View {
+struct SettingsPane: View {
     let tab: SettingsTab
     let state: SettingsState
     /// The content's own height. The window is that tall up to what the screen has room for, and scrolls past it (a
