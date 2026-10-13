@@ -21,9 +21,11 @@ Code: `Sources/VoiceKit` (new). Small hooks in `Sources/DigUpApp/AppController.s
 Just hold **Fn** and speak: Murmur decides whether it's a command or text to type (Commands & Assistants →
 Detect Commands Automatically, on by default). **Fn+⌃** always means a command.
 
-How it decides, cheapest first: ⌃ held → command; no text field focused → command; a known command like "open Slack"
-→ command; starts with "Murmur…" → command; in a text field and it opens like an instruction ("send…", "summarise…",
-"what's…") → the router model decides in under ~0.5 s (typed if it can't answer in 2.5 s); anything else → typed.
+How it decides (typing is the default): ⌃ held → command; a known command like "open Slack" or "open chrome and
+search facebook" → command; starts with "Murmur…" → command; doesn't open like an instruction → typed; opens like an
+instruction ("send…", "summarise…", "what's…") → command if you're somewhere you can't type (Finder, desktop),
+otherwise the router decides (typed if it can't answer in 2.5 s). Chrome and Electron apps often hide their text
+fields from Accessibility; that counts as "might be a text field", never as "nowhere to type".
 The log line `intent: … (reason)` says which rule decided.
 
 - **Instant, no model:** "open Slack", "quit Spotify", "hide Xcode", "volume 30", "volume up", "mute", "brightness

@@ -29,12 +29,13 @@ public final class DictationController {
     private var lastTapAt = Date.distantPast
     private var retryTimer: Timer?
     private var openedAccessibilitySettings = false
+    private var warnedAboutKey = false
     /// ⌃ was held with the dictation key: the speech is a command, not text to type.
     private var commandRequested = false
     /// The app you were in when you pressed the key (commands paste back into it).
     private var previousApp: NSRunningApplication?
     /// At the key press: whether a text field had the focus, and what was selected.
-    private var textFieldFocusedAtPress = true
+    private var focusAtPress = IntentClassifier.Focus.unknown
     private var selectionAtPress: String?
 
     /// Decide from the words whether you're dictating or giving a command (on by default). Fn+⌃ always means a command.
@@ -241,7 +242,7 @@ public final class DictationController {
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(.control)
             previousApp = NSWorkspace.shared.frontmostApplication
-            textFieldFocusedAtPress = Self.textFieldFocused()
+            focusAtPress = Self.focus()
             selectionAtPress = Self.selectedText()
             begin(handsFree: doubleTap)
         default:
@@ -321,7 +322,7 @@ public final class DictationController {
         let forcedCommand = commandRequested
         let frontApp = previousApp?.localizedName
         let selection = selectionAtPress
-        let textFieldFocused = textFieldFocusedAtPress
+        let focus = focusAtPress
         let detect = detectCommands
         Task { [weak self] in
             guard let self else { return }
@@ -341,11 +342,18 @@ public final class DictationController {
                 }
                 let decision = detect
                     ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
-                                                    textFieldFocused: textFieldFocused, frontApp: frontApp,
+                                                    focus: focus, frontApp: frontApp,
                                                     hasSelection: selection != nil, router: agent.currentRouter())
                     : IntentClassifier.Decision(intent: forcedCommand ? .command : .dictation,
                                                 reason: forcedCommand ? "⌃ held" : "detection off")
                 log("intent: \(decision.intent.rawValue) (\(decision.reason))")
+                if RouterDiagnostics.isKeyProblem(decision.reason), !warnedAboutKey {
+                    // Say it once per launch; the words are still typed below.
+                    warnedAboutKey = true
+                    let provider = RouterChoice.current == .openai ? "OpenAI" : "Anthropic"
+                    hud.flash("\(provider) rejected the API key. Change it in Commands & Assistants.", seconds: 4)
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                }
                 if decision.intent == .command {
                     log("command: \"\(text)\"")
                     hud.show(.working("“\(text.prefix(60))”"))
@@ -506,30 +514,33 @@ extension DictationController {
         }
     }
 
-    /// Whether the focused element takes text. When Accessibility can't say (some apps don't report focus), this
-    /// answers true, so speech is typed rather than taken as a command.
-    static func textFieldFocused() -> Bool {
+    /// What has the keyboard focus. Chrome and Electron apps often don't report their text fields, which comes back
+    /// as `.unknown`, never as `.notText`.
+    static func focus() -> IntentClassifier.Focus {
         let system = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused)
-        if status == .noValue {
-            // Nothing has the focus: the desktop, an empty Finder window, a video player.
-            return false
+        guard status == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else {
+            // No answer. Finder with nothing selected and the desktop are places you can't type.
+            let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            return id == "com.apple.finder" ? .notText : .unknown
         }
-        guard status == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return true }
         let element = focused as! AXUIElement
         var role: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
-        let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXWebArea"]
-        if let role = role as? String, textRoles.contains(role) { return true }
+        let role_ = role as? String ?? ""
+        let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+        if textRoles.contains(role_) { return .textField }
         var settable: DarwinBoolean = false
         if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
-           settable.boolValue { return true }
+           settable.boolValue { return .textField }
         var range: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &range) == .success {
-            return true
+            return .textField
         }
-        return false
+        // Web pages and app-drawn views can hold a text field Accessibility doesn't show.
+        let unclear: Set<String> = ["AXWebArea", "AXGroup", "AXScrollArea", "AXUnknown", ""]
+        return unclear.contains(role_) ? .unknown : .notText
     }
 
     /// The text selected in the focused app, through Accessibility (for "make this shorter", "reply to this").

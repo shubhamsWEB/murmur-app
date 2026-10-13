@@ -2,18 +2,27 @@ import Foundation
 
 /// Decides whether something you said is a command for Murmur or text to type, so one key does both.
 ///
-/// Cheap signals first, the model only when they can't tell:
+/// Typing is the default; a command needs a clear signal:
 /// 1. ⌃ held → command.
-/// 2. No text field has the focus → command (there's nothing to type into).
-/// 3. A known command pattern ("open Slack", "volume 30") → command.
-/// 4. Starts with "Murmur" ("Murmur, summarise this") → command.
-/// 5. In a text field and it opens like an instruction ("send…", "summarise…", "translate…") → the router model
-///    decides, with a short time limit; if it can't answer in time, it's typed.
-/// 6. Anything else → typed.
+/// 2. A known command pattern ("open Slack", "open chrome and search facebook", "volume 30") → command.
+/// 3. Starts with "Murmur" ("Murmur, summarise this") → command.
+/// 4. Doesn't open like an instruction → typed.
+/// 5. Opens like an instruction ("send…", "summarise…", "what's…"):
+///    - the focus is somewhere you can't type (Finder, the desktop) → command;
+///    - otherwise the router model decides, with a short time limit; no answer → typed.
+/// Whether a text field has the focus is often unknown (Chrome and Electron apps don't always say), so "unknown"
+/// never counts as "no text field".
 public enum IntentClassifier {
     public enum Intent: String, Sendable {
         case command
         case dictation
+    }
+
+    /// What has the keyboard focus, as far as Accessibility can tell.
+    public enum Focus: String, Sendable {
+        case textField
+        case notText
+        case unknown
     }
 
     public struct Decision: Sendable {
@@ -36,12 +45,11 @@ public enum IntentClassifier {
         "when", "where", "how", "why", "can", "could", "please",
     ]
 
-    public static func decide(_ utterance: String, forcedCommand: Bool, textFieldFocused: Bool, frontApp: String?,
+    public static func decide(_ utterance: String, forcedCommand: Bool, focus: Focus, frontApp: String?,
                               hasSelection: Bool, router: Router) async -> Decision {
         if forcedCommand { return Decision(intent: .command, reason: "⌃ held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
-        if !textFieldFocused { return Decision(intent: .command, reason: "no text field focused") }
         if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {
             return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")
         }
@@ -50,6 +58,7 @@ public enum IntentClassifier {
         }
         let first = cleaned.split(separator: " ").first.map(String.init) ?? ""
         guard commandOpeners.contains(first) else { return Decision(intent: .dictation, reason: "reads as text") }
+        if focus == .notText { return Decision(intent: .command, reason: "instruction, and nowhere to type") }
 
         let system = """
         You classify one utterance spoken to Murmur, a Mac voice assistant. Either the user is giving Murmur a \
@@ -59,7 +68,8 @@ public enum IntentClassifier {
         Answer "command" or "dictation".
         """
         let user = """
-        App in front: \(frontApp ?? "unknown"). A text field has the focus. Text selected: \(hasSelection ? "yes" : "no").
+        App in front: \(frontApp ?? "unknown"). Text field focused: \(focus == .textField ? "yes" : "probably"). \
+        Text selected: \(hasSelection ? "yes" : "no").
         Utterance: "\(utterance)"
         """
         let answer = await router.choose(system: system, user: user, field: "intent",
@@ -67,7 +77,9 @@ public enum IntentClassifier {
         switch answer {
         case "command": return Decision(intent: .command, reason: "\(router.name): command")
         case "dictation": return Decision(intent: .dictation, reason: "\(router.name): dictation")
-        default: return Decision(intent: .dictation, reason: "\(router.name) didn't answer, typed")
+        default:
+            let why = RouterDiagnostics.lastError.map { ": \($0)" } ?? ""
+            return Decision(intent: .dictation, reason: "\(router.name) didn't answer\(why); typed")
         }
     }
 }

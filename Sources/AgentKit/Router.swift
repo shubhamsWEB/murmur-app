@@ -80,6 +80,23 @@ public protocol Router: Sendable {
     func choose(system: String, user: String, field: String, options: [String], timeout: TimeInterval) async -> String?
 }
 
+/// The last error a cloud router hit, so the app can say what's wrong (a rejected key, no network).
+public enum RouterDiagnostics {
+    private static let lock = NSLock()
+    private static var _lastError: String?
+
+    public static var lastError: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastError }
+        set { lock.lock(); _lastError = newValue; lock.unlock() }
+    }
+
+    /// True for errors that mean the API key is wrong (401/403).
+    public static func isKeyProblem(_ error: String?) -> Bool {
+        guard let error else { return false }
+        return error.contains(" 401") || error.contains(" 403") || error.contains("No ") && error.contains("API key")
+    }
+}
+
 public enum Routers {
     /// The router for the current choice. Cloud choices without a key fall back to local.
     public static func current(localModel: String) -> Router {
@@ -229,9 +246,15 @@ public struct AnthropicRouter: Router {
         let answerTool: [String: Any] = ["name": "answer", "description": "Give the answer", "input_schema": schema]
         body["tools"] = [answerTool]
         body["tool_choice"] = ["type": "tool", "name": "answer"]
-        guard let headers = try? headers(),
-              let json = try? await HTTP.postJSON(endpoint, headers: headers, body: body, timeout: timeout,
-                                                  provider: "Anthropic") else { return nil }
+        let json: [String: Any]
+        do {
+            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
+                                           provider: "Anthropic")
+            RouterDiagnostics.lastError = nil
+        } catch {
+            RouterDiagnostics.lastError = error.localizedDescription
+            return nil
+        }
         for block in json["content"] as? [[String: Any]] ?? [] where block["type"] as? String == "tool_use" {
             return (block["input"] as? [String: Any])?[field] as? String
         }
@@ -310,10 +333,16 @@ public struct OpenAIRouter: Router {
             "tools": toolList([tool]),
             "tool_choice": ["type": "function", "function": ["name": "answer"]] as [String: Any],
         ]
-        guard let headers = try? headers(),
-              let json = try? await HTTP.postJSON(endpoint, headers: headers, body: body, timeout: timeout,
-                                                  provider: "OpenAI"),
-              let message = (json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any],
+        let json: [String: Any]
+        do {
+            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
+                                           provider: "OpenAI")
+            RouterDiagnostics.lastError = nil
+        } catch {
+            RouterDiagnostics.lastError = error.localizedDescription
+            return nil
+        }
+        guard let message = (json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any],
               let call = (message["tool_calls"] as? [[String: Any]])?.first,
               let function = call["function"] as? [String: Any] else { return nil }
         return HTTP.arguments(function["arguments"])[field]?.description
