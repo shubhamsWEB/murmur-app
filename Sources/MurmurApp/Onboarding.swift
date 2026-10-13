@@ -1,3 +1,4 @@
+import AgentKit
 import AppKit
 import AVFoundation
 import MurmurIndex
@@ -63,7 +64,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 @Observable
 final class OnboardingState {
     enum Step: Int, CaseIterable {
-        case welcome, voice, folders, code, shortcut, ready
+        case welcome, voice, folders, code, shortcut, commands, ready
     }
 
     private(set) var step = Step.welcome
@@ -156,6 +157,8 @@ final class OnboardingState {
             }
             go(to: .shortcut)
         case .shortcut:
+            go(to: .commands)
+        case .commands:
             go(to: .ready)
         case .ready:
             finish()
@@ -238,6 +241,7 @@ struct OnboardingView: View {
                         case .folders: FoldersStep(state: state)
                         case .code: CodeStep(state: state)
                         case .shortcut: ShortcutStep(state: state)
+                        case .commands: CommandsStep(state: state)
                         case .ready: ReadyStep(state: state)
                         }
                     }
@@ -292,6 +296,7 @@ struct OnboardingView: View {
         case .folders: "Continue"
         case .code: "Continue"
         case .shortcut: "Continue"
+        case .commands: "Continue"
         case .ready: "Done"
         }
     }
@@ -322,7 +327,8 @@ private struct StepIndicator: View {
         case .voice: "Voice"
         case .folders: "Folders"
         case .code: "Code"
-        case .shortcut: "Shortcut"
+        case .shortcut: "Shortcuts"
+        case .commands: "Commands"
         case .ready: "Done"
         }
     }
@@ -390,6 +396,7 @@ private struct StepArt: View {
         case .folders: "Describe a file the way you remember it. Murmur reads photos, PDFs, documents and recordings."
         case .code: "Search your code by what it does, not just by name."
         case .shortcut: "Talk with fn. Search with your shortcut. Both work in any app."
+        case .commands: "“Open Slack” runs instantly. Longer requests need a model: on this Mac, or yours in the cloud."
         case .ready: "Hold fn and talk. Murmur lives in your menu bar."
         }
     }
@@ -415,6 +422,18 @@ private struct StepArt: View {
             .padding(.vertical, 10)
             .background(Capsule().fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
             .overlay(Capsule().strokeBorder(Color(red: 0.239, green: 0.212, blue: 0.196)))
+        case .commands:
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(["Open Slack", "Check for updates", "Search YouTube for lofi and play it"], id: \.self) { phrase in
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles").font(.system(size: 11)).foregroundStyle(Theme.accent)
+                        Text("“\(phrase)”").font(.system(size: 12.5)).foregroundStyle(cream)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
+                }
+            }
         case .folders:
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
@@ -881,6 +900,130 @@ private struct KeyTip: View {
                 .frame(width: 66, alignment: .leading)
             Text(text).font(.system(size: 12))
         }
+    }
+}
+
+/// Optional: a model for commands that aren't built in. Ollama on this Mac, or a cloud key; neither blocks setup.
+private struct CommandsStep: View {
+    let state: OnboardingState
+    @State private var ollama: OllamaProbe.State?
+    @State private var pulling = false
+    @State private var pullProblem: String?
+    @State private var revision = 0
+
+    private var dictation: DictationController { state.app.dictation }
+    private var model: String { dictation.localRouterModel }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            StepTitle(title: "A model for commands",
+                      subtitle: "Dictation, file search and common commands like “open Slack” work without one. For "
+                          + "longer requests (“summarise this”, “search YouTube and play the first video”) Murmur "
+                          + "needs a model. Optional: you can set this later in Commands & AI.")
+            VStack(alignment: .leading, spacing: 10) {
+                optionCard(title: "On this Mac, with Ollama", detail: "Free and private. Slower than the cloud.",
+                           pill: ollamaPill) { ollamaAction }
+                optionCard(title: "Claude or OpenAI, with your API key", detail: "Fastest. Only the command's words go out.",
+                           pill: keyPill) {
+                    HStack(spacing: 8) {
+                        Button(RouterChoice.anthropic.hasKey ? "Claude ✓" : "Add Claude Key…") {
+                            if dictation.askForKey(.anthropic) { RouterChoice.current = .anthropic }
+                            revision += 1
+                        }
+                        .buttonStyle(.murmurSecondaryCompact)
+                        Button(RouterChoice.openai.hasKey ? "OpenAI ✓" : "Add OpenAI Key…") {
+                            if dictation.askForKey(.openai) { RouterChoice.current = .openai }
+                            revision += 1
+                        }
+                        .buttonStyle(.murmurSecondaryCompact)
+                    }
+                }
+            }
+            .frame(maxWidth: 560, alignment: .leading)
+            .padding(.top, 24)
+            .id(revision)
+            if let pullProblem {
+                Text(pullProblem).font(.system(size: 12)).foregroundStyle(Theme.danger).lineLimit(3).padding(.top, 10)
+            }
+            Label(nothingNote, systemImage: "info.circle")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 18)
+                .frame(maxWidth: 560, alignment: .leading)
+        }
+        .task {
+            while !Task.isCancelled {
+                if !pulling { ollama = await OllamaProbe.check(model: model) }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private var nothingNote: String {
+        if case .ready = ollama { return "Commands that need a model will use \(model) on this Mac." }
+        if RouterChoice.current != .local, RouterChoice.current.hasKey {
+            return "Commands that need a model will use \(RouterChoice.current == .anthropic ? "Claude" : "OpenAI")."
+        }
+        return "Skipping is fine: everything else works now, and Murmur tells you when a command needs a model."
+    }
+
+    private var keyPill: Pill? {
+        RouterChoice.anthropic.hasKey || RouterChoice.openai.hasKey ? Pill(text: "Key saved", tone: .good) : nil
+    }
+
+    private var ollamaPill: Pill? {
+        if pulling { return Pill(text: "Downloading \(model)…", tone: .busy) }
+        switch ollama {
+        case .none: return Pill(text: "Checking…", tone: .neutral)
+        case .notInstalled: return Pill(text: "Not installed", tone: .neutral)
+        case .notRunning: return Pill(text: "Not running", tone: .busy)
+        case .missingModel: return Pill(text: "Needs \(model)", tone: .busy)
+        case .ready: return Pill(text: "Ready · \(model)", tone: .good)
+        }
+    }
+
+    @ViewBuilder
+    private var ollamaAction: some View {
+        switch ollama {
+        case .notInstalled:
+            Button("Get Ollama…") { NSWorkspace.shared.open(URL(string: "https://ollama.com/download")!) }
+                .buttonStyle(.murmurSecondaryCompact)
+        case .notRunning:
+            Button("Open Ollama") { Task { await OllamaProbe.start() } }
+                .buttonStyle(.murmurSecondaryCompact)
+        case .missingModel:
+            Button(pulling ? "Downloading…" : "Download \(model) (about 2.5 GB)") {
+                pulling = true
+                pullProblem = nil
+                Task {
+                    pullProblem = await OllamaProbe.pull(model)
+                    pulling = false
+                    ollama = await OllamaProbe.check(model: model)
+                }
+            }
+            .buttonStyle(.murmurSecondaryCompact)
+            .disabled(pulling)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func optionCard<Action: View>(title: String, detail: String, pill: Pill?,
+                                          @ViewBuilder action: () -> Action) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Spacer(minLength: 8)
+                if let pill { pill }
+            }
+            Text(detail).font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+            action().padding(.top, 2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.line))
     }
 }
 
