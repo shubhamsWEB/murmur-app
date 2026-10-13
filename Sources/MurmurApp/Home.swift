@@ -223,6 +223,7 @@ private struct Sidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            let _ = state.revision
             Color.clear.frame(height: 52)   // the window buttons
             HStack(spacing: 10) {
                 BrandTile(size: 30)
@@ -757,6 +758,7 @@ private struct DictationPage: View {
     @ObservedObject private var history = DictationHistory.shared
 
     var body: some View {
+        let _ = state.revision
         VStack(alignment: .leading, spacing: 26) {
             PageHeader(title: "Dictation",
                        subtitle: "How you talk to Murmur, and what it hears. Speech never leaves this Mac.")
@@ -847,6 +849,9 @@ private struct CommandsPage: View {
     @State private var installed: [AssistantCLI: Bool] = [:]
 
     var body: some View {
+        // Most of this page's settings live outside SwiftUI (UserDefaults, the Keychain): every change bumps
+        // `revision`, and reading it here redraws the page at once.
+        let _ = state.revision
         VStack(alignment: .leading, spacing: 26) {
             PageHeader(title: "Commands & AI",
                        subtitle: "Common commands like “open Slack” run instantly with no model. Everything else goes to the model you pick here.")
