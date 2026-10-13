@@ -358,6 +358,7 @@ private struct HomePage: View {
         VStack(alignment: .leading, spacing: 28) {
             header
             if !micOK || !typingOK { permissions }
+            IndexingCard(model: app.model)
             hero
             ThingsToSay(key: keyLabel)
             onThisMac
@@ -1076,6 +1077,7 @@ private struct FoldersPage: View {
                 }
                 .buttonStyle(.murmurPrimary)
             }
+            IndexingCard(model: app.model)
             Picker("", selection: $state.foldersTab) {
                 ForEach(SettingsTab.allCases, id: \.self) { Text($0.title).tag($0) }
             }

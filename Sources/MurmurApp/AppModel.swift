@@ -29,6 +29,8 @@ final class AppModel {
         case .failed(let problem): return "⚠︎ \(problem)"
         case .syncing: return "Checking folders…"
         case .indexing(let done, let total):
+            // Every file read; the helper is saving the last ones and moving on to long files.
+            if total > 0, done >= total { return "Finishing up · \(status.searchable.formatted()) of \(status.files.formatted()) searchable" }
             let percent = total > 0 ? Int((Double(done) / Double(total) * 100).rounded(.down)) : 0
             return "Indexing \(percent)% · \(done.formatted()) of \(total.formatted())"
         case .finishing(let done, let total, let files):

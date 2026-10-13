@@ -739,6 +739,9 @@ nonisolated final class Engine: @unchecked Sendable {
         guard force || Date().timeIntervalSince(lastSearcherRefresh) > 2 else { return }
         lastSearcherRefresh = Date()
         searchQueue.async { [self] in
+            // The counts too ("120 of 313 searchable"): the helper only sends them at the start and end of a pass,
+            // so mid-pass they read 0 searchable while the bar was nearly full.
+            if let searchStore, let counts = try? searchStore.counts() { apply(counts) }
             guard let searcher, searcher.vectorsLoaded else { return }
             let started = Date()
             try? searcher.reload()

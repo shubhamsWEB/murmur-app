@@ -389,7 +389,7 @@ private struct StepArt: View {
         case .voice: "This is what you'll see at the bottom of the screen while Murmur listens."
         case .folders: "Describe a file the way you remember it. Murmur reads photos, PDFs, documents and recordings."
         case .code: "Search your code by what it does, not just by name."
-        case .shortcut: "Search from any app with one shortcut."
+        case .shortcut: "Talk with fn. Search with your shortcut. Both work in any app."
         case .ready: "Hold fn and talk. Murmur lives in your menu bar."
         }
     }
@@ -443,13 +443,22 @@ private struct StepArt: View {
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
         case .shortcut:
-            Text(hotkey)
+            VStack(spacing: 14) {
+                Text("hold fn")
+                    .font(.system(size: 22, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(cream)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.accent.opacity(0.6)))
+                Text(hotkey)
                 .font(.system(size: 26, weight: .semibold, design: .monospaced))
                 .foregroundStyle(cream)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.accent.opacity(0.6)))
+            }
         }
     }
 }
@@ -780,41 +789,85 @@ private struct PermissionRow: View {
 
 private struct ShortcutStep: View {
     let state: OnboardingState
+    @ObservedObject private var history = DictationHistory.shared
+    @State private var appeared = Date()
 
     var body: some View {
-        VStack(spacing: 0) {
-            StepTitle(title: "Search from anywhere",
-                      subtitle: "Press the shortcut in any app, describe the file, and press Return. Or just ask out loud.")
-            ShortcutRecorder(combo: state.model.hotkey, apply: { state.app.setHotkey($0) },
-                             listening: { state.app.hotkeyRecording($0) }, capSize: 20)
-                .padding(.top, 34)
-            Group {
-                if state.hotkeyWorked {
-                    Label("That's it. It works from any app.", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                } else if let hotkey = state.model.hotkey {
-                    Text("Try it now: press \(hotkey.display).")
-                        .foregroundStyle(.secondary)
+        let dictation = state.app.dictation
+        let talkKey = dictation.key == .fn ? "fn" : "Right ⌥"
+        let heard = history.items.first { $0.date > appeared }
+        VStack(alignment: .leading, spacing: 0) {
+            StepTitle(title: "Your two shortcuts",
+                      subtitle: "One to talk, one to search. Both work in any app.")
+            VStack(alignment: .leading, spacing: 10) {
+                ShortcutCard(number: "1", title: "Talk", detail: "Hold \(talkKey) and speak; let go and it's typed or done. "
+                                 + "Double-tap for hands-free. Add ⌃ to force a command.",
+                             tested: heard != nil,
+                             test: heard.map { "Heard: “\($0.text)”" } ?? "Try it: hold \(talkKey) and say “Hello, Murmur”.") {
+                    HStack(spacing: 4) {
+                        KeyCap(talkKey)
+                        Text("hold").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                    }
+                }
+                ShortcutCard(number: "2", title: "Search files", detail: "Describe a file and press Return to open it. "
+                                 + "Click the keys to choose different ones.",
+                             tested: state.hotkeyWorked,
+                             test: state.hotkeyWorked ? "That's it. It works from any app."
+                                 : "Try it: press \(state.model.hotkey?.display ?? "the shortcut").") {
+                    ShortcutRecorder(combo: state.model.hotkey, apply: { state.app.setHotkey($0) },
+                                     listening: { state.app.hotkeyRecording($0) }, capSize: 13)
                 }
             }
-            .font(.system(size: 13, weight: .medium))
-            .padding(.top, 16)
+            .frame(maxWidth: 560, alignment: .leading)
+            .padding(.top, 24)
             .animation(.default, value: state.hotkeyWorked)
-            VStack(alignment: .leading, spacing: 9) {
-                Text("In the search panel")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                KeyTip(caps: ["↩"], text: "Open the file")
-                KeyTip(caps: ["⌘", "↩"], text: "Show it in Finder")
-                KeyTip(caps: ["Space"], text: "Quick Look, after arrowing to a result")
-                KeyTip(caps: ["⌘", "C"], text: "Copy the file, to paste anywhere")
-                KeyTip(caps: ["esc"], text: "Close")
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel("In the search panel")
+                HStack(spacing: 22) {
+                    KeyTip(caps: ["↩"], text: "Open")
+                    KeyTip(caps: ["⌘", "↩"], text: "Show in Finder")
+                    KeyTip(caps: ["Space"], text: "Quick Look")
+                }
             }
-            .padding(18)
-            .frame(maxWidth: 340, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card)).overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
-            .padding(.top, 34)
+            .padding(.top, 22)
         }
+    }
+}
+
+private struct ShortcutCard<Keys: View>: View {
+    let number: String
+    let title: String
+    let detail: String
+    let tested: Bool
+    let test: String
+    @ViewBuilder var keys: Keys
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(number)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Theme.accentText)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accentTint))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(title).font(.system(size: 14, weight: .semibold))
+                    Spacer(minLength: 8)
+                    keys
+                }
+                Text(detail).font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Label(test, systemImage: tested ? "checkmark.circle.fill" : "hand.point.right")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(tested ? Theme.good : Theme.ink)
+                    .lineLimit(2)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
+            .strokeBorder(tested ? Theme.good.opacity(0.5) : Theme.line))
     }
 }
 
@@ -843,13 +896,24 @@ private struct ReadyStep: View {
             Text("You're all set")
                 .font(.system(size: 26, weight: .bold))
                 .padding(.top, 14)
-            Text(progressNote)
+            Text("Hold fn and talk, or press \(state.model.hotkey?.display ?? "the shortcut") to search. "
+                 + "Murmur keeps reading your folders in the background.")
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.ink2)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 470)
                 .padding(.top, 8)
+            IndexingCard(model: state.model)
+                .frame(maxWidth: 470)
+                .padding(.top, 20)
+            Text(progressNote)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.ink2)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 470)
+                .padding(.top, 10)
             VStack(alignment: .leading, spacing: 16) {
                 SwitchRow(title: "Open Murmur when you log in", detail: "So the shortcut always works.",
                           isOn: $state.launchAtLogin)

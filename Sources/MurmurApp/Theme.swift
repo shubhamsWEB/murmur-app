@@ -295,3 +295,126 @@ struct ThinProgress: View {
         .frame(height: 4)
     }
 }
+
+// MARK: - Indexing, prominently
+
+/// How far indexing has got and about how long is left, wherever it matters (Home, Folders, the end of setup):
+/// the model download, then the first pass over your files, then the rest of long files. Nothing when all is done.
+struct IndexingCard: View {
+    let model: AppModel
+    @State private var tracker = RateTracker()
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let info = info(now: context.date) {
+                card(info)
+            }
+        }
+    }
+
+    private struct Info {
+        let symbol: String
+        let title: String
+        let detail: String
+        let fraction: Double?
+        let indeterminate: Bool
+        let note: String?
+    }
+
+    private func info(now: Date) -> Info? {
+        let download = model.download
+        if download.isActive {
+            return Info(symbol: "arrow.down.circle", title: "Downloading the search model",
+                        detail: download.progressText, fraction: download.fraction, indeterminate: false,
+                        note: "One time, about 865 MB. Until it's in, search matches file names and the words in files.")
+        }
+        guard model.hasFolders else { return nil }
+        switch model.status.activity {
+        case .starting, .syncing:
+            return Info(symbol: "folder", title: "Getting your folders ready", detail: "Looking for new and changed files",
+                        fraction: nil, indeterminate: true, note: nil)
+        case .indexing(let done, let total) where total > 0 && done >= total:
+            return Info(symbol: "checkmark.circle", title: "Finishing up",
+                        detail: "\(model.status.searchable.formatted()) of \(model.status.files.formatted()) files searchable",
+                        fraction: nil, indeterminate: true,
+                        note: "Every file has been read; saving the last ones, then long documents.")
+        case .indexing(let done, let total) where total > 0:
+            let left = tracker.remaining(done: done, total: total, now: now)
+            return Info(symbol: "doc.text.magnifyingglass", title: "Indexing your files",
+                        detail: "\(model.status.searchable.formatted()) searchable · \(done.formatted()) of \(total.formatted()) read · "
+                            + (left.map { "about \(roughDuration($0)) left" } ?? "working out how long"),
+                        fraction: Double(done) / Double(total), indeterminate: false,
+                        note: "You can search already: results fill in as Murmur reads, newest files first. "
+                            + "Photos and recordings take longest.")
+        case .finishing(let done, let total, let files) where total > 0:
+            let left = tracker.remaining(done: done, total: total, now: now)
+            return Info(symbol: "doc.richtext", title: "Reading the rest of long documents",
+                        detail: "\(files.formatted()) long \(files == 1 ? "file" : "files") · "
+                            + (left.map { "about \(roughDuration($0)) left" } ?? "\(Int(Double(done) / Double(total) * 100))%"),
+                        fraction: Double(done) / Double(total), indeterminate: false,
+                        note: "Their first pages are searchable already.")
+        case .failed(let problem):
+            tracker.reset()
+            return Info(symbol: "exclamationmark.triangle", title: "Indexing stopped", detail: problem,
+                        fraction: nil, indeterminate: false, note: nil)
+        default:
+            tracker.reset()
+            if model.status.pending > 0 {
+                return Info(symbol: model.status.paused ? "pause.circle" : "clock",
+                            title: model.status.paused ? "Indexing is paused" : "Files waiting to be indexed",
+                            detail: model.statusLine, fraction: nil, indeterminate: false, note: nil)
+            }
+            return nil
+        }
+    }
+
+    private func card(_ info: Info) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: info.symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.accentText)
+                .frame(width: 36, height: 36)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.accentTint))
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(info.title).font(.system(size: 14, weight: .semibold))
+                    Spacer(minLength: 8)
+                    if let fraction = info.fraction {
+                        Text("\(Int(fraction * 100))%")
+                            .font(.system(size: 13, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.accentText)
+                    }
+                }
+                if info.fraction != nil || info.indeterminate {
+                    ThinProgress(fraction: info.fraction)
+                }
+                Text(info.detail).font(.system(size: 12.5)).foregroundStyle(Theme.ink).monospacedDigit().lineLimit(2)
+                if let note = info.note {
+                    Text(note).font(.system(size: 12)).foregroundStyle(Theme.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.accent.opacity(0.45)))
+    }
+}
+
+/// Files per second over the last two minutes, for "about 4 min left".
+final class RateTracker {
+    private var samples: [(date: Date, done: Int)] = []
+
+    func reset() { samples = [] }
+
+    func remaining(done: Int, total: Int, now: Date) -> TimeInterval? {
+        if let last = samples.last, done < last.done { samples = [] }   // a new pass
+        if samples.last?.done != done { samples.append((now, done)) }
+        samples.removeAll { now.timeIntervalSince($0.date) > 120 }
+        guard let first = samples.first, now.timeIntervalSince(first.date) >= 8, done > first.done else { return nil }
+        let rate = Double(done - first.done) / now.timeIntervalSince(first.date)
+        return rate > 0 ? Double(max(0, total - done)) / rate : nil
+    }
+}
