@@ -322,9 +322,22 @@ final class AppController {
         guard !Self.offscreen else { return }
         // Come to the desktop you're on, not the Space the window was last open on (it looked like nothing happened).
         window.collectionBehavior.insert(.moveToActiveSpace)
+        if window.isMiniaturized { window.deminiaturize(nil) }
         NSApp.setActivationPolicy(.regular)
+        // macOS can decline a menu bar app's request to come forward; ask both ways, and put the window in front
+        // regardless, so it never opens behind the app you're in.
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
         bringAppToFront()
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
+        // Activation can land a moment later than the window: make sure it ends up key and in front.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            if !window.isKeyWindow {
+                bringAppToFront()
+                window.orderFrontRegardless()
+                window.makeKey()
+            }
+        }
     }
 
     /// A window closed: the Dock icon goes once none is left.
