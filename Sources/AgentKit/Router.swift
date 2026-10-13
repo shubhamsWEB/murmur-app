@@ -224,10 +224,12 @@ public struct AnthropicRouter: Router {
     }
 
     public func chat(system: String, turns: [RouterTurn], tools: [ToolSpec]) async throws -> RouterReply {
-        var body = base(system: system, maxTokens: 1024)
+        var body = base(system: system, maxTokens: tools.isEmpty ? 2048 : 1024)
         body["messages"] = messages(turns)
-        body["tools"] = tools.map { tool -> [String: Any] in
-            ["name": tool.name, "description": tool.description, "input_schema": tool.parameters]
+        if !tools.isEmpty {
+            body["tools"] = tools.map { tool -> [String: Any] in
+                ["name": tool.name, "description": tool.description, "input_schema": tool.parameters]
+            }
         }
         let json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "Anthropic")
         var text = ""
@@ -315,8 +317,8 @@ public struct OpenAIRouter: Router {
     }
 
     public func chat(system: String, turns: [RouterTurn], tools: [ToolSpec]) async throws -> RouterReply {
-        let body: [String: Any] = ["model": Self.model, "messages": messages(system: system, turns),
-                                   "tools": toolList(tools)]
+        var body: [String: Any] = ["model": Self.model, "messages": messages(system: system, turns)]
+        if !tools.isEmpty { body["tools"] = toolList(tools) }   // an empty list is an error; none means plain text
         let json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "OpenAI")
         let message = ((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]) ?? [:]
         let calls = (message["tool_calls"] as? [[String: Any]] ?? []).compactMap { call -> RouterCall? in

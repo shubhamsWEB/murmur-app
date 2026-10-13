@@ -52,6 +52,10 @@ public enum IntentClassifier {
         if forcedCommand { return Decision(intent: .command, reason: "⌃ held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
+        // Text selected and "summarise this", "make it more formal", "translate this to Hindi".
+        if hasSelection, CommandAgent.selectionTask(utterance) != nil {
+            return Decision(intent: .command, reason: "an instruction about the selected text")
+        }
         // "my photos from Goa are amazing" in a message is text; "find my photos…" is a search anywhere.
         let verblessFileSearch = QuickCommands.parseAll(utterance)?.allSatisfy { $0.tool == "search_files" } == true
             && cleaned.range(of: #"^(find|search|show|get|look|open)\b"#, options: .regularExpression) == nil
@@ -61,7 +65,7 @@ public enum IntentClassifier {
         if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {
             return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")
         }
-        if utterance.lowercased().range(of: #"^\s*(hey |ok |okay )?murmur\b"#, options: .regularExpression) != nil {
+        if WakeName.strip(utterance) != nil {
             return Decision(intent: .command, reason: "addressed to Murmur")
         }
         // Somewhere you can't type (the desktop, a Finder window, a player): whatever you said is for Murmur.

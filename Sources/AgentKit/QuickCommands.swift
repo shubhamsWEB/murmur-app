@@ -12,7 +12,7 @@ public enum QuickCommands {
     static func clean(_ text: String) -> String {
         var s = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         s = s.replacingOccurrences(of: #"[.!?,;:]+$"#, with: "", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"^(hey |ok |okay )?murmur[, ]+"#, with: "", options: .regularExpression)
+        if let rest = WakeName.strip(s), !rest.isEmpty { s = rest }   // "Murmur, …" (or how Parakeet spelled it)
         s = s.replacingOccurrences(of: #"^(please |can you |could you )+"#, with: "", options: .regularExpression)
         s = s.replacingOccurrences(of: #"( please)$"#, with: "", options: .regularExpression)
         s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)

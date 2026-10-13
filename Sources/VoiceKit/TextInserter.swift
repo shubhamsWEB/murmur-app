@@ -47,9 +47,30 @@ public enum TextInserter {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    /// The selected text in the front app, by pressing ⌘C (for apps that don't tell Accessibility what's selected:
+    /// Chrome, Electron apps). Your clipboard is put back right after. Nil when nothing was copied.
+    @MainActor
+    public static func copySelection() async -> String? {
+        guard AXIsProcessTrusted(), !IsSecureEventInputEnabled() else { return nil }
+        let pasteboard = NSPasteboard.general
+        let saved = snapshot(pasteboard)
+        let before = pasteboard.changeCount
+        press(CGKeyCode(kVK_ANSI_C))
+        for _ in 0..<12 where pasteboard.changeCount == before {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        guard pasteboard.changeCount != before else { return nil }
+        let text = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        restore(saved, to: pasteboard)
+        return text?.isEmpty == false ? text : nil
+    }
+
     private static func pressCommandV() {
+        press(CGKeyCode(kVK_ANSI_V))
+    }
+
+    private static func press(_ v: CGKeyCode) {
         let source = CGEventSource(stateID: .combinedSessionState)
-        let v = CGKeyCode(kVK_ANSI_V)
         let down = CGEvent(keyboardEventSource: source, virtualKey: v, keyDown: true)
         let up = CGEvent(keyboardEventSource: source, virtualKey: v, keyDown: false)
         down?.flags = .maskCommand

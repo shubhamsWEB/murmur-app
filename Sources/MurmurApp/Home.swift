@@ -241,11 +241,8 @@ private struct HomePage: View {
             headline
             if !micOK || !typingOK { permissions.padding(.top, 20) }
             howTo.padding(.top, 30)
+            ThingsToSay(key: keyLabel).padding(.top, 34)
             models.padding(.top, 34)
-            Text("Anything else: start with “Murmur, …”. For example “Murmur, summarise this” with text selected.")
-                .font(.system(size: 12))
-                .foregroundStyle(Brand.clay)
-                .padding(.top, 26)
         }
     }
 
@@ -303,8 +300,8 @@ private struct HomePage: View {
                         detail: "Speak, then let go. The text appears where your cursor is.")
                 Gesture(keys: [keyLabel, keyLabel], title: "Double-tap for hands-free",
                         detail: "Tap \(keyLabel) again to finish. Esc cancels.")
-                Gesture(keys: [keyLabel, "⌃"], plus: true, title: "Add ⌃ for a command",
-                        detail: "“Open Slack”, “find my beach photos”, “volume 30”.")
+                Gesture(keys: [keyLabel, "⌃"], plus: true, title: "Add ⌃ to make it a command",
+                        detail: "Murmur tells commands from dictation by itself. Hold ⌃ too when it guesses wrong.")
             }
         }
     }
@@ -356,6 +353,88 @@ private struct HomePage: View {
                 : RouterDiagnostics.isKeyProblem(RouterDiagnostics.lastError) ? .problem("Key was rejected")
                 : .done("Your API key")
         }
+    }
+}
+
+/// What you can say, by what you want to do: each with real phrases to copy.
+private struct ThingsToSay: View {
+    let key: String
+
+    private struct Idea: Identifiable {
+        let symbol: String
+        let title: String
+        let how: String
+        let say: [String]
+        var id: String { title }
+    }
+
+    private var ideas: [Idea] {
+        [
+            Idea(symbol: "text.cursor", title: "Write anywhere",
+                 how: "Click in any text box, hold \(key) and talk. Let go and it's typed.",
+                 say: ["Running ten minutes late, start without me"]),
+            Idea(symbol: "text.quote", title: "Work on selected text",
+                 how: "Select text in any app first, then hold \(key) and say what to do.",
+                 say: ["Summarise this", "Make this more formal", "Translate this to Hindi"]),
+            Idea(symbol: "macwindow", title: "Control your Mac",
+                 how: "Apps, volume, brightness, Shortcuts. Common ones run instantly.",
+                 say: ["Open Slack", "Volume 30", "Open Chrome and search Facebook"]),
+            Idea(symbol: "doc.text.magnifyingglass", title: "Find and open files",
+                 how: "Describe a file: its name, what's in it, what it looks like.",
+                 say: ["Open my resume PDF", "Find my beach photos"]),
+            Idea(symbol: "sparkles", title: "Ask Murmur",
+                 how: "Start with “Murmur” for anything else.",
+                 say: ["Murmur, what's 18% of 2,400?"]),
+            Idea(symbol: "magnifyingglass", title: "Search by typing",
+                 how: "Press ⇧⌘Space anywhere, or use Search in this window.",
+                 say: []),
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Things to say").font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.clay)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12, alignment: .top),
+                                GridItem(.flexible(), spacing: 12, alignment: .top)], spacing: 12) {
+                ForEach(ideas) { idea in tile(idea) }
+            }
+        }
+    }
+
+    private func tile(_ idea: Idea) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: idea.symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Brand.tile))
+                Text(idea.title).font(.system(size: 14, weight: .semibold))
+            }
+            Text(idea.how)
+                .font(.system(size: 12.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !idea.say.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(idea.say, id: \.self) { phrase in
+                        Text("“\(phrase)”")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(Brand.coralDeep)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Brand.coral.opacity(0.12)))
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
     }
 }
 

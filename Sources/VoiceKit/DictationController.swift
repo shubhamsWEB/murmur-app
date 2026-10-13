@@ -354,7 +354,7 @@ public final class DictationController: ObservableObject {
         let transcriber = transcriber
         let forcedCommand = commandRequested
         let frontApp = previousApp?.localizedName
-        let selection = selectionAtPress
+        let pressedSelection = selectionAtPress
         let focus = focusAtPress
         let detect = detectCommands
         Task { [weak self] in
@@ -372,6 +372,12 @@ public final class DictationController: ObservableObject {
                 guard !text.isEmpty else {
                     hud.flash("Didn't catch that")
                     return
+                }
+                var selection = pressedSelection
+                // "Summarise this" with text selected in an app that doesn't report its selection: copy it.
+                if selection == nil, detect || forcedCommand, CommandAgent.selectionTask(text) != nil {
+                    selection = await TextInserter.copySelection()
+                    if let selection { log("selection: \(selection.count) characters, copied with ⌘C") }
                 }
                 let decision = detect
                     ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
@@ -391,7 +397,8 @@ public final class DictationController: ObservableObject {
                     log("command: \"\(text)\"")
                     DictationHistory.shared.add(text, app: frontApp, kind: .command)
                     hud.show(.working("“\(text.prefix(60))”"))
-                    await agent.run(text, frontApp: frontApp, selection: selection, explicit: decision.explicit)
+                    await agent.run(text, frontApp: frontApp, selection: selection, explicit: decision.explicit,
+                                    editable: focus == .textField)
                     if hud.isWorking { hud.hide() }
                     return
                 }

@@ -61,9 +61,16 @@ public final class CommandAgent {
     /// Runs one spoken command. `selection` is the text selected in the front app, if any.
     /// `explicit`: you clearly gave a command. When it's only the model's guess and the model just answers (no
     /// action), it was dictation after all: the words are typed instead of shown as an answer.
-    public func run(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool = true) async {
+    /// `editable`: the selection is in a text field, so an edit of it can replace it.
+    public func run(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool = true,
+                    editable: Bool = false) async {
         let started = Date()
         lastBrowser = nil
+        if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
+            await transform(selection, instruction: utterance, show: task.shows || !editable)
+            host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
+            return
+        }
         if let actions = QuickCommands.parseAll(utterance) {
             var results: [String] = []
             for action in actions {
@@ -84,6 +91,66 @@ public final class CommandAgent {
         }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
+    }
+
+    // MARK: - Selected text
+
+    public struct SelectionTask: Sendable {
+        /// Shown to read (a summary, an explanation, a drafted reply) rather than put in place of the selection.
+        public let shows: Bool
+    }
+
+    /// "summarise this", "make it more formal", "translate this to Hindi", "explain this": something to do with the
+    /// selected text. Verbs that also start ordinary sentences ("make", "fix"…) need "this" / "it" / "selected" too.
+    nonisolated public static func selectionTask(_ utterance: String) -> SelectionTask? {
+        let text = QuickCommands.clean(utterance)
+        let reading = #"^(summari[sz]e|sum up|tl ?dr|explain|what does (this|it) (mean|say)|what is this|what's this|reply to|respond to|answer|draft a reply|write a reply)\b"#
+        let editing = #"^(translate|rewrite|rephrase|reword|shorten|condense|simplify|expand|lengthen|proofread|paraphrase)\b"#
+        let needsThis = #"^(make|turn|convert|fix|correct|improve|polish|edit|format|clean up|change)\b"#
+        let mentionsSelection = text.range(of: #"\b(this|it|that|selection|selected|text|paragraph|sentence|email|message)\b"#,
+                                           options: .regularExpression) != nil
+        if text.range(of: reading, options: .regularExpression) != nil { return SelectionTask(shows: true) }
+        if text.range(of: editing, options: .regularExpression) != nil { return SelectionTask(shows: false) }
+        if text.range(of: needsThis, options: .regularExpression) != nil, mentionsSelection {
+            return SelectionTask(shows: false)
+        }
+        return nil
+    }
+
+    /// Does what you asked with the selected text: one plain-text answer from the model, no tools. A summary or an
+    /// explanation is shown; an edit replaces the selection when it's in a text field (else it's shown to paste).
+    private func transform(_ selection: String, instruction: String, show: Bool) async {
+        host.progress(show ? "Reading the selected text…" : "Working on the selected text…")
+        let system = """
+        You help with text the user selected on their Mac. Follow their spoken instruction on the selected text and \
+        reply with only the result: no preamble, no quotation marks, no notes about what you did. Keep the text's \
+        language unless asked to translate. A summary is a few short sentences or bullet points. An explanation is \
+        short and plain.
+        """
+        let turns: [RouterTurn] = [.user("Instruction: \(WakeName.strip(instruction) ?? instruction)\n\n"
+            + "Selected text:\n\"\"\"\n\(selection.prefix(12_000))\n\"\"\"")]
+        var router = currentRouter()
+        var reply: RouterReply?
+        do {
+            reply = try await router.chat(system: system, turns: turns, tools: [])
+        } catch {
+            host.log("command: \(router.name) failed on the selection: \(error.localizedDescription)")
+            RouterDiagnostics.lastError = error.localizedDescription
+            if !(router is OllamaRouter) {
+                router = OllamaRouter(model: routerModel)
+                host.progress("Using the local model…")
+                reply = try? await router.chat(system: system, turns: turns, tools: [])
+            }
+        }
+        let text = (reply?.text ?? "")
+            .replacingOccurrences(of: #"(?s)<think>.*?</think>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            host.showAnswer("Couldn't do that with the selected text. \(RouterDiagnostics.lastError ?? "The model didn't answer.")")
+            return
+        }
+        host.log("command: \(router.name) worked on \(selection.count) selected characters → \(text.count)")
+        if show { host.showAnswer(text) } else { host.insert(text) }
     }
 
     // MARK: - Router loop
