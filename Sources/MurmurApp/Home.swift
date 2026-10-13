@@ -234,11 +234,10 @@ private struct HomePage: View {
     // What state Murmur is in, in one line.
     private var headline: some View {
         let (title, busy) = summary
-        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+        return HStack(alignment: .center, spacing: 12) {
             Circle()
-                .fill(busy ? Brand.coral : Color.primary.opacity(0.75))
-                .frame(width: 9, height: 9)
-                .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                .fill(busy ? Brand.coral : Color.primary.opacity(0.7))
+                .frame(width: 10, height: 10)
             Text(title)
                 .font(.system(size: 30, weight: .semibold))
                 .tracking(-0.4)
@@ -320,7 +319,11 @@ private struct HomePage: View {
         switch download.phase {
         case .ready:
             if let badge = app.model.activityBadge { return .working(badge, nil) }
-            return .done(app.model.statusLine)
+            switch app.model.status.activity {
+            case .starting: return .working("Starting", nil)
+            case .failed(let message): return .problem(message)
+            default: return .done(app.model.statusLine)
+            }
         case .needed: return .problem("Not downloaded yet (865 MB)")
         case .failed(let message): return .problem(message)
         default: return .working(download.progressText, download.fraction)
@@ -331,7 +334,9 @@ private struct HomePage: View {
         switch RouterChoice.current {
         case .local: .done("Ollama, \(dictation.localRouterModel)")
         case .anthropic, .openai:
-            RouterChoice.current.hasKey ? .done("Your API key") : .problem("Needs an API key")
+            !RouterChoice.current.hasKey ? .problem("Needs an API key")
+                : RouterDiagnostics.isKeyProblem(RouterDiagnostics.lastError) ? .problem("Key was rejected")
+                : .done("Your API key")
         }
     }
 }
@@ -389,7 +394,9 @@ private struct Gesture: View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             HStack(spacing: 4) {
                 ForEach(Array(keys.enumerated()), id: \.offset) { index, key in
-                    if plus, index > 0 { Text("+").font(.system(size: 12)).foregroundStyle(Brand.clay) }
+                    if plus, index > 0 {
+                        Text("+").font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+                    }
                     Keycap(label: key)
                 }
             }
