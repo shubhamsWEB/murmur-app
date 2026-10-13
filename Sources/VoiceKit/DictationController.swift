@@ -498,7 +498,7 @@ extension DictationController {
         alert.accessoryView = field
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
+        Self.bringToFront(alert)
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return choice.hasKey }
         Keychain.set(account, field.stringValue)
@@ -515,10 +515,23 @@ extension DictationController {
         alert.informativeText = detail
         alert.addButton(withTitle: "Go Ahead")
         alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
+        Self.bringToFront(alert)
         let answer = alert.runModal() == .alertFirstButtonReturn
         log("command: \(title) → \(answer ? "yes" : "no")")
         return answer
+    }
+
+    /// Murmur lives in the menu bar, and macOS may ignore a background app asking to come forward: float the dialog
+    /// above every window and take the keyboard for it.
+    static func bringToFront(_ alert: NSAlert) {
+        alert.window.level = .floating
+        alert.window.collectionBehavior.insert(.canJoinAllSpaces)
+        alert.window.collectionBehavior.insert(.fullScreenAuxiliary)
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.center()
+        alert.window.orderFrontRegardless()
+        alert.window.makeKey()
     }
 
     /// Brings back the app you were in, then pastes there.

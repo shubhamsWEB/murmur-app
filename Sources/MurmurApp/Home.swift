@@ -39,6 +39,17 @@ final class HomeState {
     var section: HomeSection = .home
     /// The tab on the Folders page (General, Folders, Code, Storage).
     var foldersTab: SettingsTab = .folders
+    /// Bumped on every change made on a page, so the page redraws at once (most settings live outside SwiftUI).
+    var revision = 0
+
+    /// A binding to a setting kept elsewhere (UserDefaults, the Keychain, the dictation controller) that redraws the
+    /// page as soon as it changes.
+    func bind<T>(get: @escaping () -> T, set: @escaping (T) -> Void) -> Binding<T> {
+        Binding(get: { _ = self.revision; return get() }, set: { value in
+            set(value)
+            self.revision += 1
+        })
+    }
 }
 
 /// Murmur's one window: status and recent dictations, then each part's settings.
@@ -120,8 +131,8 @@ private struct HomeView: View {
         switch state.section {
         case .home: HomePage(app: app)
         case .search: SearchPage(app: app)
-        case .dictation: DictationPage(dictation: app.dictation)
-        case .commands: CommandsPage(dictation: app.dictation)
+        case .dictation: DictationPage(dictation: app.dictation, state: state)
+        case .commands: CommandsPage(dictation: app.dictation, state: state)
         case .folders: FoldersPage(app: app, state: state)
         case .about: AboutPage(app: app)
         }
@@ -317,13 +328,14 @@ private struct SearchPage: View {
 
 private struct DictationPage: View {
     let dictation: DictationController
+    let state: HomeState
     @ObservedObject private var history = DictationHistory.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PageTitle(title: "Dictation", subtitle: "How you talk to Murmur and what it hears.")
             Card("Key") {
-                Picker("Hold to talk", selection: Binding(get: { dictation.key }, set: { dictation.setKey($0) })) {
+                Picker("Hold to talk", selection: state.bind(get: { dictation.key }, set: { dictation.setKey($0) })) {
                     ForEach(DictationKeyMonitor.Key.allCases, id: \.self) { Text($0.display).tag($0) }
                 }
                 .pickerStyle(.radioGroup)
@@ -333,22 +345,22 @@ private struct DictationPage: View {
             }
             Card("Hearing") {
                 Picker("Speech model",
-                       selection: Binding(get: { dictation.speechModel }, set: { dictation.setModel($0) })) {
+                       selection: state.bind(get: { dictation.speechModel }, set: { dictation.setModel($0) })) {
                     ForEach(ParakeetTranscriber.Model.allCases, id: \.self) { Text($0.display).tag($0) }
                 }
                 Toggle("Whisper Mode: boost quiet speech",
-                       isOn: Binding(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
+                       isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 Button("Save Last Recording…") { dictation.saveLastRecording() }
             }
             Card("Commands") {
                 Toggle("Tell commands from dictation automatically",
-                       isOn: Binding(get: { dictation.detectCommands }, set: { dictation.detectCommands = $0 }))
+                       isOn: state.bind(get: { dictation.detectCommands }, set: { dictation.detectCommands = $0 }))
                 Text("Off: everything is typed unless you hold ⌃ with the key.")
                     .font(.system(size: 12)).foregroundStyle(Brand.clay)
             }
             Card("History") {
                 Toggle("Keep recent dictations on this Mac",
-                       isOn: Binding(get: { history.isEnabled }, set: { history.isEnabled = $0 }))
+                       isOn: state.bind(get: { history.isEnabled }, set: { history.isEnabled = $0 }))
                 Button("Clear History") { history.clear() }
                     .disabled(history.items.isEmpty)
             }
@@ -360,13 +372,14 @@ private struct DictationPage: View {
 
 private struct CommandsPage: View {
     let dictation: DictationController
+    let state: HomeState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PageTitle(title: "Commands & AI",
                       subtitle: "What picks the actions when you give a command. Speech always stays on your Mac.")
             Card("Router") {
-                Picker("Router", selection: Binding(get: { RouterChoice.current }, set: { choice in
+                Picker("Router", selection: state.bind(get: { RouterChoice.current }, set: { choice in
                     if choice != .local, !choice.hasKey, !dictation.askForKey(choice) { return }
                     RouterChoice.current = choice
                 })) {
@@ -379,9 +392,11 @@ private struct CommandsPage: View {
                 HStack {
                     Button(RouterChoice.anthropic.hasKey ? "Change Anthropic Key…" : "Add Anthropic Key…") {
                         dictation.askForKey(.anthropic)
+                        state.revision += 1
                     }
                     Button(RouterChoice.openai.hasKey ? "Change OpenAI Key…" : "Add OpenAI Key…") {
                         dictation.askForKey(.openai)
+                        state.revision += 1
                     }
                 }
                 Text("Cloud routers get the command's words, the front app's name and any selected text. Keys are kept "
@@ -389,7 +404,7 @@ private struct CommandsPage: View {
                     .font(.system(size: 12)).foregroundStyle(Brand.clay)
             }
             Card("Local model") {
-                Picker("Ollama model", selection: Binding(get: { dictation.localRouterModel },
+                Picker("Ollama model", selection: state.bind(get: { dictation.localRouterModel },
                                                           set: { dictation.localRouterModel = $0 })) {
                     ForEach(["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "llama3.2:3b"], id: \.self) { Text($0).tag($0) }
                 }
@@ -399,7 +414,7 @@ private struct CommandsPage: View {
             Card("Helpers") {
                 ForEach(AssistantCLI.allCases, id: \.self) { helper in
                     Toggle("Let Murmur ask \(helper.display)",
-                           isOn: Binding(get: { helper.isAllowed }, set: { helper.isAllowed = $0 }))
+                           isOn: state.bind(get: { helper.isAllowed }, set: { helper.isAllowed = $0 }))
                 }
                 Text("For harder steps Murmur can ask Claude Code or Codex, with your own login. They can't change files, "
                      + "and Murmur asks you before each one.")

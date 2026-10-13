@@ -52,12 +52,20 @@ public enum IntentClassifier {
         if forcedCommand { return Decision(intent: .command, reason: "⌃ held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
+        // "my photos from Goa are amazing" in a message is text; "find my photos…" is a search anywhere.
+        let verblessFileSearch = QuickCommands.parseAll(utterance)?.allSatisfy { $0.tool == "search_files" } == true
+            && cleaned.range(of: #"^(find|search|show|get|look|open)\b"#, options: .regularExpression) == nil
+        if verblessFileSearch, focus == .textField {
+            return Decision(intent: .dictation, reason: "file words, but you're in a text field")
+        }
         if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {
             return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")
         }
         if utterance.lowercased().range(of: #"^\s*(hey |ok |okay )?murmur\b"#, options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "addressed to Murmur")
         }
+        // Somewhere you can't type (the desktop, a Finder window, a player): whatever you said is for Murmur.
+        if focus == .notText { return Decision(intent: .command, reason: "nowhere to type") }
         let first = cleaned.split(separator: " ").first.map(String.init) ?? ""
         guard commandOpeners.contains(first) else { return Decision(intent: .dictation, reason: "reads as text") }
         if focus == .notText { return Decision(intent: .command, reason: "instruction, and nowhere to type") }

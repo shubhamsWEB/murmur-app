@@ -20,6 +20,9 @@ public enum QuickCommands {
     }
 
     private static let rules: [(String, (Match) -> Action?)] = [
+        // "my photos on the beach", "show me pictures of the dog", "the pdf about my lease", "screenshots from last week"
+        (#"^(?:show me |show |find |get |open |search for |look for )?(?:all )?(?:my |the |some )?((?:photos?|pictures?|pics|images?|screenshots?|videos?|clips?|recordings?|documents?|docs|pdfs?|files?|slides|presentations?|spreadsheets?|receipts?|invoices?)\b.*)$"#, { m in
+            Action(tool: "search_files", arguments: ["query": m[1]]) }),
         (#"^(?:find|search for|search) (?:my |the )?(?:file|files|document|documents|pdf|photo|picture)s?(?: about| called| named| with)? (.+)$"#, { m in
             Action(tool: "search_files", arguments: ["query": m[1]]) }),
         (#"^(?:search|google|look up)(?: the web| online| google)? for (.+)$"#, { m in
@@ -55,7 +58,7 @@ public enum QuickCommands {
     static let verbs: Set<String> = [
         "open", "launch", "start", "switch", "go", "visit", "show", "quit", "close", "exit", "kill", "hide",
         "search", "google", "look", "find", "set", "turn", "volume", "mute", "unmute", "louder", "quieter", "softer",
-        "brightness", "brighter", "dimmer", "lock", "take", "screenshot", "run",
+        "brightness", "brighter", "dimmer", "lock", "take", "screenshot", "run", "my", "photos", "pictures",
     ]
 
     /// All the actions in a chained command, in order, or nil unless every part is a known command.
