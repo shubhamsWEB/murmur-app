@@ -442,7 +442,7 @@ final class SearchPanelController {
 
     private func makeWindow() -> SearchPanelWindow {
         let window = SearchPanelWindow()
-        let hosting = NSHostingView(rootView: SearchPanelView(controller: self))
+        let hosting = NSHostingView(rootView: SearchPanelView(controller: self).murmurStyle())
         hosting.sizingOptions = []
         window.contentView = Self.background(containing: hosting)
         self.window = window

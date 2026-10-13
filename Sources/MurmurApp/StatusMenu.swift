@@ -120,7 +120,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let header = NSMenuItem()
-        let view = NSHostingView(rootView: MenuStatusView(model: model))
+        let view = NSHostingView(rootView: MenuStatusView(model: model).murmurStyle())
         view.frame.size = view.fittingSize
         header.view = view
         menu.addItem(header)

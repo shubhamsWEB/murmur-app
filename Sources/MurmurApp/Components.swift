@@ -2,21 +2,40 @@ import AppKit
 import MurmurIndex
 import SwiftUI
 
-/// The app's own colors, from its icon (moss tiles around an amber D, `Resources/AppIcon`): amber marks what Murmur
-/// finds (accent icons), moss is for brand moments (onboarding's glow and tiles); selection and controls follow the
-/// system accent color like any Mac app.
+/// Murmur's colors: warm paper and charcoal with a coral voice accent (the icon's waveform). Coral marks what's
+/// alive or yours to act on (the live dot, primary buttons, matches); everything else stays quiet.
 enum Brand {
-    static let amber = Color(red: 0.949, green: 0.635, blue: 0.165)    // #F2A22A, the D
-    static let ember = Color(red: 0.851, green: 0.482, blue: 0.102)    // #D97B1A, a deeper amber that holds up on white
-    static let moss = Color(red: 0.208, green: 0.400, blue: 0.322)     // #356652, the darkest tile
-    static let leaf = Color(red: 0.310, green: 0.502, blue: 0.345)     // #4F8058
-    static let sprout = Color(red: 0.635, green: 0.780, blue: 0.557)   // #A2C78E, a light tile
-    /// Accent icons: the D's amber.
-    static let gradient = LinearGradient(colors: [amber, ember], startPoint: .top, endPoint: .bottom)
-    /// Tiles with a white symbol on them, like the icon's.
-    static let tile = LinearGradient(colors: [leaf, moss], startPoint: .top, endPoint: .bottom)
+    /// The voice accent.
+    static let coral = Color(red: 1.000, green: 0.435, blue: 0.380)        // #FF6F61
+    /// Coral that holds its contrast as text and thin strokes on paper.
+    static let coralDeep = Color(red: 0.886, green: 0.333, blue: 0.290)    // #E2554A
+    /// Warm charcoal: shadows and ink on light surfaces.
+    static let ink = Color(red: 0.169, green: 0.145, blue: 0.137)          // #2B2523
+    /// Secondary text and quiet strokes.
+    static let clay = Color(red: 0.541, green: 0.482, blue: 0.451)         // #8A7B73
+    /// Soft fills behind coral things.
+    static let peach = Color(red: 1.000, green: 0.890, blue: 0.839)        // #FFE3D6
+    /// The page: cream in light mode, warm charcoal in dark.
+    static let paper = Color(nsColor: paperNS)
+    static let paperNS = NSColor(name: "MurmurPaper") { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.118, green: 0.106, blue: 0.102, alpha: 1)   // #1E1B1A
+            : NSColor(srgbRed: 0.984, green: 0.969, blue: 0.949, alpha: 1)   // #FBF7F2
+    }
+    /// Accent icons and highlights.
+    static let gradient = LinearGradient(colors: [coral, coralDeep], startPoint: .top, endPoint: .bottom)
+    /// Tiles with a white symbol on them.
+    static let tile = LinearGradient(colors: [coral, coralDeep], startPoint: .topLeading, endPoint: .bottomTrailing)
     /// The soft glow behind onboarding's steps.
-    static let wash = LinearGradient(colors: [sprout, leaf], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let wash = LinearGradient(colors: [peach, coral.opacity(0.35)], startPoint: .topLeading,
+                                     endPoint: .bottomTrailing)
+}
+
+extension View {
+    /// Murmur's type and control color: SF Rounded, coral controls.
+    func murmurStyle() -> some View {
+        fontDesign(.rounded).tint(Brand.coral)
+    }
 }
 
 /// ⇧ ⌘ Space as keycaps.

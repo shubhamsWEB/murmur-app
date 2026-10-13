@@ -17,7 +17,7 @@ final class DictationHUD {
     private var hideWork: DispatchWorkItem?
 
     private lazy var panel: NSPanel = {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 260, height: 44),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 48),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: true)
         panel.isOpaque = false
@@ -81,30 +81,38 @@ final class HUDState: ObservableObject {
     @Published var level: Float = 0
 }
 
+/// The listening pill: a charcoal capsule whose coral dot breathes with your voice.
 private struct HUDView: View {
     @ObservedObject var state: HUDState
 
     var body: some View {
         HStack(spacing: 10) {
             indicator
+                .frame(width: 22, height: 22)
             Text(label)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(Palette.cream)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .foregroundStyle(.white)
-        .background(Capsule().fill(Color.black.opacity(0.82)))
+        .padding(.leading, 10)
+        .padding(.trailing, 16)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Palette.ink.opacity(0.94))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.08)))
+                .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var label: String {
         switch state.mode {
-        case .listening(let handsFree): return handsFree ? "Listening · tap Fn to finish" : "Listening…"
-        case .command: return "Command · speak, then let go"
+        case .listening(let handsFree): return handsFree ? "Listening · tap Fn to finish" : "Listening"
+        case .command: return "Command · let go when done"
         case .working(let text): return text
-        case .transcribing: return "Transcribing…"
-        case .preparing: return "Preparing speech model…"
+        case .transcribing: return "Writing it down"
+        case .preparing: return "Getting the speech model ready"
         case .message(let text): return text
         }
     }
@@ -113,20 +121,23 @@ private struct HUDView: View {
     private var indicator: some View {
         switch state.mode {
         case .listening, .command:
-            HStack(spacing: 3) {
-                ForEach(0..<5, id: \.self) { i in
-                    let weights: [Float] = [0.5, 0.8, 1, 0.8, 0.5]
-                    Capsule()
-                        .fill(Color.white)
-                        .frame(width: 3, height: CGFloat(4 + 14 * min(1, state.level * weights[i])))
-                }
+            // The dot swells with your voice; the halo shows it's live even in silence.
+            let level = CGFloat(min(1, max(0, state.level)))
+            ZStack {
+                Circle()
+                    .fill(Palette.coral.opacity(0.25))
+                    .frame(width: 12 + 10 * level, height: 12 + 10 * level)
+                Circle()
+                    .fill(state.mode == .command ? Palette.cream : Palette.coral)
+                    .frame(width: 8 + 6 * level, height: 8 + 6 * level)
             }
-            .frame(height: 18)
-            .animation(.easeOut(duration: 0.08), value: state.level)
+            .animation(.easeOut(duration: 0.09), value: state.level)
         case .transcribing, .preparing, .working:
-            ProgressView().controlSize(.small).tint(.white)
+            ProgressView().controlSize(.small).tint(Palette.coral)
         case .message:
-            Image(systemName: "info.circle")
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(Palette.coral)
         }
     }
 }

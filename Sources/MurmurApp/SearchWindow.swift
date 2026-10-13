@@ -54,7 +54,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         if UserDefaults.standard.string(forKey: "defaultsSuite") == nil {
             window.setFrameAutosaveName("MurmurSearchWindow")
         }
-        window.contentView = NSHostingView(rootView: SearchWindowView(search: search, model: app.model, app: app))
+        window.contentView = NSHostingView(rootView: SearchWindowView(search: search, model: app.model, app: app).murmurStyle())
         if window.frame.origin == .zero { window.center() }
         self.window = window
         return window
@@ -470,7 +470,7 @@ struct SearchWindowView: View {
                     app.updates.checkNow()
                 } label: {
                     Label("Murmur \(version) is available", systemImage: "arrow.down.circle.fill")
-                        .foregroundStyle(Brand.ember)
+                        .foregroundStyle(Brand.coralDeep)
                 }
                 .buttonStyle(.plain)
                 .help("See what's new and update")
@@ -920,10 +920,10 @@ private struct BrandMark: View {
         Image(nsImage: NSApp.applicationIconImage)
             .resizable()
             .frame(width: 84, height: 84)
-            .shadow(color: Brand.moss.opacity(0.3), radius: 14, y: 6)
+            .shadow(color: Brand.ink.opacity(0.3), radius: 14, y: 6)
             .background {
                 Circle()
-                    .fill(RadialGradient(colors: [Brand.amber.opacity(0.22), Brand.leaf.opacity(0.08), .clear],
+                    .fill(RadialGradient(colors: [Brand.coral.opacity(0.22), Brand.coral.opacity(0.08), .clear],
                                          center: .center, startRadius: 0, endRadius: 150))
                     .frame(width: 300, height: 300)
                     .allowsHitTesting(false)
@@ -944,13 +944,13 @@ private struct ExampleChip: View {
             HStack(spacing: 6) {
                 Image(systemName: kind.symbol)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Brand.leaf)
+                    .foregroundStyle(Brand.coral)
                 Text(text)
             }
             .font(.system(size: 12.5))
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Brand.leaf.opacity(hovering ? 0.2 : 0.1)))
+            .background(Capsule().fill(Brand.coral.opacity(hovering ? 0.2 : 0.1)))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)

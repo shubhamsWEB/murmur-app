@@ -538,7 +538,7 @@ private struct CodeHint: View {
                                 .font(.system(size: 12, design: .monospaced))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 4)
-                                .background(Capsule().fill(Brand.leaf.opacity(0.12)))
+                                .background(Capsule().fill(Brand.coral.opacity(0.12)))
                         }
                         .buttonStyle(.plain)
                     }

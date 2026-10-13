@@ -52,7 +52,7 @@ final class AddFoldersController {
                                   pick: { [weak self] in self?.pick() },
                                   cancel: { [weak self] in self?.end() },
                                   add: { [weak self] in self?.add() })
-        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view.murmurStyle()))
         sheet.styleMask = [.titled]
         sheet.title = code ? "Code Folders" : "Add Folders"
         self.sheet = sheet

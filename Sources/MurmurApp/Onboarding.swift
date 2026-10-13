@@ -39,7 +39,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         state.close = { [weak self] in self?.close() }
-        window.contentView = NSHostingView(rootView: OnboardingView(state: state))
+        window.contentView = NSHostingView(rootView: OnboardingView(state: state).murmurStyle())
         window.center()
         self.window = window
         return window
@@ -353,7 +353,7 @@ private struct WelcomeStep: View {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .frame(width: 96, height: 96)
-                .shadow(color: Brand.moss.opacity(0.35), radius: 14, y: 6)
+                .shadow(color: Brand.ink.opacity(0.35), radius: 14, y: 6)
             Text("Murmur")
                 .font(.system(size: 30, weight: .bold))
                 .padding(.top, 10)

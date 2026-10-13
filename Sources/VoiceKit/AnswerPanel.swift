@@ -57,21 +57,27 @@ private struct AnswerView: View {
     let close: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             ScrollView {
                 Text(state.text)
-                    .font(.system(size: 13))
+                    .font(.system(size: 14, design: .rounded))
+                    .lineSpacing(3)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            HStack {
+            HStack(spacing: 8) {
+                Button("Close", action: close).keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Copy", action: copy)
                 Button("Paste", action: paste)
-                Button("Close", action: close).keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(.defaultAction)
+                    .tint(Palette.coral)
             }
+            .controlSize(.large)
         }
-        .padding(16)
-        .frame(minWidth: 360, minHeight: 160)
+        .padding(18)
+        .frame(minWidth: 380, minHeight: 170)
+        .background(Palette.paper)
+        .fontDesign(.rounded)
     }
 }

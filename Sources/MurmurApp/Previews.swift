@@ -451,7 +451,7 @@ struct CodeLines: View {
                         }
                         .padding(.vertical, 0.5)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(isFocus(offset) ? Brand.amber.opacity(0.16) : Color.clear)
+                        .background(isFocus(offset) ? Brand.coral.opacity(0.16) : Color.clear)
                         .id(offset)
                     }
                 }

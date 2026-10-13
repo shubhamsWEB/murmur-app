@@ -80,7 +80,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         tabs.tabStyle = .toolbar
         tabs.transitionOptions = [.allowUserInteraction]
         for tab in SettingsTab.allCases {
-            let controller = NSHostingController(rootView: SettingsPane(tab: tab, state: state))
+            let controller = NSHostingController(rootView: SettingsPane(tab: tab, state: state).murmurStyle())
             controller.sizingOptions = .preferredContentSize
             controller.title = tab.title   // the window takes the selected tab's title
             let item = NSTabViewItem(viewController: controller)
