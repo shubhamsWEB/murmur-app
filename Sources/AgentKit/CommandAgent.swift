@@ -54,7 +54,9 @@ public final class CommandAgent {
     }
 
     /// Runs one spoken command. `selection` is the text selected in the front app, if any.
-    public func run(_ utterance: String, frontApp: String?, selection: String?) async {
+    /// `explicit`: you clearly gave a command. When it's only the model's guess and the model just answers (no
+    /// action), it was dictation after all: the words are typed instead of shown as an answer.
+    public func run(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool = true) async {
         let started = Date()
         lastBrowser = nil
         if let actions = QuickCommands.parseAll(utterance) {
@@ -73,7 +75,7 @@ public final class CommandAgent {
             host.progress(summary)
             return
         }
-        await route(utterance, frontApp: frontApp, selection: selection)
+        await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
     }
 
@@ -84,7 +86,7 @@ public final class CommandAgent {
         Routers.current(localModel: routerModel)
     }
 
-    private func route(_ utterance: String, frontApp: String?, selection: String?) async {
+    private func route(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool) async {
         var context = "Front app: \(frontApp ?? "unknown")."
         if let selection, !selection.isEmpty {
             context += "\nSelected text:\n\"\"\"\n\(selection.prefix(4000))\n\"\"\""
@@ -118,6 +120,13 @@ public final class CommandAgent {
                     host.showAnswer(error.localizedDescription)
                     return
                 }
+            }
+            let onlyAnswers = reply.calls.allSatisfy { $0.name == "reply" || $0.name == "done" }
+            if !explicit, step == 0, onlyAnswers {
+                // A guessed command that only answers: it was dictation. Type the words.
+                host.log("command: guessed command only answered; typing the words instead")
+                host.insert(utterance)
+                return
             }
             if reply.calls.isEmpty {
                 // A model sometimes answers in plain text: treat that as the reply.

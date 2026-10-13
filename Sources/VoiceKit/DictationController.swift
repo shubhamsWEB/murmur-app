@@ -45,6 +45,8 @@ public final class DictationController {
     }
     private let answerPanel = AnswerPanel()
     private lazy var agent = CommandAgent(host: makeHost())
+    /// Murmur's log file (set by the app), for "Open Log".
+    public var logFile: URL?
     /// Opens Murmur's file search with a query (set by the app).
     public var onSearchFiles: ((String) -> Void)?
 
@@ -225,6 +227,9 @@ public final class DictationController {
             items.append(ClosureMenuItem("Paste Last Dictation") { [weak self] in self?.pasteLast() })
             items.append(ClosureMenuItem("Copy Last Dictation") { TextInserter.copy(lastText) })
         }
+        if let logFile {
+            items.append(ClosureMenuItem("Open Log") { NSWorkspace.shared.open(logFile) })
+        }
         if !lastSamples.isEmpty {
             items.append(ClosureMenuItem("Save Last Recording…") { [weak self] in self?.saveLastRecording() })
         }
@@ -357,7 +362,7 @@ public final class DictationController {
                 if decision.intent == .command {
                     log("command: \"\(text)\"")
                     hud.show(.working("“\(text.prefix(60))”"))
-                    await agent.run(text, frontApp: frontApp, selection: selection)
+                    await agent.run(text, frontApp: frontApp, selection: selection, explicit: decision.explicit)
                     if hud.isWorking { hud.hide() }
                     return
                 }

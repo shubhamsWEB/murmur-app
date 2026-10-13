@@ -74,6 +74,7 @@ final class AppController {
         updates.start()
 
         dictation.log = { line in log(line) }
+        dictation.logFile = model.settings.indexDirectory.appendingPathComponent("app.log")
         dictation.onSearchFiles = { [weak self] query in
             guard let self else { return }
             panel.show()

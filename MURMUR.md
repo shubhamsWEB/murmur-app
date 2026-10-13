@@ -22,11 +22,12 @@ Just hold **Fn** and speak: Murmur decides whether it's a command or text to typ
 Detect Commands Automatically, on by default). **Fn+⌃** always means a command.
 
 How it decides (typing is the default): ⌃ held → command; a known command like "open Slack" or "open chrome and
-search facebook" → command; starts with "Murmur…" → command; doesn't open like an instruction → typed; opens like an
-instruction ("send…", "summarise…", "what's…") → command if you're somewhere you can't type (Finder, desktop),
+search facebook" → command; starts with "Murmur…" → command; doesn't open like an instruction to the computer → typed (messages and questions like "send…" or "what's…" are
+typed unless you say "Murmur" first or hold ⌃); opens like one ("open…", "summarise…", "translate…") → command if you're somewhere you can't type (Finder, desktop),
 otherwise the router decides (typed if it can't answer in 2.5 s). Chrome and Electron apps often hide their text
 fields from Accessibility; that counts as "might be a text field", never as "nowhere to type".
-The log line `intent: … (reason)` says which rule decided.
+If a guessed command only produces an answer, the words are typed instead. Murmur's menu → Open Log shows each
+decision as `intent: … (reason)`.
 
 - **Instant, no model:** "open Slack", "quit Spotify", "hide Xcode", "volume 30", "volume up", "mute", "brightness
   down", "lock the screen", "take a screenshot", "search the web for …", "find my files about …", "open downloads",

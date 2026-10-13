@@ -7,7 +7,8 @@ import Foundation
 /// 2. A known command pattern ("open Slack", "open chrome and search facebook", "volume 30") → command.
 /// 3. Starts with "Murmur" ("Murmur, summarise this") → command.
 /// 4. Doesn't open like an instruction → typed.
-/// 5. Opens like an instruction ("send…", "summarise…", "what's…"):
+/// 5. Opens like an instruction to the computer ("open…", "summarise…", "translate…"); messages and questions
+///    ("send…", "what's…") don't count, so they're typed unless you say "Murmur" first or hold ⌃:
 ///    - the focus is somewhere you can't type (Finder, the desktop) → command;
 ///    - otherwise the router model decides, with a short time limit; no answer → typed.
 /// Whether a text field has the focus is often unknown (Chrome and Electron apps don't always say), so "unknown"
@@ -28,21 +29,22 @@ public enum IntentClassifier {
     public struct Decision: Sendable {
         public let intent: Intent
         public let reason: String
+        /// A clear signal (⌃, a known command, "Murmur…", nowhere to type), not the model's guess. A guessed command
+        /// that ends up only answering is typed instead (see `CommandAgent`).
+        public let explicit: Bool
 
-        public init(intent: Intent, reason: String) {
+        public init(intent: Intent, reason: String, explicit: Bool = true) {
             self.intent = intent
             self.reason = reason
+            self.explicit = explicit
         }
     }
 
     /// Words that start an instruction to the computer. Dictated prose rarely opens with these bare.
     static let commandOpeners: Set<String> = [
-        "open", "launch", "start", "quit", "close", "exit", "hide", "show", "switch", "go", "find", "search", "google",
-        "look", "play", "pause", "stop", "set", "turn", "mute", "unmute", "lock", "take", "run", "send", "reply",
-        "write", "draft", "compose", "summarize", "summarise", "translate", "rewrite", "rephrase", "shorten",
-        "make", "fix", "correct", "explain", "ask", "create", "schedule", "remind", "email", "message", "text",
-        "call", "copy", "paste", "select", "delete", "undo", "check", "tell", "what", "what's", "whats", "who",
-        "when", "where", "how", "why", "can", "could", "please",
+        "open", "launch", "start", "quit", "close", "exit", "hide", "switch", "find", "search", "google", "play",
+        "pause", "set", "turn", "mute", "unmute", "lock", "run", "summarize", "summarise", "translate", "rewrite",
+        "rephrase", "shorten", "schedule", "remind",
     ]
 
     public static func decide(_ utterance: String, forcedCommand: Bool, focus: Focus, frontApp: String?,
@@ -75,7 +77,7 @@ public enum IntentClassifier {
         let answer = await router.choose(system: system, user: user, field: "intent",
                                          options: ["command", "dictation"], timeout: 2.5)
         switch answer {
-        case "command": return Decision(intent: .command, reason: "\(router.name): command")
+        case "command": return Decision(intent: .command, reason: "\(router.name): command", explicit: false)
         case "dictation": return Decision(intent: .dictation, reason: "\(router.name): dictation")
         default:
             let why = RouterDiagnostics.lastError.map { ": \($0)" } ?? ""
