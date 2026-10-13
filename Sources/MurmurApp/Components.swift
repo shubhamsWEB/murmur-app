@@ -10,18 +10,14 @@ enum Brand {
     /// Coral that holds its contrast as text and thin strokes on paper.
     static let coralDeep = Color(red: 0.886, green: 0.333, blue: 0.290)    // #E2554A
     /// Warm charcoal: shadows and ink on light surfaces.
-    static let ink = Color(red: 0.169, green: 0.145, blue: 0.137)          // #2B2523
+    static let ink = Color(red: 0.133, green: 0.118, blue: 0.110)          // #221E1C
     /// Secondary text and quiet strokes.
-    static let clay = Color(red: 0.541, green: 0.482, blue: 0.451)         // #8A7B73
+    static let clay = Theme.ink2                                            // #6B5F58, dark-mode aware
     /// Soft fills behind coral things.
     static let peach = Color(red: 1.000, green: 0.890, blue: 0.839)        // #FFE3D6
     /// The page: cream in light mode, warm charcoal in dark.
-    static let paper = Color(nsColor: paperNS)
-    static let paperNS = NSColor(name: "MurmurPaper") { appearance in
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.118, green: 0.106, blue: 0.102, alpha: 1)   // #1E1B1A
-            : NSColor(srgbRed: 0.984, green: 0.969, blue: 0.949, alpha: 1)   // #FBF7F2
-    }
+    static let paper = Theme.page
+    static let paperNS = Theme.pageNS
     /// Accent icons and highlights.
     static let gradient = LinearGradient(colors: [coral, coralDeep], startPoint: .top, endPoint: .bottom)
     /// Tiles with a white symbol on them.

@@ -331,7 +331,7 @@ struct SearchWindowView: View {
                         .padding(16)
                     }
                     .frame(width: 324)
-                    .background(Color.primary.opacity(0.025))
+                    .background(Theme.card)
                 }
             }
             Divider()
@@ -348,7 +348,7 @@ struct SearchWindowView: View {
                 HStack(spacing: 9) {
                     Image(systemName: search.isCode ? FileKind.code.symbol : "magnifyingglass")
                         .font(.system(size: search.isCode ? 15 : 17, weight: .semibold))
-                        .foregroundStyle(Brand.gradient)
+                        .foregroundStyle(Theme.accentText)
                         .frame(width: 22)
                     SearchField(text: $search.query, fontSize: 18, placeholder: placeholder,
                                 onMake: { search.field = $0 }, onFocus: { fieldFocused = $0 })
@@ -363,11 +363,12 @@ struct SearchWindowView: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .frame(height: 38)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
-                // Where typing goes, as a Mac text field shows it: a ring in the accent color while it has the cursor.
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Brand.coral.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
+                .frame(height: 44)
+                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Theme.card))
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(fieldFocused ? Theme.accent.opacity(0.8) : Theme.line))
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.accentRing)
+                    .padding(-3).opacity(fieldFocused ? 1 : 0))
                 .animation(.easeOut(duration: 0.15), value: fieldFocused)
                 Button {
                     search.showsPreview.toggle()
@@ -382,7 +383,8 @@ struct SearchWindowView: View {
             .frame(height: 52)
             KindFilters(search: search, showsCode: model.hasCode)
         }
-        .padding(.horizontal, 14)
+        .padding(.top, 30)   // under the window's title bar
+        .padding(.horizontal, 20)
         .padding(.bottom, 10)
     }
 
@@ -504,11 +506,11 @@ private struct KindFilters: View {
                 }
             }
             .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(selected ? AnyShapeStyle(Brand.coral)
-                                                : AnyShapeStyle(Color.primary.opacity(0.06))))
+            .foregroundStyle(selected ? Theme.onPrimary : Theme.ink)
+            .padding(.horizontal, 11)
+            .frame(height: 28)
+            .background(Capsule().fill(selected ? Theme.primary : Theme.card))
+            .overlay(Capsule().strokeBorder(selected ? Theme.primary : Theme.control))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)

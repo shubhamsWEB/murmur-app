@@ -69,6 +69,26 @@ public final class DictationHistory: ObservableObject {
             .reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
     }
 
+    private var thisWeek: [Item] {
+        let start = Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start
+            ?? Date().addingTimeInterval(-7 * 86_400)
+        return items.filter { $0.date >= start }
+    }
+
+    /// Words dictated since the start of this week.
+    public var wordsThisWeek: Int {
+        thisWeek.filter { $0.kind == .dictation }.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+    }
+
+    /// Commands carried out since the start of this week.
+    public var commandsThisWeek: Int { thisWeek.filter { $0.kind == .command }.count }
+
+    /// Minutes saved by speaking (about 150 words a minute) instead of typing (about 40).
+    public var minutesSavedThisWeek: Int {
+        let words = Double(wordsThisWeek)
+        return Int((words / 40 - words / 150).rounded())
+    }
+
     private func save() {
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? data.write(to: file, options: .atomic)

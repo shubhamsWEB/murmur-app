@@ -29,6 +29,9 @@ final class AnswerPanel {
                             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
                             backing: .buffered, defer: true)
         panel.title = "Murmur"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.styleMask.insert(.fullSizeContentView)
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
@@ -57,26 +60,64 @@ private struct AnswerView: View {
     let close: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Palette.ink)
+                    .frame(width: 22, height: 22)
+                    .overlay {
+                        HStack(spacing: 2) {
+                            ForEach(Array([6.0, 11, 7].enumerated()), id: \.offset) { _, height in
+                                Capsule().fill(Palette.coral).frame(width: 2, height: height)
+                            }
+                        }
+                    }
+                Text("Murmur").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.text)
+                Spacer()
+                Text("Esc to close").font(.system(size: 11.5)).foregroundStyle(Palette.clay)
+            }
+            .padding(.leading, 72)   // beside the window buttons
+            .padding(.trailing, 16)
+            .frame(height: 40)
+            Rectangle().fill(Palette.line).frame(height: 1)
             ScrollView {
                 Text(state.text)
                     .font(.system(size: 14))
-                    .lineSpacing(3)
+                    .foregroundStyle(Palette.text)
+                    .lineSpacing(3.5)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
             }
+            Rectangle().fill(Palette.line).frame(height: 1)
             HStack(spacing: 8) {
-                Button("Close", action: close).keyboardShortcut(.cancelAction)
+                Button("Close", action: close)
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Palette.clay)
                 Spacer()
-                Button("Copy", action: copy)
-                Button("Paste", action: paste)
-                    .keyboardShortcut(.defaultAction)
-                    .tint(Palette.coral)
+                Button(action: copy) {
+                    Text("Copy").font(.system(size: 12.5, weight: .medium)).foregroundStyle(Palette.text)
+                        .padding(.horizontal, 12).frame(height: 30)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.card))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.control))
+                }
+                .buttonStyle(.plain)
+                Button(action: paste) {
+                    Text("Paste ↩").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Palette.onPrimary)
+                        .padding(.horizontal, 14).frame(height: 30)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.text))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
             }
-            .controlSize(.large)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Palette.card)
         }
-        .padding(18)
-        .frame(minWidth: 380, minHeight: 170)
+        .frame(minWidth: 380, minHeight: 190)
         .background(Palette.paper)
+        .ignoresSafeArea(.container, edges: .top)
     }
 }
