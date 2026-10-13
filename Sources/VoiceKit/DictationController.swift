@@ -38,6 +38,13 @@ public final class DictationController {
 
     private static let keyDefault = "dictationKey"
     private static let modelDefault = "speechModel"
+    private static let whisperDefault = "whisperMode"
+
+    /// Whisper Mode: boost quiet speech up to 32 dB instead of 20 dB, for whispering or speaking softly.
+    public var whisperMode: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.whisperDefault) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.whisperDefault) }
+    }
 
     public init() {
         let model = UserDefaults.standard.string(forKey: Self.modelDefault).flatMap(ParakeetTranscriber.Model.init)
@@ -136,6 +143,11 @@ public final class DictationController {
         let modelItem = NSMenuItem(title: "Speech Model", action: nil, keyEquivalent: "")
         modelItem.submenu = modelMenu
         items.append(modelItem)
+        items.append(ClosureMenuItem("Whisper Mode", checked: whisperMode) { [weak self] in
+            guard let self else { return }
+            whisperMode.toggle()
+            log("dictation: whisper mode \(whisperMode ? "on" : "off")")
+        })
         if let lastText {
             items.append(ClosureMenuItem("Paste Last Dictation") { [weak self] in self?.pasteLast() })
             items.append(ClosureMenuItem("Copy Last Dictation") { TextInserter.copy(lastText) })
@@ -210,13 +222,17 @@ public final class DictationController {
     }
 
     private func finish() {
-        let samples = recorder.stop()
-        guard samples.count >= minimumSamples else {
+        let recorded = recorder.stop()
+        guard recorded.count >= minimumSamples else {
             phase = .idle
             hud.hide()
             return
         }
         phase = .transcribing
+        let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 32 : 20)
+        log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, gain +%.0f dB%@",
+                   leveled.speechDB, leveled.noiseDB, leveled.gainDB, whisperMode ? " (whisper mode)" : ""))
+        let samples = leveled.samples
         lastSamples = samples
         let transcriber = transcriber
         Task { [weak self] in

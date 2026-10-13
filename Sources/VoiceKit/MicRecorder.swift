@@ -80,7 +80,9 @@ public final class MicRecorder: @unchecked Sendable {
         lock.lock()
         samples.append(contentsOf: mono)
         lock.unlock()
-        onLevel?(min(1, rms * 8))
+        // Log scale from −60 dBFS (silence) to −10 dBFS (loud), so a whisper still moves the meter.
+        let db = 20 * log10(max(rms, 1e-6))
+        onLevel?(min(1, max(0, (db + 60) / 50)))
     }
 }
 
