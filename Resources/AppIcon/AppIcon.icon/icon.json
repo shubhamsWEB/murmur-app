@@ -6,11 +6,15 @@
     {
       "layers": [
         {
-          "image-name": "wave.svg",
-          "name": "wave"
+          "image-name": "wing.svg",
+          "name": "wing"
+        },
+        {
+          "image-name": "bird.svg",
+          "name": "bird"
         }
       ],
-      "name": "Wave"
+      "name": "Starling"
     }
   ],
   "supported-platforms": {

@@ -88,7 +88,7 @@ private struct HUDView: View {
     var body: some View {
         HStack(spacing: 10) {
             indicator
-                .frame(width: 22, height: 22)
+                .frame(width: 26, height: 26)
             Text(label)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Palette.cream)
@@ -121,15 +121,14 @@ private struct HUDView: View {
     private var indicator: some View {
         switch state.mode {
         case .listening, .command:
-            // The dot swells with your voice; the halo shows it's live even in silence.
+            // The starling swells with your voice; the halo shows it's live even in silence.
             let level = CGFloat(min(1, max(0, state.level)))
             ZStack {
                 Circle()
-                    .fill(Palette.coral.opacity(0.25))
-                    .frame(width: 12 + 10 * level, height: 12 + 10 * level)
-                Circle()
-                    .fill(state.mode == .command ? Palette.cream : Palette.coral)
-                    .frame(width: 8 + 6 * level, height: 8 + 6 * level)
+                    .fill(Palette.coral.opacity(0.22))
+                    .frame(width: 14 + 10 * level, height: 14 + 10 * level)
+                StarlingMark(state.mode == .command ? .mono(Palette.cream) : .color, listening: level > 0.15)
+                    .frame(width: 20 + 6 * level, height: 20 + 6 * level)
             }
             .animation(.easeOut(duration: 0.09), value: state.level)
         case .transcribing, .preparing, .working:

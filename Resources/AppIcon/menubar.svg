@@ -1,4 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-<rect x="4.5" y="4.5" width="55" height="55" rx="12" fill="none" stroke="#000" stroke-width="4.5"/>
-<rect x="20" y="25" width="6" height="14" rx="3"/><rect x="29" y="18" width="6" height="28" rx="3"/><rect x="38" y="23" width="6" height="18" rx="3"/>
+<!-- The menubar Starling, a template image: the bird's silhouette, its eye and wing-wave cut out. Drawn in code by
+     StatusIcon (Sources/MurmurApp/StatusMenu.swift) from this geometry: the 100-unit icon grid × 0.72. -->
+<g transform="translate(-4.4 -8.9) scale(0.72)">
+  <path d="M30 58 L12 47 L16 67 Z"/><ellipse cx="48" cy="60" rx="24" ry="19"/><circle cx="66" cy="42" r="13"/>
+  <path d="M78 40.5 L89 44 L78 47.5 Z"/>
+  <circle cx="69" cy="39" r="3" fill="#fff"/>
+  <path d="M31 60 q4.5 -8 9 0 t9 0 t9 0" stroke="#fff" stroke-width="5" stroke-linecap="round" fill="none"/>
+</g>
 </svg>

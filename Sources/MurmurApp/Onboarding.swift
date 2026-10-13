@@ -408,8 +408,8 @@ private struct StepArt: View {
             BrandTile(size: 88)
         case .voice, .ready:
             HStack(spacing: 12) {
-                Circle().fill(Theme.accent).frame(width: 28, height: 28)
-                    .background(Circle().fill(Theme.accent.opacity(0.25)).padding(-6))
+                StarlingMark(.color, listening: step == .voice).frame(width: 30, height: 30)
+                    .background(Circle().fill(Theme.accent.opacity(0.22)).padding(-5))
                 HStack(spacing: 3) {
                     ForEach(Array([8.0, 16, 22, 12, 18, 9].enumerated()), id: \.offset) { _, height in
                         Capsule().fill(cream).frame(width: 3, height: height)

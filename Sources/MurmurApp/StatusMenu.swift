@@ -2,51 +2,42 @@ import AppKit
 import SwiftUI
 import VoiceKit
 
-/// The menubar icon: the app icon's mark, a boxed waveform (`Resources/AppIcon/menubar.svg`, drawn here from the same geometry
-/// so it's sharp at any scale). While the model downloads or files index, a progress ring takes the box's place; while
-/// indexing is paused, two bars take the waveform's (at full strength: a dimmed icon reads as "off", and search still works).
+/// The menubar icon: the starling (`Resources/AppIcon/menubar.svg`), a template image drawn here from the app icon's
+/// geometry so it's sharp at any scale. While the model downloads or files index, a progress ring circles a smaller
+/// bird; while indexing is paused the bird is drawn faint (search still works).
 enum StatusIcon {
-    /// `update`: a newer version is waiting, a dot at the box's top right.
+    /// `update`: a newer version is waiting, a dot at the top left.
     static func image(progress: Double?, paused: Bool = false, update: Bool = false) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
-            // The SVG's 64-unit grid, y down, so angles grow clockwise on screen.
+            // A 64-unit grid, y down, so angles grow clockwise on screen.
             let grid = NSAffineTransform()
             grid.scale(by: rect.width / 64)
             grid.concat()
             if let progress {
                 let center = NSPoint(x: 32, y: 32)
                 let track = NSBezierPath()
-                track.appendArc(withCenter: center, radius: 27, startAngle: 0, endAngle: 360)
-                track.lineWidth = 5.3
+                track.appendArc(withCenter: center, radius: 28, startAngle: 0, endAngle: 360)
+                track.lineWidth = 5
                 NSColor.black.withAlphaComponent(0.25).setStroke()
                 track.stroke()
                 let arc = NSBezierPath()
-                arc.appendArc(withCenter: center, radius: 27, startAngle: -90,
+                arc.appendArc(withCenter: center, radius: 28, startAngle: -90,
                               endAngle: -90 + 360 * max(0.03, min(1, progress)), clockwise: false)
-                arc.lineWidth = 5.3
+                arc.lineWidth = 5
                 arc.lineCapStyle = .round
                 NSColor.black.setStroke()
                 arc.stroke()
+                drawStarling(scale: 0.5, center: center, alpha: 1)
             } else {
-                let box = NSBezierPath(roundedRect: NSRect(x: 4.5, y: 4.5, width: 55, height: 55), xRadius: 12, yRadius: 12)
-                box.lineWidth = 4.5
-                NSColor.black.setStroke()
-                box.stroke()
-            }
-            NSColor.black.setFill()
-            if paused, progress == nil {
-                for x in [23.5, 34.5] {
-                    NSBezierPath(roundedRect: NSRect(x: x, y: 21, width: 6, height: 22), xRadius: 1.8, yRadius: 1.8).fill()
-                }
-            } else {
-                letter.fill()
+                drawStarling(scale: 0.74, center: NSPoint(x: 32, y: 32), alpha: paused ? 0.45 : 1)
             }
             if update {
                 // Cut a gap around it, so it reads as a dot on the mark and not part of it.
                 NSGraphicsContext.current?.compositingOperation = .clear
-                NSBezierPath(ovalIn: NSRect(x: 41, y: -1, width: 24, height: 24)).fill()
+                NSBezierPath(ovalIn: NSRect(x: -2, y: -2, width: 24, height: 24)).fill()
                 NSGraphicsContext.current?.compositingOperation = .sourceOver
-                NSBezierPath(ovalIn: NSRect(x: 46, y: 4, width: 14, height: 14)).fill()
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: NSRect(x: 2, y: 2, width: 14, height: 14)).fill()
             }
             return true
         }
@@ -55,14 +46,38 @@ enum StatusIcon {
         return image
     }
 
-    /// Murmur's mark: three rounded bars of a voice waveform (`Resources/AppIcon/menubar.svg`).
-    private static var letter: NSBezierPath {
-        let wave = NSBezierPath()
-        for (x, height) in [(20.0, 14.0), (29.0, 28.0), (38.0, 18.0)] {
-            wave.append(NSBezierPath(roundedRect: NSRect(x: x, y: 32 - height / 2, width: 6, height: height),
-                                     xRadius: 3, yRadius: 3))
+    /// The bird from the icon's 100-unit grid, centred on `center`: silhouette filled, eye and wing-wave cut out.
+    private static func drawStarling(scale: CGFloat, center: NSPoint, alpha: CGFloat) {
+        let place = AffineTransform(translationByX: center.x - 50.5 * scale, byY: center.y - 56.75 * scale)
+        func placed(_ path: NSBezierPath) -> NSBezierPath {
+            var transform = AffineTransform(scaleByX: scale, byY: scale)
+            transform.append(place)
+            path.transform(using: transform)
+            return path
         }
-        return wave
+        let tail = NSBezierPath()
+        tail.move(to: NSPoint(x: 30, y: 58)); tail.line(to: NSPoint(x: 12, y: 47)); tail.line(to: NSPoint(x: 16, y: 67))
+        tail.close()
+        let beak = NSBezierPath()
+        beak.move(to: NSPoint(x: 78, y: 40.5)); beak.line(to: NSPoint(x: 89, y: 44)); beak.line(to: NSPoint(x: 78, y: 47.5))
+        beak.close()
+        let silhouette = [tail, NSBezierPath(ovalIn: NSRect(x: 24, y: 41, width: 48, height: 38)),
+                          NSBezierPath(ovalIn: NSRect(x: 53, y: 29, width: 26, height: 26)), beak]
+        NSColor.black.withAlphaComponent(alpha).setFill()
+        for shape in silhouette { placed(shape).fill() }
+
+        NSGraphicsContext.current?.compositingOperation = .clear
+        placed(NSBezierPath(ovalIn: NSRect(x: 66, y: 36, width: 6, height: 6))).fill()
+        let wing = NSBezierPath()
+        wing.move(to: NSPoint(x: 31, y: 60))
+        wing.curve(to: NSPoint(x: 40, y: 60), controlPoint: NSPoint(x: 35.5, y: 52))
+        wing.curve(to: NSPoint(x: 49, y: 60), controlPoint: NSPoint(x: 44.5, y: 68))
+        wing.curve(to: NSPoint(x: 58, y: 60), controlPoint: NSPoint(x: 53.5, y: 52))
+        let cut = placed(wing)
+        cut.lineWidth = 5.5 * scale
+        cut.lineCapStyle = .round
+        cut.stroke()
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
     }
 }
 

@@ -63,15 +63,9 @@ private struct AnswerView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Palette.ink)
+                    .fill(Color(red: 1.0, green: 0.945, blue: 0.910))
                     .frame(width: 22, height: 22)
-                    .overlay {
-                        HStack(spacing: 2) {
-                            ForEach(Array([6.0, 11, 7].enumerated()), id: \.offset) { _, height in
-                                Capsule().fill(Palette.coral).frame(width: 2, height: height)
-                            }
-                        }
-                    }
+                    .overlay { StarlingMark(.color).padding(2) }
                 Text("Murmur").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.text)
                 Spacer()
                 Text("Esc to close").font(.system(size: 11.5)).foregroundStyle(Palette.clay)

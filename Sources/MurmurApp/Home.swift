@@ -155,21 +155,17 @@ private struct HomeView: View {
     }
 }
 
-/// Murmur's charcoal tile with the coral wave.
+/// Murmur's tile: the starling on warm cream, as on the app icon.
 struct BrandTile: View {
     var size: CGFloat = 30
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-            .fill(Color(red: 0.133, green: 0.118, blue: 0.110))
+        RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+            .fill(Color(red: 1.0, green: 0.945, blue: 0.910))
             .frame(width: size, height: size)
-            .overlay {
-                HStack(spacing: size * 0.08) {
-                    ForEach(Array([0.3, 0.55, 0.85, 0.55, 0.3].enumerated()), id: \.offset) { _, height in
-                        Capsule().fill(Theme.accent).frame(width: size * 0.08, height: size * height * 0.62)
-                    }
-                }
-            }
+            .overlay { StarlingMark(.color, legs: size >= 60).padding(size * 0.1) }
+            .overlay(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.06)))
             .accessibilityHidden(true)
     }
 }
