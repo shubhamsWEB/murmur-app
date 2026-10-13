@@ -1081,12 +1081,9 @@ private struct FoldersPage: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            SettingsPane(tab: state.foldersTab, state: app.settingsWindow.state)
+            SettingsPane(tab: state.foldersTab, state: app.settingsWindow.state, embedded: true)
                 .task(id: state.foldersTab) { await app.settingsWindow.state.refresh() }
-                .padding(18)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
-                .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.line))
         }
     }
 }

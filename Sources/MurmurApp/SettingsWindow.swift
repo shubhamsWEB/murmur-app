@@ -174,20 +174,37 @@ final class SettingsState {
 struct SettingsPane: View {
     let tab: SettingsTab
     let state: SettingsState
+    /// Inside Murmur's window (the Folders page), which scrolls and sets the width.
+    var embedded = false
     /// The content's own height. The window is that tall up to what the screen has room for, and scrolls past it (a
     /// long list of folders ran it off the screen, Add Folders… with it).
     @State private var height: CGFloat?
 
+    @ViewBuilder
+    private var content: some View {
+        switch tab {
+        case .general: GeneralSettings(state: state)
+        case .folders: FolderSettings(state: state)
+        case .code: CodeSettings(state: state)
+        case .storage: StorageSettings(state: state)
+        }
+    }
+
     var body: some View {
+        if embedded {
+            content
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(-20)   // the grouped form's own margin; the page has one
+                .tint(Theme.primary)
+        } else {
+            window
+        }
+    }
+
+    private var window: some View {
         ScrollView(.vertical) {
-            Group {
-                switch tab {
-                case .general: GeneralSettings(state: state)
-                case .folders: FolderSettings(state: state)
-                case .code: CodeSettings(state: state)
-                case .storage: StorageSettings(state: state)
-                }
-            }
+            content
             .frame(width: 580)
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
@@ -258,6 +275,7 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .scrollDisabled(true)
     }
 }
@@ -378,6 +396,7 @@ private struct FolderSettings: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .scrollDisabled(true)
         .onChange(of: state.model.status) { state.statusChanged() }
         .confirmationDialog(removalTitle, isPresented: Binding(get: { removing != nil },
@@ -599,6 +618,7 @@ private struct StorageSettings: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .scrollDisabled(true)
     }
 }
@@ -681,6 +701,7 @@ private struct CodeSettings: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .scrollDisabled(true)
         .onChange(of: state.model.status) { state.statusChanged() }
         .confirmationDialog("Turn off code search?", isPresented: $turningOff) {
