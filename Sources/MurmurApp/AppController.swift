@@ -331,7 +331,8 @@ final class AppController {
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         // Activation can land a moment later than the window: make sure it ends up key and in front.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
             if !window.isKeyWindow {
                 bringAppToFront()
                 window.orderFrontRegardless()
