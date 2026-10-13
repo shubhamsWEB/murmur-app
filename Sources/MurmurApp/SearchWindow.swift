@@ -3,6 +3,7 @@ import MurmurIndex
 import Observation
 import Quartz
 import SwiftUI
+import VoiceKit
 
 /// Search inside Murmur's window (its Search page): a big field, kind filters with counts, the results as a grid of
 /// pictures, and the selected one in a preview pane with why it matched. There's no separate search window any more;
