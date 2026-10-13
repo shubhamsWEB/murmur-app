@@ -1,7 +1,9 @@
 import AppKit
+import AVFoundation
 import MurmurIndex
 import Observation
 import SwiftUI
+import VoiceKit
 
 /// First launch, in four steps: what Murmur does, which folders to search (with how long the first pass takes), the
 /// hotkey (try it), and done; a fifth, code search, when there are folders with code on the Mac (it stays off unless
@@ -60,7 +62,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 @Observable
 final class OnboardingState {
     enum Step: Int, CaseIterable {
-        case welcome, folders, code, shortcut, ready
+        case welcome, voice, folders, code, shortcut, ready
     }
 
     private(set) var step = Step.welcome
@@ -137,6 +139,8 @@ final class OnboardingState {
         switch step {
         case .welcome:
             download.start()   // the go-ahead for the one download
+            go(to: .voice)
+        case .voice:
             go(to: .folders)
         case .folders:
             // Indexing starts now (file names first; meaning once the model is in), while you set up the rest.
@@ -224,6 +228,7 @@ struct OnboardingView: View {
             Group {
                 switch state.step {
                 case .welcome: WelcomeStep()
+                case .voice: VoiceStep(state: state)
                 case .folders: FoldersStep(state: state)
                 case .code: CodeStep(state: state)
                 case .shortcut: ShortcutStep(state: state)
@@ -238,7 +243,7 @@ struct OnboardingView: View {
         }
         .frame(width: Self.size.width, height: Self.size.height)
         .background(alignment: .top) {
-            // A soft moss glow behind the top of each step, from the icon's colors.
+            // A soft warm glow behind the top of each step, from the icon's colors.
             Brand.wash
                 .frame(height: 260)
                 .mask(LinearGradient(colors: [.black.opacity(0.10), .clear], startPoint: .top, endPoint: .bottom))
@@ -274,6 +279,7 @@ struct OnboardingView: View {
     private var continueTitle: String {
         switch state.step {
         case .welcome: "Get Started"
+        case .voice: "Continue"
         case .folders: "Continue"
         case .code: "Continue"
         case .shortcut: "Continue"
@@ -560,13 +566,88 @@ private struct CodeStep: View {
     }
 }
 
+/// Permissions and a first dictation: hold Fn, say something, see it come back.
+private struct VoiceStep: View {
+    let state: OnboardingState
+    @ObservedObject private var history = DictationHistory.shared
+    @State private var appeared = Date()
+
+    var body: some View {
+        // Permissions are granted in System Settings, outside the app: look again every second.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let dictation = state.app.dictation
+            let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+            let heard = history.items.first { $0.date > appeared }
+            VStack(spacing: 0) {
+                StepTitle(title: "Talk to your Mac",
+                          subtitle: "Hold Fn, speak, and let go. Murmur types it wherever your cursor is.")
+                VStack(alignment: .leading, spacing: 16) {
+                    PermissionRow(ok: mic, title: "Microphone", detail: "So Murmur can hear you",
+                                  button: "Allow…") { dictation.openMicrophoneSettings() }
+                    PermissionRow(ok: dictation.canPaste && dictation.isListeningForKey, title: "Accessibility",
+                                  detail: "So Murmur notices the Fn key and can type into other apps",
+                                  button: "Open Settings…") { dictation.openAccessibilitySettings() }
+                    PermissionRow(ok: dictation.modelStatus.contains("ready"), title: "Speech model",
+                                  detail: dictation.modelStatus, button: nil) {}
+                }
+                .padding(18)
+                .frame(maxWidth: 460, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.04)))
+                .padding(.top, 28)
+                Group {
+                    if let heard {
+                        Label("Heard: “\(heard.text)”", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Brand.coralDeep)
+                    } else {
+                        Text("Try it now: hold Fn and say “Hello, Murmur”.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.system(size: 14, weight: .medium))
+                .lineLimit(2)
+                .padding(.top, 22)
+                Text("If Fn opens the emoji picker, set System Settings → Keyboard → “Press 🌐 key to” → Do Nothing.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                    .padding(.top, 14)
+            }
+        }
+    }
+}
+
+private struct PermissionRow: View {
+    let ok: Bool
+    let title: String
+    let detail: String
+    let button: String?
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
+                .font(.system(size: 17))
+                .foregroundStyle(ok ? Brand.coral : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14, weight: .medium))
+                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            if let button, !ok {
+                Button(button, action: action)
+            }
+        }
+    }
+}
+
 private struct ShortcutStep: View {
     let state: OnboardingState
 
     var body: some View {
         VStack(spacing: 0) {
-            StepTitle(title: "Open Murmur from anywhere",
-                      subtitle: "Press the shortcut in any app, describe what you're looking for, and press Return.")
+            StepTitle(title: "Search from anywhere",
+                      subtitle: "Press the shortcut in any app, describe the file, and press Return. Or just ask out loud.")
             ShortcutRecorder(combo: state.model.hotkey, apply: { state.app.setHotkey($0) },
                              listening: { state.app.hotkeyRecording($0) }, capSize: 20)
                 .padding(.top, 34)
@@ -583,9 +664,8 @@ private struct ShortcutStep: View {
             .padding(.top, 16)
             .animation(.default, value: state.hotkeyWorked)
             VStack(alignment: .leading, spacing: 9) {
-                Text("IN THE SEARCH PANEL")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.6)
+                Text("In the search panel")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 KeyTip(caps: ["↩"], text: "Open the file")
                 KeyTip(caps: ["⌘", "↩"], text: "Show it in Finder")

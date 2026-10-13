@@ -120,7 +120,7 @@ private struct HomeView: View {
         case .dictation: DictationPage(dictation: app.dictation)
         case .commands: CommandsPage(dictation: app.dictation)
         case .folders: FoldersPage(app: app)
-        case .about: AboutPage()
+        case .about: AboutPage(app: app)
         }
     }
 }
@@ -436,6 +436,8 @@ private struct FoldersPage: View {
 // MARK: - About
 
 private struct AboutPage: View {
+    let app: AppController
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 16) {
@@ -463,6 +465,11 @@ private struct AboutPage: View {
                         NSWorkspace.shared.open(url)
                     }
                 }
+            }
+            Card("Setup") {
+                Button("Run Setup Again…") { app.showOnboarding() }
+                Text("Walks through permissions, the Fn key, the speech model and the folders to search.")
+                    .font(.system(size: 12)).foregroundStyle(Brand.clay)
             }
         }
     }
