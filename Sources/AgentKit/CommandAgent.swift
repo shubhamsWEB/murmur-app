@@ -42,6 +42,12 @@ public final class CommandAgent {
 
     private let host: CommandHost
     private let maxSteps = 6
+    /// A browser opened earlier in this command: web searches and addresses open there.
+    private var lastBrowser: AppCatalog.App?
+    /// Tools whose result the model needs to read before it can go on. After any other step, the command is done.
+    private static let informationTools: Set<String> = [
+        "find_apps", "list_running_apps", "list_shortcuts", "ask_claude", "ask_codex",
+    ]
 
     public init(host: CommandHost) {
         self.host = host
@@ -50,12 +56,21 @@ public final class CommandAgent {
     /// Runs one spoken command. `selection` is the text selected in the front app, if any.
     public func run(_ utterance: String, frontApp: String?, selection: String?) async {
         let started = Date()
-        if let quick = QuickCommands.parse(utterance) {
-            host.log("command: quick path → \(quick.tool) \(quick.arguments)")
-            let arguments = quick.arguments.mapValues { JSONValue.string($0) }
-            let outcome = await execute(quick.tool, arguments)
-            host.log(String(format: "command: done in %.2f s: %@", Date().timeIntervalSince(started), outcome.result))
-            if !outcome.shown { host.progress(outcome.result) }
+        lastBrowser = nil
+        if let actions = QuickCommands.parseAll(utterance) {
+            var results: [String] = []
+            for action in actions {
+                host.log("command: quick path → \(action.tool) \(action.arguments)")
+                let outcome = await execute(action.tool, action.arguments.mapValues { JSONValue.string($0) })
+                results.append(outcome.result)
+                if outcome.finished { break }
+                if actions.count > 1, action.tool == "open_app" {
+                    try? await Task.sleep(nanoseconds: 300_000_000)   // let the app come up before the next step
+                }
+            }
+            let summary = results.joined(separator: " ")
+            host.log(String(format: "command: done in %.2f s: %@", Date().timeIntervalSince(started), summary))
+            host.progress(summary)
             return
         }
         await route(utterance, frontApp: frontApp, selection: selection)
@@ -79,8 +94,10 @@ public final class CommandAgent {
         host.progress("Thinking…")
         for step in 0..<maxSteps {
             let reply: OllamaClient.Reply
+            let asked = Date()
             do {
                 reply = try await client.chat(messages: messages, tools: tools)
+                host.log(String(format: "command: router step %d took %.2f s", step + 1, Date().timeIntervalSince(asked)))
             } catch {
                 host.log("command: router failed: \(error.localizedDescription)")
                 host.showAnswer(error.localizedDescription)
@@ -99,12 +116,21 @@ public final class CommandAgent {
             }
             let assistant: [String: Any] = ["role": "assistant", "content": reply.content, "tool_calls": calls]
             messages.append(assistant)
+            var needsAnotherLook = false
+            var results: [String] = []
             for call in reply.toolCalls {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
-                if call.name == "done" { return }
+                if call.name == "done" { break }
                 let outcome = await execute(call.name, call.arguments)
                 if outcome.finished { return }
+                results.append(outcome.result)
+                if Self.informationTools.contains(call.name) { needsAnotherLook = true }
                 messages.append(["role": "tool", "tool_name": call.name, "content": outcome.result])
+            }
+            // Actions only (open, search, volume…): done, without another trip to the model just to say so.
+            if !needsAnotherLook {
+                if !results.isEmpty { host.progress(results.joined(separator: " ")) }
+                return
             }
         }
         host.log("command: stopped after \(maxSteps) steps")
@@ -123,7 +149,10 @@ public final class CommandAgent {
     private func execute(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
         func text(_ key: String) -> String { args[key]?.description.trimmingCharacters(in: .whitespaces) ?? "" }
         switch tool {
-        case "open_app": return Outcome(result: await MacActions.openApp(text("name")))
+        case "open_app":
+            let (result, app) = await MacActions.openAppReturningApp(text("name"))
+            if MacActions.isBrowser(app) { lastBrowser = app }
+            return Outcome(result: result)
         case "quit_app":
             let name = text("name")
             guard let app = MacActions.running(name) else { return Outcome(result: "\"\(name)\" isn't running.") }
@@ -139,8 +168,8 @@ public final class CommandAgent {
         case "search_files":
             host.searchFiles(text("query"))
             return Outcome(result: "Showing file search results for \"\(text("query"))\".", finished: true, shown: true)
-        case "open_url": return Outcome(result: MacActions.openURL(text("url")))
-        case "web_search": return Outcome(result: MacActions.webSearch(text("query")))
+        case "open_url": return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))
+        case "web_search": return Outcome(result: MacActions.webSearch(text("query"), in: lastBrowser))
         case "set_volume": return Outcome(result: MacActions.setVolume(Int(args["percent"]?.number ?? 50)))
         case "change_volume": return Outcome(result: MacActions.changeVolume(by: text("direction") == "down" ? -15 : 15))
         case "mute":
@@ -182,7 +211,8 @@ public final class CommandAgent {
         var lines = [
             "You are Murmur, a voice assistant on the user's Mac. The user spoke a command; carry it out with tools.",
             "Rules:",
-            "- Respond only with tool calls. Keep it to the fewest steps that do the job.",
+            "- Respond only with tool calls. Call every tool the request needs in ONE response, in order "
+                + "(e.g. open_app then web_search). Keep it to the fewest steps.",
             "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said.",
             "- Files: search_files for finding the user's own files by what they contain; open_folder for standard folders.",
             "- Web: open_url for a site, web_search to search.",

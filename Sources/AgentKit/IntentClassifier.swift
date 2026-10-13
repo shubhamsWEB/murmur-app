@@ -42,8 +42,8 @@ public enum IntentClassifier {
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
         if !textFieldFocused { return Decision(intent: .command, reason: "no text field focused") }
-        if let quick = QuickCommands.parse(utterance), cleaned.split(separator: " ").count <= 8 {
-            return Decision(intent: .command, reason: "known command (\(quick.tool))")
+        if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {
+            return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")
         }
         if utterance.lowercased().range(of: #"^\s*(hey |ok |okay )?murmur\b"#, options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "addressed to Murmur")

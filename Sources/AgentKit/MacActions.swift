@@ -7,15 +7,32 @@ public enum MacActions {
     // MARK: Apps
 
     public static func openApp(_ spoken: String) async -> String {
-        guard let app = AppCatalog.shared.resolve(spoken) else { return "No app called \"\(spoken)\" is installed." }
+        await openAppReturningApp(spoken).0
+    }
+
+    /// Opens an app and returns it too (so a following web search can use it when it's a browser).
+    static func openAppReturningApp(_ spoken: String) async -> (String, AppCatalog.App?) {
+        guard let app = AppCatalog.shared.resolve(spoken) else {
+            return ("No app called \"\(spoken)\" is installed.", nil)
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         do {
             _ = try await NSWorkspace.shared.openApplication(at: app.url, configuration: configuration)
-            return "Opened \(app.name)."
+            return ("Opened \(app.name).", app)
         } catch {
-            return "Couldn't open \(app.name): \(error.localizedDescription)"
+            return ("Couldn't open \(app.name): \(error.localizedDescription)", nil)
         }
+    }
+
+    static let browserIDs: Set<String> = [
+        "com.google.Chrome", "com.apple.Safari", "org.mozilla.firefox", "com.brave.Browser", "com.microsoft.edgemac",
+        "company.thebrowser.Browser", "ai.perplexity.comet", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+    ]
+
+    static func isBrowser(_ app: AppCatalog.App?) -> Bool {
+        guard let id = app?.bundleID else { return false }
+        return browserIDs.contains(id)
     }
 
     /// The running app matching a spoken name (running apps first, then installed ones by bundle id).
@@ -84,21 +101,40 @@ public enum MacActions {
     // MARK: Web
 
     public static func openURL(_ text: String) -> String {
+        openURL(text, in: nil)
+    }
+
+    static func openURL(_ text: String, in browser: AppCatalog.App?) -> String {
         var raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !raw.contains("://") { raw = "https://" + raw.replacingOccurrences(of: " dot ", with: ".") }
         guard let url = URL(string: raw), let scheme = url.scheme, ["http", "https"].contains(scheme) else {
             return "That doesn't look like a web address."
         }
-        NSWorkspace.shared.open(url)
+        open(url, in: browser)
         return "Opened \(url.host ?? raw)."
     }
 
     public static func webSearch(_ query: String) -> String {
+        webSearch(query, in: nil)
+    }
+
+    static func webSearch(_ query: String, in browser: AppCatalog.App?) -> String {
         var components = URLComponents(string: "https://www.google.com/search")!
         components.queryItems = [URLQueryItem(name: "q", value: query)]
         guard let url = components.url else { return "Couldn't build the search." }
-        NSWorkspace.shared.open(url)
-        return "Searching the web for \"\(query)\"."
+        open(url, in: browser)
+        return "Searching the web for \"\(query)\"\(browser.map { " in \($0.name)" } ?? "")."
+    }
+
+    /// Opens a web address in the given browser, or the default one.
+    private static func open(_ url: URL, in browser: AppCatalog.App?) {
+        if let browser, isBrowser(browser) {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.open([url], withApplicationAt: browser.url, configuration: configuration)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: System
