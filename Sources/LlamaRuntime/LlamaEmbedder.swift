@@ -1,5 +1,5 @@
 import CLlama
-import DigUpKit
+import MurmurIndex
 import Foundation
 
 /// EmbeddingGemma 2 on llama.cpp (Metal), in this process: the image and audio encoders (mtmd) feed the text model, and
@@ -325,21 +325,21 @@ public final class LlamaEmbedder: Embedder {
 
     #if !os(macOS)
     /// The threads llama.cpp computes on (what runs on the CPU: all of it on a machine without a GPU): every logical
-    /// processor up to 8, where llama.cpp's default is 4; `DIGUP_THREADS` says otherwise. 43 photos, 2026-10-12: an
+    /// processor up to 8, where llama.cpp's default is 4; `MURMUR_THREADS` says otherwise. 43 photos, 2026-10-12: an
     /// i5-8350U laptop (4 cores, 8 threads) 227 s on 4 threads, 174 s on 8; a Core Ultra 9 285K (8 + 16
     /// cores) 48 s on 4, 31 s on 8, 29–30 s on 12, 40 s on 24 (its slow cores hold the others back).
     static let threads: Int32 = {
-        let chosen = ProcessInfo.processInfo.environment["DIGUP_THREADS"].flatMap(Int32.init)
+        let chosen = ProcessInfo.processInfo.environment["MURMUR_THREADS"].flatMap(Int32.init)
         return max(1, chosen ?? Int32(min(ProcessInfo.processInfo.activeProcessorCount, 8)))
     }()
 
     /// On Linux and Windows ggml's backends are shared libraries (GGML_BACKEND_DL, scripts/build-llama.sh): the CPU
-    /// variants always, CUDA or Vulkan when the machine has them. They're looked for in $DIGUP_BACKENDS, then beside this
+    /// variants always, CUDA or Vulkan when the machine has them. They're looked for in $MURMUR_BACKENDS, then beside this
     /// executable, then wherever ggml itself looks; whatever loads and works is what the model runs on.
     private static func loadBackends() {
         let environment = ProcessInfo.processInfo.environment
         var folders: [String] = []
-        if let chosen = environment["DIGUP_BACKENDS"], !chosen.isEmpty { folders.append(chosen) }
+        if let chosen = environment["MURMUR_BACKENDS"], !chosen.isEmpty { folders.append(chosen) }
         if let executable = Bundle.main.executableURL { folders.append(executable.deletingLastPathComponent().path) }
         for folder in folders where ggml_backend_dev_count() == 0 {
             ggml_backend_load_all_from_path(folder)

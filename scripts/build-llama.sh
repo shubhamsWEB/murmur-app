@@ -14,7 +14,7 @@ TAG=b11461   # the first tags with EmbeddingGemma 2 (text + vision + audio) are 
 COMMIT=4d756bc72bf00a4aacf410ae15a2d315f3db400d   # TAG's commit: a tag can be moved, a commit can't
 # A new TAG ships only if `swift test` passes: ReferenceVectorTests checks it makes the same vectors, so every index is
 # kept. If it fails, keep this TAG, or bump LlamaEmbedder.vectorVersion and write the reference vectors again
-# (DIGUP_WRITE_REFERENCE=1 swift test --filter ReferenceVectorTests): every index then embeds again.
+# (MURMUR_WRITE_REFERENCE=1 swift test --filter ReferenceVectorTests): every index then embeds again.
 PATCH=scripts/llama.cpp-no-logits.patch
 SOURCE="${LLAMA_SOURCE:-Vendor/llama.cpp}"
 BUILD="${LLAMA_BUILD:-Vendor/llama-build}"
@@ -113,7 +113,7 @@ else
 fi
 cp "$SOURCE/include/llama.h" "$SOURCE"/ggml/include/*.h "$SOURCE/tools/mtmd/mtmd.h" "$SOURCE/tools/mtmd/mtmd-helper.h" \
   "$OUT/include/"
-# The build, for logs and `digup status` (indexes record LlamaEmbedder.vectorVersion, not this). SwiftPM doesn't see a
+# The build, for logs and `murmur-engine status` (indexes record LlamaEmbedder.vectorVersion, not this). SwiftPM doesn't see a
 # changed header, so the Swift file that reads it is touched.
 printf '// Written by scripts/build-llama.sh.\n#define LLAMA_BUILD_TAG "%s"\n' "$TAG" > "$OUT/include/llama-build.h"
 touch Sources/LlamaRuntime/LlamaEmbedder.swift

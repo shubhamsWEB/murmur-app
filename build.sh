@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds build.noindex/DigUp.app, signed with the hardened runtime (as releases are, so dev builds behave the same).
+# Builds build.noindex/Murmur.app, signed with the hardened runtime (as releases are, so dev builds behave the same).
 #   ./build.sh                       signed with the identity named in .sign-id (one line, gitignored), so macOS keeps
 #                                    folder permissions across rebuilds; ad-hoc without it (macOS then asks again
 #                                    after each build)
@@ -7,7 +7,7 @@
 #   RELEASE=1 SIGN_ID="Developer ID Application: …" ./build.sh   plus the secure timestamp notarization needs
 #                                    (scripts/release.sh does that, then notarizes and makes the DMG)
 # There's no install step: run it from build.noindex (see scripts/dev-run.sh).
-# For testing in-app updates with a copy of its own (never the installed DigUp's settings or updates), these replace
+# For testing in-app updates with a copy of its own (never the installed Murmur's settings or updates), these replace
 # Info.plist values: BUNDLE_ID, VERSION, BUILD_NUMBER, SPARKLE_FEED (the appcast URL), SPARKLE_KEY (the EdDSA public key).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -30,9 +30,9 @@ fi
 # llama.cpp, the embedding runtime, linked into the helper (only rebuilt when its tag or patch changes).
 scripts/build-llama.sh
 
-# Both executables: the app, and the `digup` CLI, which the app runs as its indexing helper and query encoder.
-swift build -c release --product DigUpApp
-swift build -c release --product digup
+# Both executables: the app, and the `murmur-engine` CLI, which the app runs as its indexing helper and query encoder.
+swift build -c release --product MurmurApp
+swift build -c release --product murmur-engine
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
 # The app icon ("Voice", indigo; Resources/AppIcon/README.md): macOS 26 draws the layered AppIcon.icon (compiled into
@@ -41,10 +41,10 @@ ICON="Resources/AppIcon.icns"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
-# The binary is DigUpApp in SwiftPM (it can't share a name with the `digup` CLI on a case-insensitive disk).
-cp "$BIN_DIR/DigUpApp" "$APP/Contents/MacOS/$APP_NAME"
-# The indexing helper lives in Helpers/: next to DigUp in MacOS/ it would collide on a case-insensitive disk.
-cp "$BIN_DIR/digup" "$APP/Contents/Helpers/digup"
+# The binary is MurmurApp in SwiftPM (it can't share a name with the `murmur-engine` CLI on a case-insensitive disk).
+cp "$BIN_DIR/MurmurApp" "$APP/Contents/MacOS/$APP_NAME"
+# The indexing helper lives in Helpers/: next to Murmur in MacOS/ it would collide on a case-insensitive disk.
+cp "$BIN_DIR/murmur-engine" "$APP/Contents/Helpers/murmur-engine"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 xcrun actool --compile "$APP/Contents/Resources" --platform macosx --target-device mac --minimum-deployment-target 14.0 \
   --app-icon AppIcon --output-partial-info-plist "$(mktemp -d)/AppIcon.plist" --enable-on-demand-resources NO \
@@ -72,7 +72,7 @@ PLIST="$APP/Contents/Info.plist"
 # entitlement lets it ask QuickTime Player to open a recording at a moment.
 IDENTITY="${SIGN_ID:-$( [[ -f .sign-id ]] && head -1 .sign-id || echo - )}"
 TIMESTAMP=$([[ "${RELEASE:-}" == 1 ]] && echo --timestamp || echo --timestamp=none)
-codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP "$APP/Contents/Helpers/digup"
+codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP "$APP/Contents/Helpers/murmur-engine"
 # Sparkle comes ad-hoc signed: its helpers, then the framework, with this identity (the app may only load code signed
 # by its own team).
 for code in "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app" "$FW"; do
@@ -80,10 +80,10 @@ for code in "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app" "$FW"; do
 done
 # An ad-hoc build has no team, so the hardened runtime's library validation would refuse its (ad-hoc) Sparkle: such
 # builds (from source, without a signing identity) may load it anyway. Signed builds and releases keep validation.
-ENTITLEMENTS=Resources/DigUp.entitlements
+ENTITLEMENTS=Resources/Murmur.entitlements
 if [[ "$IDENTITY" == - ]]; then
-  ENTITLEMENTS="$(mktemp -d)/DigUp.entitlements"
-  cp Resources/DigUp.entitlements "$ENTITLEMENTS"
+  ENTITLEMENTS="$(mktemp -d)/Murmur.entitlements"
+  cp Resources/Murmur.entitlements "$ENTITLEMENTS"
   /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ENTITLEMENTS"
 fi
 codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP --entitlements "$ENTITLEMENTS" "$APP"

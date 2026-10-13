@@ -1,4 +1,4 @@
-import DigUpKit
+import MurmurIndex
 import Foundation
 import Testing
 @testable import LlamaRuntime
@@ -6,7 +6,7 @@ import Testing
 /// The vectors this build makes for fixed inputs, against the ones `LlamaEmbedder.vectorVersion` stands for
 /// (Reference/vectors.json). Indexes record that version, not the llama.cpp build, so every llama.cpp update must pass
 /// this before it ships. If it fails, keep the old llama.cpp, or bump `vectorVersion` (every index then embeds again)
-/// and write the reference anew: `DIGUP_WRITE_REFERENCE=1 swift test --filter ReferenceVectorTests`.
+/// and write the reference anew: `MURMUR_WRITE_REFERENCE=1 swift test --filter ReferenceVectorTests`.
 ///
 /// The inputs go in as the indexer hands them over: texts with the app's prompts, a screenshot as PNG (280 tokens), a
 /// photo as JPEG (140, and 70 as a video frame) and a 16 kHz WAV, all read by llama.cpp's own decoders
@@ -46,7 +46,7 @@ import Testing
         let made = try Self.vectors()
         let url = Self.folder.appendingPathComponent("vectors.json")
         let stored = try? JSONDecoder().decode(Reference.self, from: Data(contentsOf: url))
-        if ProcessInfo.processInfo.environment["DIGUP_WRITE_REFERENCE"] == "1" {
+        if ProcessInfo.processInfo.environment["MURMUR_WRITE_REFERENCE"] == "1" {
             // A new reference for the same version would let indexes mix old and new vectors.
             if let stored, stored.vectorVersion == LlamaEmbedder.vectorVersion,
                let (name, cosine) = Self.worst(made, stored.vectors), cosine < Self.agreement {
@@ -60,7 +60,7 @@ import Testing
             try encoder.encode(reference).write(to: url)
             return
         }
-        let reference = try #require(stored, "no Reference/vectors.json: write it with DIGUP_WRITE_REFERENCE=1")
+        let reference = try #require(stored, "no Reference/vectors.json: write it with MURMUR_WRITE_REFERENCE=1")
         #expect(reference.vectorVersion == LlamaEmbedder.vectorVersion,
                 "the reference is for vectors \(reference.vectorVersion): write it anew for \(LlamaEmbedder.vectorVersion)")
         #expect(Set(made.keys) == Set(reference.vectors.keys))
@@ -75,7 +75,7 @@ import Testing
     }
 
     static func vectors() throws -> [String: [Float]] {
-        let log = FileManager.default.temporaryDirectory.appendingPathComponent("digup-reference-vectors.log")
+        let log = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-engine-reference-vectors.log")
         let embedder = try LlamaEmbedder(models: LlamaModels.locate(), textOnly: false, log: log)
         defer { embedder.close() }
         var made: [String: [Float]] = [:]

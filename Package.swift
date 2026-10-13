@@ -1,7 +1,7 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// DigUp builds on macOS (the app, the CLI and its helpers) and, since the port, the engine and the CLI on
+// Murmur builds on macOS (the app, the CLI and its helpers) and, since the port, the engine and the CLI on
 // Linux and Windows too. The manifest picks each platform's pieces: how llama.cpp is linked, the C libraries the engine
 // needs where Apple's frameworks aren't there (SQLite, stb, miniz, PDFium: scripts/fetch-vendor.sh puts them in
 // Vendor/), and the app, which is macOS only.
@@ -17,7 +17,7 @@ let portableTargets: [Target] = []
 // llama.cpp as shared libraries: ggml's backends (CPU, and CUDA or Vulkan when the machine has them) load at run time
 // from beside the helper (`LlamaEmbedder`), so one build runs anywhere. Dev builds find them in Vendor/.
 #if os(Windows)
-// No rpath on Windows: the DLLs go beside digup.exe, or on PATH in dev runs. MSVC's C++ runtime needs no
+// No rpath on Windows: the DLLs go beside murmur-engine.exe, or on PATH in dev runs. MSVC's C++ runtime needs no
 // link line of its own, so the module map differs from Linux's by that.
 let runpath: [String] = []
 let llamaModule = "Sources/CLlamaWindows"
@@ -50,7 +50,7 @@ let portableTargets: [Target] = [
 #endif
 
 #if os(macOS)
-let appProducts: [Product] = [.executable(name: "DigUpApp", targets: ["DigUpApp"])]
+let appProducts: [Product] = [.executable(name: "MurmurApp", targets: ["MurmurApp"])]
 let appDependencies: [Package.Dependency] = [
     // In-app updates (the app only). build.sh embeds the framework in Contents/Frameworks and signs it.
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
@@ -66,11 +66,11 @@ let appTargets: [Target] = [
         dependencies: ["AgentKit", .product(name: "FluidAudio", package: "FluidAudio")],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
-    // The menubar + hotkey app. build.sh wraps it into build.noindex/DigUp.app. (The product can't be called
-    // "DigUp": on a case-insensitive disk it would collide with the `digup` CLI binary.)
+    // The menubar + hotkey app. build.sh wraps it into build.noindex/Murmur.app. (The product can't be called
+    // "Murmur": on a case-insensitive disk it would collide with the `murmur-engine` CLI binary.)
     .executableTarget(
-        name: "DigUpApp",
-        dependencies: ["DigUpKit", "VoiceKit", .product(name: "Sparkle", package: "Sparkle")],
+        name: "MurmurApp",
+        dependencies: ["MurmurIndex", "VoiceKit", .product(name: "Sparkle", package: "Sparkle")],
         swiftSettings: [.defaultIsolation(MainActor.self)],
         linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
     ),
@@ -82,25 +82,25 @@ let appTargets: [Target] = []
 #endif
 
 let package = Package(
-    name: "DigUp",
+    name: "Murmur",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "digup", targets: ["digup"]),
-        .library(name: "DigUpKit", targets: ["DigUpKit"]),
+        .executable(name: "murmur-engine", targets: ["MurmurEngine"]),
+        .library(name: "MurmurIndex", targets: ["MurmurIndex"]),
     ] + appProducts,
     dependencies: appDependencies,
     targets: portableTargets + [
         // The engine: crawler, extractors, index store, the embedder interface and worker client, search. No UI.
         // Platform/ holds what differs by OS (Apple's frameworks on macOS, the C libraries above elsewhere).
-        .target(name: "DigUpKit", dependencies: engineDependencies, linkerSettings: engineLink),
+        .target(name: "MurmurIndex", dependencies: engineDependencies, linkerSettings: engineLink),
         // llama.cpp (scripts/build-llama.sh builds it into Vendor/llama) and EmbeddingGemma 2 on it.
         .systemLibrary(name: "CLlama", path: llamaModule),
-        .target(name: "LlamaRuntime", dependencies: ["CLlama", "DigUpKit"], linkerSettings: llamaLink),
+        .target(name: "LlamaRuntime", dependencies: ["CLlama", "MurmurIndex"], linkerSettings: llamaLink),
         // Developer CLI: estimate / index / search / status / eval. Doubles as the eval harness, and the app runs it as
         // its indexing helper and its query encoder.
-        .executableTarget(name: "digup", dependencies: ["DigUpKit", "LlamaRuntime"]),
+        .executableTarget(name: "MurmurEngine", dependencies: ["MurmurIndex", "LlamaRuntime"]),
         // Pictures/ holds ImageTests' pictures (scripts/testbed/make_test_pictures.swift), read by path.
-        .testTarget(name: "DigUpKitTests", dependencies: ["DigUpKit"], exclude: ["Pictures"]),
+        .testTarget(name: "MurmurIndexTests", dependencies: ["MurmurIndex"], exclude: ["Pictures"]),
         // Reference/ holds the fixed inputs and vectors of ReferenceVectorTests, read by path.
         .testTarget(name: "LlamaRuntimeTests", dependencies: ["LlamaRuntime"], exclude: ["Reference"]),
     ] + appTargets

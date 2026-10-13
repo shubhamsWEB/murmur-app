@@ -1,4 +1,4 @@
-import DigUpKit
+import MurmurIndex
 import Foundation
 
 /// Where the EmbeddingGemma 2 files for llama.cpp are (see `ModelFiles` for which files, and why Q8_0).
@@ -14,11 +14,11 @@ public struct LlamaModels: Sendable {
     /// Nil while only the text part is there.
     public let media: URL?
 
-    /// The folders to look in, first match wins. `$DIGUP_MODELS` is the app's choice and the only place it looks
+    /// The folders to look in, first match wins. `$MURMUR_MODELS` is the app's choice and the only place it looks
     /// then: the developer's Hugging Face cache mustn't hide a download that's missing. Without it (the CLI):
     /// Application Support, then the Hugging Face cache.
     public static var folders: [URL] {
-        if let chosen = ProcessInfo.processInfo.environment["DIGUP_MODELS"], !chosen.isEmpty {
+        if let chosen = ProcessInfo.processInfo.environment["MURMUR_MODELS"], !chosen.isEmpty {
             return [URL(fileURLWithPath: chosen)]
         }
         return [ModelFiles.installed, ModelFiles.huggingFaceSnapshot]

@@ -1,8 +1,14 @@
-DigUp includes code from these projects. Thank you.
+Murmur includes code from these projects. Thank you.
+
+DigUp (https://github.com/ARahim3/DigUp), MIT License, Copyright (c) 2026 Abdur
+Rahim. Murmur is built on DigUp: its file index, search and much of the app.
+
+FluidAudio (https://github.com/FluidInference/FluidAudio), Apache License 2.0,
+the on-device speech recognition runtime (NVIDIA Parakeet on Core ML).
 
 ================================================================================
 llama.cpp and ggml (https://github.com/ggml-org/llama.cpp), the embedding runtime,
-linked into DigUp's helper (with one small change, in scripts/llama.cpp-no-logits.patch)
+linked into Murmur's helper (with one small change, in scripts/llama.cpp-no-logits.patch)
 ================================================================================
 
 MIT License
@@ -40,7 +46,7 @@ public domain (The Unlicense, http://unlicense.org).
 SHA-256 by Igor Pavlov: public domain.
 
 ================================================================================
-Sparkle (https://sparkle-project.org), DigUp's updater, in Contents/Frameworks:
+Sparkle (https://sparkle-project.org), Murmur's updater, in Contents/Frameworks:
 its license, with those of the code it includes, as Sparkle ships them
 ================================================================================
 
@@ -185,5 +191,5 @@ The model
 
 EmbeddingGemma 2 by Google, in ggml-org's GGUF conversion
 (https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), is released under the
-Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). DigUp doesn't
+Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Murmur doesn't
 include it: the app downloads it from Hugging Face the first time it runs.
