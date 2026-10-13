@@ -41,6 +41,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         state.close = { [weak self] in self?.close() }
+        window.backgroundColor = Theme.pageNS
         window.contentView = NSHostingView(rootView: OnboardingView(state: state).murmurStyle())
         window.center()
         self.window = window
@@ -220,40 +221,46 @@ final class OnboardingState {
 // MARK: Views
 
 struct OnboardingView: View {
-    static let size = CGSize(width: 680, height: 600)
+    static let size = CGSize(width: 940, height: 640)
     @Bindable var state: OnboardingState
 
     var body: some View {
-        VStack(spacing: 0) {
-            Group {
-                switch state.step {
-                case .welcome: WelcomeStep()
-                case .voice: VoiceStep(state: state)
-                case .folders: FoldersStep(state: state)
-                case .code: CodeStep(state: state)
-                case .shortcut: ShortcutStep(state: state)
-                case .ready: ReadyStep(state: state)
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                StepIndicator(steps: state.steps, current: state.step)
+                    .padding(.top, 52)
+                    .padding(.horizontal, 40)
+                ScrollView {
+                    Group {
+                        switch state.step {
+                        case .welcome: WelcomeStep()
+                        case .voice: VoiceStep(state: state)
+                        case .folders: FoldersStep(state: state)
+                        case .code: CodeStep(state: state)
+                        case .shortcut: ShortcutStep(state: state)
+                        case .ready: ReadyStep(state: state)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, 40)
+                    .padding(.top, 26)
+                    .padding(.bottom, 20)
                 }
+                Rectangle().fill(Theme.line).frame(height: 1)
+                footer
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: state.step == .welcome ? .center : .top)
-            .padding(.horizontal, 48)
-            .padding(.top, 46)
-            Divider()
-            footer
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.page)
+            StepArt(step: state.step, hotkey: state.model.hotkey?.display ?? "⇧⌘Space")
+                .frame(width: 300)
         }
         .frame(width: Self.size.width, height: Self.size.height)
-        .background(alignment: .top) {
-            // A soft warm glow behind the top of each step, from the icon's colors.
-            Brand.wash
-                .frame(height: 260)
-                .mask(LinearGradient(colors: [.black.opacity(0.10), .clear], startPoint: .top, endPoint: .bottom))
-                .ignoresSafeArea()
-        }
+        .ignoresSafeArea(.container, edges: .top)
+        .foregroundStyle(Theme.ink)
     }
 
     private var footer: some View {
-        HStack(spacing: 14) {
-            StepDots(current: state.steps.firstIndex(of: state.step) ?? 0, count: state.steps.count)
+        HStack(spacing: 12) {
             if state.step != .welcome {
                 DownloadStatus(download: state.download)
             }
@@ -261,19 +268,21 @@ struct OnboardingView: View {
             if state.step == .folders || state.step == .code && state.searchCode {
                 Text(state.step == .code ? codeSummary : foldersSummary)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.ink2)
                     .lineLimit(1)
             }
             if state.step != .welcome, state.step != .ready {
                 Button("Back") { state.back() }
+                    .buttonStyle(.murmurSecondary)
             }
             Button(continueTitle) { state.next() }
+                .buttonStyle(.murmurPrimary)
                 .keyboardShortcut(.defaultAction)
                 .disabled(state.step == .folders && state.folders.roots.isEmpty)
         }
-        .controlSize(.large)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 24)
         .frame(height: 64)
+        .background(Theme.cardAlt)
     }
 
     private var continueTitle: String {
@@ -302,20 +311,146 @@ struct OnboardingView: View {
     }
 }
 
-private struct StepDots: View {
-    let current: Int
-    let count: Int
+/// ✓ Welcome — 2 Voice — 3 Folders …: where you are in setup.
+private struct StepIndicator: View {
+    let steps: [OnboardingState.Step]
+    let current: OnboardingState.Step
+
+    private func name(_ step: OnboardingState.Step) -> String {
+        switch step {
+        case .welcome: "Welcome"
+        case .voice: "Voice"
+        case .folders: "Folders"
+        case .code: "Code"
+        case .shortcut: "Shortcut"
+        case .ready: "Done"
+        }
+    }
 
     var body: some View {
+        let index = steps.firstIndex(of: current) ?? 0
         HStack(spacing: 6) {
-            ForEach(0..<count, id: \.self) { index in
-                Circle()
-                    .fill(index == current ? Color.primary.opacity(0.55) : Color.primary.opacity(0.15))
-                    .frame(width: 6, height: 6)
+            ForEach(Array(steps.enumerated()), id: \.offset) { position, step in
+                if position > 0 {
+                    Rectangle().fill(Theme.control).frame(width: 14, height: 1)
+                }
+                HStack(spacing: 6) {
+                    ZStack {
+                        if position < index {
+                            Circle().fill(Theme.primary)
+                            Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.onPrimary)
+                        } else if position == index {
+                            Circle().fill(Theme.accent)
+                            Text("\(position + 1)").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                        } else {
+                            Circle().strokeBorder(Theme.control)
+                            Text("\(position + 1)").font(.system(size: 10)).foregroundStyle(Theme.ink2)
+                        }
+                    }
+                    .frame(width: 18, height: 18)
+                    Text(name(step))
+                        .font(.system(size: 12, weight: position == index ? .semibold : .regular))
+                        .foregroundStyle(position == index ? Theme.ink : Theme.ink2)
+                }
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Step \(current + 1) of \(count)")
+        .accessibilityLabel("Step \(index + 1) of \(steps.count): \(name(current))")
+    }
+}
+
+/// The dark panel on the right: what this step is about, drawn.
+private struct StepArt: View {
+    let step: OnboardingState.Step
+    let hotkey: String
+    private let cream = Color(red: 0.961, green: 0.929, blue: 0.902)
+    private let charcoal = Color(red: 0.133, green: 0.118, blue: 0.110)
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            art
+            Text(caption)
+                .font(.system(size: 12.5))
+                .foregroundStyle(cream.opacity(0.72))
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+                .frame(maxWidth: 220)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(charcoal)
+        .accessibilityHidden(true)
+    }
+
+    private var caption: String {
+        switch step {
+        case .welcome: "Talk anywhere. Find anything. Get it done."
+        case .voice: "This is what you'll see at the bottom of the screen while Murmur listens."
+        case .folders: "Describe a file the way you remember it. Murmur reads photos, PDFs, documents and recordings."
+        case .code: "Search your code by what it does, not just by name."
+        case .shortcut: "Search from any app with one shortcut."
+        case .ready: "Hold fn and talk. Murmur lives in your menu bar."
+        }
+    }
+
+    @ViewBuilder
+    private var art: some View {
+        switch step {
+        case .welcome:
+            BrandTile(size: 88)
+        case .voice, .ready:
+            HStack(spacing: 12) {
+                Circle().fill(Theme.accent).frame(width: 28, height: 28)
+                    .background(Circle().fill(Theme.accent.opacity(0.25)).padding(-6))
+                HStack(spacing: 3) {
+                    ForEach(Array([8.0, 16, 22, 12, 18, 9].enumerated()), id: \.offset) { _, height in
+                        Capsule().fill(cream).frame(width: 3, height: height)
+                    }
+                }
+                Text(step == .ready ? "Ready" : "Listening").font(.system(size: 13)).foregroundStyle(cream)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 18)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
+            .overlay(Capsule().strokeBorder(Color(red: 0.239, green: 0.212, blue: 0.196)))
+        case .folders:
+            VStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(Theme.accent)
+                    Text("photos on the beach").foregroundStyle(cream)
+                    Spacer()
+                }
+                .font(.system(size: 13))
+                .padding(.horizontal, 12)
+                .frame(width: 220, height: 36)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
+                HStack(spacing: 8) {
+                    ForEach(Array([0xF6D9C4, 0xCFE0E6, 0xE9DFC9].enumerated()), id: \.offset) { _, hex in
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
+                                        blue: Double(hex & 0xFF) / 255))
+                            .frame(width: 68, height: 56)
+                    }
+                }
+            }
+        case .code:
+            Text("code: retry with backoff")
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(cream)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
+        case .shortcut:
+            Text(hotkey)
+                .font(.system(size: 26, weight: .semibold, design: .monospaced))
+                .foregroundStyle(cream)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(red: 0.180, green: 0.161, blue: 0.149)))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.accent.opacity(0.6)))
+        }
     }
 }
 
@@ -355,45 +490,39 @@ struct DownloadStatus: View {
 
 private struct WelcomeStep: View {
     var body: some View {
-        VStack(spacing: 0) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .frame(width: 96, height: 96)
-                .shadow(color: Brand.ink.opacity(0.35), radius: 14, y: 6)
-            Text("Murmur")
-                .font(.system(size: 30, weight: .bold))
-                .padding(.top, 10)
-            Text("Talk anywhere. Find anything.")
-                .font(.system(size: 16))
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 16) {
-                Feature(symbol: "mic", title: "Dictation in any app",
-                        example: "hold Fn, speak, let go: the text appears where you're typing")
-                Feature(symbol: "camera.viewfinder", title: "Screenshots and photos",
-                        example: "“that payment error”, “the zebra”, “whiteboard from Tuesday”")
-                Feature(symbol: "doc.text", title: "PDFs and documents",
-                        example: "“the clause about pets in the lease”, “flight receipt”")
-                Feature(symbol: "waveform", title: "Moments inside audio and video",
-                        example: "“where they talk about sleep”, “the part with the drums”")
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Welcome to Murmur")
+                .font(.system(size: 30, weight: .semibold))
+                .tracking(-0.5)
+            Text("Your voice, for everything on your Mac. Private by default.")
+                .font(.system(size: 15))
+                .foregroundStyle(Theme.ink2)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 14) {
+                Feature(symbol: "text.cursor", title: "Dictation in any app",
+                        example: "Hold fn, speak, let go: the text appears where you're typing.")
+                Feature(symbol: "macwindow", title: "Commands that get things done",
+                        example: "“Open Slack”, “check for updates”, “search YouTube for lofi and play it”.")
+                Feature(symbol: "doc.text.magnifyingglass", title: "Find any file by describing it",
+                        example: "“That payment error screenshot”, “the clause about pets in the lease”.")
+                Feature(symbol: "chevron.left.forwardslash.chevron.right", title: "Build with Claude Code or Codex",
+                        example: "“Create a React app with a Hello World page.”")
             }
-            .padding(.top, 30)
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "lock.shield")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30)
-                Text("Everything is indexed and searched on this Mac. Murmur downloads its AI model (865 MB) once; "
-                     + "after that it works offline, and nothing you index ever leaves your Mac.")
+            .padding(.top, 28)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "lock")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.ink2)
+                Text("Speech and file search run on this Mac. Murmur downloads its models once (about 1.4 GB); "
+                     + "after that they work offline. Commands use the model you choose.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.ink2)
+                    .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 26)
-            .frame(maxWidth: 470, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, 40)
+        .frame(maxWidth: 480, alignment: .leading)
     }
 }
 
@@ -405,16 +534,16 @@ private struct Feature: View {
     var body: some View {
         HStack(spacing: 14) {
             Image(systemName: symbol)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(.white)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.accentText)
                 .frame(width: 34, height: 34)
-                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Brand.tile))
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.accentTint))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 14, weight: .semibold))
-                Text(example).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(example).font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: 470, alignment: .leading)
     }
 }
 
@@ -424,10 +553,10 @@ struct StepTitle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 24, weight: .bold))
+            Text(title).font(.system(size: 26, weight: .semibold)).tracking(-0.4)
             Text(subtitle)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 13.5))
+                .foregroundStyle(Theme.ink2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -536,7 +665,7 @@ private struct CodeStep: View {
                           + "searches. You can turn it on later in Settings → Code.")
             SwitchRow(title: "Search my code", detail: "Off unless you turn it on.", isOn: $state.searchCode)
                 .padding(14)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.04)))
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.card)).overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
             if state.searchCode {
                 ScrollView {
                     VStack(spacing: 6) {
@@ -578,10 +707,10 @@ private struct VoiceStep: View {
             let dictation = state.app.dictation
             let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
             let heard = history.items.first { $0.date > appeared }
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 StepTitle(title: "Talk to your Mac",
                           subtitle: "Hold Fn, speak, and let go. Murmur types it wherever your cursor is.")
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
                     PermissionRow(ok: mic, title: "Microphone", detail: "So Murmur can hear you",
                                   button: "Allow…") { dictation.openMicrophoneSettings() }
                     PermissionRow(ok: dictation.canPaste && dictation.isListeningForKey, title: "Accessibility",
@@ -590,16 +719,14 @@ private struct VoiceStep: View {
                     PermissionRow(ok: dictation.modelStatus.contains("ready"), title: "Speech model",
                                   detail: dictation.modelStatus, button: nil) {}
                 }
-                .padding(18)
-                .frame(maxWidth: 460, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.04)))
-                .padding(.top, 28)
+                .frame(maxWidth: 520, alignment: .leading)
+                .padding(.top, 24)
                 Group {
                     if let heard {
                         Label("Heard: “\(heard.text)”", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(Brand.coralDeep)
+                            .foregroundStyle(Theme.good)
                     } else {
-                        Text("Try it now: hold Fn and say “Hello, Murmur”.")
+                        Text("Try it now: hold fn and say “Hello, Murmur”.")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -609,8 +736,7 @@ private struct VoiceStep: View {
                 Text("If Fn opens the emoji picker, set System Settings → Keyboard → “Press 🌐 key to” → Do Nothing.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 420)
+                    .frame(maxWidth: 520, alignment: .leading)
                     .padding(.top, 14)
             }
         }
@@ -625,19 +751,30 @@ private struct PermissionRow: View {
     let action: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
-                .font(.system(size: 17))
-                .foregroundStyle(ok ? Brand.coral : Color.secondary)
+        HStack(spacing: 14) {
+            Image(systemName: ok ? "checkmark" : "exclamationmark")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(ok ? Theme.good : Theme.accentText)
+                .frame(width: 34, height: 34)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(ok ? Theme.goodTint : Theme.accentTint))
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 14, weight: .medium))
-                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                Text(title).font(.system(size: 13.5, weight: .semibold))
+                Text(detail).font(.system(size: 12.5)).foregroundStyle(Theme.ink2).lineLimit(2)
             }
             Spacer(minLength: 8)
-            if let button, !ok {
-                Button(button, action: action)
+            if ok {
+                Pill(text: "Allowed", tone: .good)
+            } else if let button {
+                Button(button, action: action).buttonStyle(.murmurPrimaryCompact)
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
+            .strokeBorder(ok ? Theme.line : Theme.accent.opacity(0.7)))
+        .background(RoundedRectangle(cornerRadius: Theme.radius + 3, style: .continuous)
+            .fill(Theme.accentRing).padding(-3).opacity(ok || button == nil ? 0 : 1))
     }
 }
 
@@ -675,7 +812,7 @@ private struct ShortcutStep: View {
             }
             .padding(18)
             .frame(maxWidth: 340, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.04)))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card)).overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
             .padding(.top, 34)
         }
     }
@@ -701,7 +838,7 @@ private struct ReadyStep: View {
         VStack(spacing: 0) {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 60))
-                .foregroundStyle(Brand.gradient)
+                .foregroundStyle(Theme.accent)
                 .padding(.top, 8)
             Text("You're all set")
                 .font(.system(size: 26, weight: .bold))
@@ -722,7 +859,7 @@ private struct ReadyStep: View {
             }
             .padding(20)
             .frame(maxWidth: 470, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.04)))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card)).overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
             .padding(.top, 28)
             HStack(spacing: 8) {
                 Image(systemName: "sparkle.magnifyingglass")
