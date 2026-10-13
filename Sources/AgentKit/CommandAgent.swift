@@ -136,11 +136,14 @@ public final class CommandAgent {
         }
         let folder = AssistantCLI.newProjectFolder(for: task, name: folderName.isEmpty ? nil : folderName)
         let place = folder.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
-        guard await host.confirm("Build this with \(helper.display)?",
+        // "Start without asking" (Commands & AI → Helpers) skips the dialog.
+        let approved = AssistantCLI.autoApprove ? true
+            : await host.confirm("Build this with \(helper.display)?",
                                  "“\(task)”\n\nIn a new folder: \(place)\n\n\(helper.display) opens in Terminal and works "
                                  + "there with your subscription. It edits files in that folder on its own and asks "
                                  + "you before running commands.")
-        else { return Outcome(result: "You cancelled the build.", finished: true) }
+        guard approved else { return Outcome(result: "You cancelled the build.", finished: true) }
+        if AssistantCLI.autoApprove { host.log("command: starting \(helper.display) without asking (auto-approve on)") }
         let result = await helper.startSession(task, in: folder)
         host.log("command: \(result)")
         host.progress(result.hasPrefix("Started") ? "\(helper.display) is building it in Terminal" : result)
@@ -358,9 +361,10 @@ public final class CommandAgent {
             let helper: AssistantCLI = tool == "ask_claude" ? .claude : .codex
             let task = text("task")
             guard helper.isAllowed else { return Outcome(result: "\(helper.display) isn't allowed in Murmur's menu.") }
-            guard await host.confirm("Ask \(helper.display)?",
+            let approved = AssistantCLI.autoApprove ? true
+                : await host.confirm("Ask \(helper.display)?",
                                      "Murmur will send this to \(helper.display) (uses your subscription):\n\n\(task.prefix(600))")
-            else { return Outcome(result: "You declined asking \(helper.display).", finished: true) }
+            guard approved else { return Outcome(result: "You declined asking \(helper.display).", finished: true) }
             host.progress("Asking \(helper.display)…")
             let answer = await helper.run(task)
             return Outcome(result: "\(helper.display) answered:\n\(answer.prefix(6000))")

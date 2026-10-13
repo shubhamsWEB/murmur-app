@@ -676,8 +676,15 @@ private struct CommandsPage: View {
                     Toggle("Let Murmur ask \(helper.display)",
                            isOn: state.bind(get: { helper.isAllowed }, set: { helper.isAllowed = $0 }))
                 }
-                Text("For harder steps Murmur can ask Claude Code or Codex, with your own login. They can't change files, "
-                     + "and Murmur asks you before each one.")
+                Text("For harder steps Murmur can ask Claude Code or Codex, with your own login. They can't change files.")
+                    .font(.system(size: 12)).foregroundStyle(Brand.clay)
+                Divider().padding(.vertical, 4)
+                Toggle("Start Claude Code and Codex without asking",
+                       isOn: state.bind(get: { AssistantCLI.autoApprove }, set: { AssistantCLI.autoApprove = $0 }))
+                Text(AssistantCLI.autoApprove
+                     ? "On: “create a React app…” opens the session in Terminal straight away, and questions go to the "
+                       + "helpers without a dialog. Inside the session, the agent still asks before running commands."
+                     : "Off: Murmur shows what it's about to start, and where, and waits for Go Ahead.")
                     .font(.system(size: 12)).foregroundStyle(Brand.clay)
             }
             Card("Things to say") {

@@ -25,6 +25,13 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
         nonmutating set { UserDefaults.standard.set(newValue, forKey: allowKey) }
     }
 
+    /// Start Claude Code / Codex without Murmur's "Go ahead?" dialog: builds open in Terminal at once, and helper
+    /// questions are sent straight away. (Inside the session the agent still asks before running commands.)
+    public static var autoApprove: Bool {
+        get { UserDefaults.standard.bool(forKey: "assistants.autoApprove") }
+        set { UserDefaults.standard.set(newValue, forKey: "assistants.autoApprove") }
+    }
+
     /// Finds the CLI the way your terminal would (a login shell, so Homebrew, npm and nvm paths count).
     public func locate() async -> URL? {
         let output = await MacActions.run("/bin/zsh", ["-lc", "command -v \(command)"], timeout: 10)
