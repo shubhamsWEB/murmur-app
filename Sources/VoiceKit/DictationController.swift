@@ -7,16 +7,28 @@ import Carbon.HIToolbox
 /// Murmur's dictation: hold the dictation key to talk and release to insert, or double-tap it for hands-free and tap
 /// again to finish (Esc cancels). Speech is transcribed on this Mac and pasted into the focused app.
 @MainActor
-public final class DictationController {
+public final class DictationController: ObservableObject {
+    /// Where the speech model is: shown on Murmur's Home and in the menu.
+    public enum SpeechModelState: Equatable {
+        case waiting
+        case downloading(Double)
+        case preparing(Double)
+        case ready
+        case failed(String)
+
+        public var isReady: Bool { self == .ready }
+    }
+
     public enum Phase: Equatable {
         case idle
         case listening(handsFree: Bool)
         case transcribing
     }
 
-    public private(set) var phase: Phase = .idle
+    @Published public private(set) var phase: Phase = .idle
+    @Published public private(set) var speechModelState: SpeechModelState = .waiting
     public private(set) var lastText: String?
-    public private(set) var modelStatus = "Speech model not loaded"
+    @Published public private(set) var modelStatus = "Speech model not loaded"
     /// Where log lines go (the app passes its own logger).
     public var log: (String) -> Void = { print($0) }
 
@@ -346,7 +358,7 @@ public final class DictationController {
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
-            hud.show(ready ? .transcribing : .preparing)
+            hud.show(ready ? .transcribing : .working(modelStatus))
             let started = Date()
             do {
                 let raw = try await transcriber.transcribe(samples)
@@ -414,15 +426,30 @@ public final class DictationController {
     // MARK: - Setup
 
     private func prepareModel() async {
-        modelStatus = "Speech model: downloading or loading…"
+        modelStatus = "Speech model: getting ready…"
+        speechModelState = .preparing(0)
         log("dictation: preparing Parakeet (\(transcriber.model.rawValue))")
         let started = Date()
         do {
-            try await transcriber.prepare()   // the current model
+            try await transcriber.prepare { [weak self] fraction, downloading in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let percent = Int((fraction * 100).rounded())
+                    if downloading {
+                        speechModelState = .downloading(fraction)
+                        modelStatus = "Downloading the speech model · \(percent)%"
+                    } else {
+                        speechModelState = .preparing(fraction)
+                        modelStatus = "Preparing the speech model · \(percent)%"
+                    }
+                }
+            }
             modelStatus = "Speech model ready (\(transcriber.model == .english ? "English" : "multilingual"), on device)"
+            speechModelState = .ready
             log(String(format: "dictation: Parakeet ready in %.1f s", Date().timeIntervalSince(started)))
         } catch {
             modelStatus = "Speech model failed to load"
+            speechModelState = .failed(error.localizedDescription)
             log("dictation: Parakeet failed: \(error.localizedDescription)")
         }
     }

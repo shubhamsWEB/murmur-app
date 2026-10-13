@@ -60,7 +60,7 @@ private struct AnswerView: View {
         VStack(alignment: .leading, spacing: 14) {
             ScrollView {
                 Text(state.text)
-                    .font(.system(size: 14, design: .rounded))
+                    .font(.system(size: 14))
                     .lineSpacing(3)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,6 +78,5 @@ private struct AnswerView: View {
         .padding(18)
         .frame(minWidth: 380, minHeight: 170)
         .background(Palette.paper)
-        .fontDesign(.rounded)
     }
 }

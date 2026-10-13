@@ -32,9 +32,9 @@ enum Brand {
 }
 
 extension View {
-    /// Murmur's type and control color: SF Rounded, coral controls.
+    /// Murmur's controls take the coral accent; type is the system's SF Pro.
     func murmurStyle() -> some View {
-        fontDesign(.rounded).tint(Brand.coral)
+        tint(Brand.coral)
     }
 }
 

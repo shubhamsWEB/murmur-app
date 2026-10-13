@@ -34,9 +34,10 @@ public actor ParakeetTranscriber {
 
     public var isReady: Bool { manager != nil }
 
-    /// Downloads (first time only) and loads the model. Safe to call more than once.
-    public func prepare() async throws {
-        _ = try await loadedManager()
+    /// Downloads (first time only) and loads the model. Safe to call more than once. `progress` gets the fraction
+    /// done (0…1) and whether it's downloading (true) or preparing the model for the Neural Engine (false).
+    public func prepare(progress: (@Sendable (Double, Bool) -> Void)? = nil) async throws {
+        _ = try await loadedManager(progress: progress)
     }
 
     public func transcribe(_ samples: [Float]) async throws -> String {
@@ -49,12 +50,17 @@ public actor ParakeetTranscriber {
         return result.text
     }
 
-    private func loadedManager() async throws -> AsrManager {
+    private func loadedManager(progress: (@Sendable (Double, Bool) -> Void)? = nil) async throws -> AsrManager {
         if let manager { return manager }
         if let loading { return try await loading.value }
         let version = model.version
         let task = Task { () throws -> AsrManager in
-            let models = try await AsrModels.downloadAndLoad(version: version)
+            let models = try await AsrModels.downloadAndLoad(version: version, progressHandler: { update in
+                switch update.phase {
+                case .compiling: progress?(update.fractionCompleted, false)
+                default: progress?(update.fractionCompleted, true)
+                }
+            })
             let manager = AsrManager(config: .default)
             try await manager.loadModels(models)
             return manager

@@ -90,7 +90,7 @@ private struct HUDView: View {
             indicator
                 .frame(width: 22, height: 22)
             Text(label)
-                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Palette.cream)
                 .lineLimit(1)
         }

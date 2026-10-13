@@ -146,8 +146,8 @@ private struct PageTitle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 28, weight: .semibold, design: .rounded))
-            Text(subtitle).font(.system(size: 14)).foregroundStyle(Brand.clay)
+            Text(title).font(.system(size: 30, weight: .semibold)).tracking(-0.4)
+            Text(subtitle).font(.system(size: 13)).foregroundStyle(Brand.clay)
         }
         .padding(.bottom, 22)
     }
@@ -171,7 +171,7 @@ private struct Card<Content: View>: View {
             VStack(alignment: .leading, spacing: 14) { content }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.10)))
         }
         .padding(.bottom, 20)
     }
@@ -203,86 +203,268 @@ private struct StatusRow: View {
 
 // MARK: - Home
 
+/// Home: is Murmur ready, how to use it, and where each model is. One live element: the fn key lights up while
+/// Murmur listens.
 private struct HomePage: View {
     let app: AppController
-    @ObservedObject private var history = DictationHistory.shared
+    @ObservedObject var dictation: DictationController
+
+    init(app: AppController) {
+        self.app = app
+        self.dictation = app.dictation
+    }
+
+    private var micOK: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+    private var typingOK: Bool { dictation.canPaste && dictation.isListeningForKey }
+    private var keyLabel: String { dictation.key == .fn ? "fn" : "⌥" }
 
     var body: some View {
-        let dictation = app.dictation
-        let micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "Hold \(dictation.key == .fn ? "Fn" : "Right ⌥") and talk.",
-                      subtitle: "Murmur types where your cursor is. Say “Murmur, …” first, or hold ⌃ too, for a command.")
-            if history.wordsToday > 0 {
-                Text("\(history.wordsToday) words dictated today")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Brand.coralDeep)
-                    .padding(.bottom, 18)
-            }
-            Card("Ready to go") {
-                StatusRow(ok: micOK, title: "Microphone",
-                          detail: micOK ? "Allowed" : "Murmur needs it to hear you",
-                          action: ("Allow…", { dictation.openMicrophoneSettings() }))
-                StatusRow(ok: dictation.canPaste && dictation.isListeningForKey, title: "Typing into other apps",
-                          detail: dictation.canPaste ? "Allowed" : "Turn Murmur on in Accessibility",
-                          action: ("Open Settings…", { dictation.openAccessibilitySettings() }))
-                StatusRow(ok: dictation.modelStatus.contains("ready"), title: "Speech model",
-                          detail: dictation.modelStatus)
-                StatusRow(ok: RouterChoice.current == .local || RouterChoice.current.hasKey,
-                          title: "Commands", detail: "Router: \(RouterChoice.current.display)")
-                StatusRow(ok: true, title: "File search", detail: app.model.statusLine)
-            }
-            Card("Recent") {
-                if history.items.isEmpty {
-                    Text("What you dictate shows up here. Hold Fn in any text box and say a sentence.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Brand.clay)
-                } else {
-                    ForEach(history.items.prefix(25)) { item in
-                        HistoryRow(item: item)
-                        if item.id != history.items.prefix(25).last?.id { Divider() }
-                    }
+            headline
+            if !micOK || !typingOK { permissions.padding(.top, 20) }
+            howTo.padding(.top, 30)
+            models.padding(.top, 34)
+            Text("Anything else: start with “Murmur, …”. For example “Murmur, summarise this” with text selected.")
+                .font(.system(size: 12))
+                .foregroundStyle(Brand.clay)
+                .padding(.top, 26)
+        }
+    }
+
+    // What state Murmur is in, in one line.
+    private var headline: some View {
+        let (title, busy) = summary
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Circle()
+                .fill(busy ? Brand.coral : Color.primary.opacity(0.75))
+                .frame(width: 9, height: 9)
+                .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+            Text(title)
+                .font(.system(size: 30, weight: .semibold))
+                .tracking(-0.4)
+                .monospacedDigit()
+        }
+    }
+
+    private var summary: (String, Bool) {
+        switch dictation.speechModelState {
+        case .downloading(let f): return ("Getting ready · speech model \(Int(f * 100))%", true)
+        case .preparing: return ("Getting ready · preparing speech", true)
+        case .waiting: return ("Getting ready", true)
+        case .failed: return ("The speech model didn't load", true)
+        case .ready: break
+        }
+        if !micOK || !typingOK { return ("Almost ready", true) }
+        switch dictation.phase {
+        case .listening: return ("Listening", true)
+        case .transcribing: return ("Writing it down", true)
+        case .idle: return ("Ready. Hold \(keyLabel) and talk.", false)
+        }
+    }
+
+    // Only what's missing, with the way to fix it.
+    private var permissions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !micOK {
+                Fix(text: "Murmur can't hear you yet. Allow the microphone.", action: "Allow…") {
+                    dictation.openMicrophoneSettings()
                 }
+            }
+            if !typingOK {
+                Fix(text: "Murmur can't type into other apps yet. Turn it on in Accessibility.",
+                    action: "Open Settings…") { dictation.openAccessibilitySettings() }
+            }
+        }
+    }
+
+    // The three ways to use it, shown as the keys you press.
+    private var howTo: some View {
+        HStack(alignment: .top, spacing: 28) {
+            LiveKey(label: keyLabel, lit: dictation.phase != .idle)
+            VStack(alignment: .leading, spacing: 18) {
+                Gesture(keys: [keyLabel], title: "Hold to dictate",
+                        detail: "Speak, then let go. The text appears where your cursor is.")
+                Gesture(keys: [keyLabel, keyLabel], title: "Double-tap for hands-free",
+                        detail: "Tap \(keyLabel) again to finish. Esc cancels.")
+                Gesture(keys: [keyLabel, "⌃"], plus: true, title: "Add ⌃ for a command",
+                        detail: "“Open Slack”, “find my beach photos”, “volume 30”.")
+            }
+        }
+    }
+
+    private var models: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Models").font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.clay)
+                .padding(.bottom, 10)
+            ModelRow(name: "Speech", detail: dictation.speechModel == .english ? "Parakeet, English" : "Parakeet, 25 languages",
+                     state: speechState)
+            Divider()
+            ModelRow(name: "File search", detail: "EmbeddingGemma 2", state: searchState)
+            Divider()
+            ModelRow(name: "Commands", detail: RouterChoice.current.display, state: commandsState)
+        }
+    }
+
+    private var speechState: ModelRow.State {
+        switch dictation.speechModelState {
+        case .waiting: .working("Waiting", nil)
+        case .downloading(let f): .working("Downloading \(Int(f * 100))%", f)
+        case .preparing(let f): .working("Preparing for the Neural Engine", f > 0 ? f : nil)
+        case .ready: .done("On this Mac")
+        case .failed(let message): .problem(message)
+        }
+    }
+
+    private var searchState: ModelRow.State {
+        let download = app.download
+        switch download.phase {
+        case .ready:
+            if let badge = app.model.activityBadge { return .working(badge, nil) }
+            return .done(app.model.statusLine)
+        case .needed: return .problem("Not downloaded yet (865 MB)")
+        case .failed(let message): return .problem(message)
+        default: return .working(download.progressText, download.fraction)
+        }
+    }
+
+    private var commandsState: ModelRow.State {
+        switch RouterChoice.current {
+        case .local: .done("Ollama, \(dictation.localRouterModel)")
+        case .anthropic, .openai:
+            RouterChoice.current.hasKey ? .done("Your API key") : .problem("Needs an API key")
+        }
+    }
+}
+
+/// The big key: lit coral while Murmur listens or writes.
+private struct LiveKey: View {
+    let label: String
+    let lit: Bool
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 30, weight: .medium))
+            .foregroundStyle(lit ? Color.white : Color.primary)
+            .frame(width: 112, height: 112)
+            .background(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(lit ? Brand.coral : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(lit ? Brand.coralDeep : Color.primary.opacity(0.14), lineWidth: 1)
+            )
+            .background(
+                // the key's edge, like a real keycap
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(lit ? Brand.coralDeep : Color.primary.opacity(0.12))
+                    .offset(y: 4)
+            )
+            .animation(.easeOut(duration: 0.15), value: lit)
+            .accessibilityLabel(lit ? "Listening" : "Hold \(label) to talk")
+    }
+}
+
+/// A small keycap.
+private struct Keycap: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 12, weight: .medium))
+            .frame(minWidth: 26, minHeight: 24)
+            .padding(.horizontal, 4)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.primary.opacity(0.16)))
+    }
+}
+
+private struct Gesture: View {
+    let keys: [String]
+    var plus = false
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            HStack(spacing: 4) {
+                ForEach(Array(keys.enumerated()), id: \.offset) { index, key in
+                    if plus, index > 0 { Text("+").font(.system(size: 12)).foregroundStyle(Brand.clay) }
+                    Keycap(label: key)
+                }
+            }
+            .frame(width: 78, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(detail).font(.system(size: 13)).foregroundStyle(Brand.clay)
             }
         }
     }
 }
 
-private struct HistoryRow: View {
-    let item: DictationHistory.Item
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: item.kind == .command ? "sparkles" : "text.bubble")
-                .foregroundStyle(item.kind == .command ? Brand.coral : Brand.clay)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.text)
-                    .font(.system(size: 14))
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-                Text(meta).font(.system(size: 11)).foregroundStyle(Brand.clay)
-            }
-            Spacer(minLength: 8)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(item.text, forType: .string)
-            } label: {
-                Image(systemName: "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-            .help("Copy")
-            .opacity(hovering ? 1 : 0)
-        }
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+/// One model: name, what it is, where it's at, and a thin progress line while it downloads or prepares.
+private struct ModelRow: View {
+    enum State {
+        case done(String)
+        case working(String, Double?)
+        case problem(String)
     }
 
-    private var meta: String {
-        let when = item.date.formatted(.relative(presentation: .named))
-        let kind = item.kind == .command ? "Command" : "Dictation"
-        return [kind, item.app, when].compactMap { $0 }.joined(separator: ", ")
+    let name: String
+    let detail: String
+    let state: State
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(name).font(.system(size: 14, weight: .semibold)).frame(width: 110, alignment: .leading)
+                Text(detail).font(.system(size: 13)).foregroundStyle(Brand.clay)
+                Spacer(minLength: 12)
+                status
+            }
+            if case .working(_, let fraction) = state {
+                if let fraction {
+                    ProgressView(value: fraction).progressViewStyle(.linear).tint(Brand.coral)
+                } else {
+                    ProgressView().progressViewStyle(.linear).tint(Brand.coral)
+                }
+            }
+        }
+        .padding(.vertical, 12)
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch state {
+        case .done(let text):
+            Label(text, systemImage: "checkmark").labelStyle(.titleAndIcon)
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+        case .working(let text, _):
+            Text(text).font(.system(size: 12, weight: .medium)).foregroundStyle(Brand.coralDeep).monospacedDigit()
+                .lineLimit(1)
+        case .problem(let text):
+            Text(text).font(.system(size: 12, weight: .medium)).foregroundStyle(Brand.coralDeep).lineLimit(1)
+        }
+    }
+}
+
+/// Something to fix, with the button that fixes it.
+private struct Fix: View {
+    let text: String
+    let action: String
+    let perform: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Rectangle().fill(Brand.coral).frame(width: 3)
+            Text(text).font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 8)
+            Button(action, action: perform)
+        }
+        .padding(.vertical, 10)
+        .padding(.trailing, 12)
+        .background(Brand.coral.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -472,14 +654,14 @@ private struct AboutPage: View {
                     .resizable()
                     .frame(width: 72, height: 72)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Murmur").font(.system(size: 28, weight: .semibold, design: .rounded))
+                    Text("Murmur").font(.system(size: 30, weight: .semibold)).tracking(-0.4)
                     Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                         .font(.system(size: 13)).foregroundStyle(Brand.clay)
                 }
             }
             .padding(.bottom, 22)
             Text("Talk anywhere. Find anything.")
-                .font(.system(size: 18, weight: .medium, design: .rounded))
+                .font(.system(size: 18, weight: .medium))
                 .padding(.bottom, 20)
             Card("Made with") {
                 Text("File index and search from DigUp by Abdur Rahim (MIT). Speech recognition with NVIDIA Parakeet "
