@@ -51,6 +51,21 @@ selected text), never audio. If the cloud call fails, Murmur falls back to the l
 Setup: install [Ollama](https://ollama.com) (you have it), then `ollama pull qwen3:4b`. Pick another router model
 under Commands & Assistants (`qwen3:1.7b` is faster, `qwen3:8b` is smarter).
 
+## Download
+
+Get the latest **Murmur.dmg** from [Releases](https://github.com/shubhamsWEB/murmur-app/releases/latest), open it and
+drag Murmur to Applications. The website lives in its own repo:
+[murmur-web](https://github.com/shubhamsWEB/murmur-web).
+
+## Releasing
+
+1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
+2. Run `./scripts/release.sh`. It builds the DMG (`scripts/make-dmg.sh`) and publishes it as GitHub release
+   `v<version>` with two files: `Murmur-<version>.dmg` and `Murmur.dmg`. The website's Download buttons point at
+   `releases/latest/download/Murmur.dmg`, so they pick up the new version on their own.
+
+Needs the GitHub CLI, signed in once: `brew install gh && gh auth login`.
+
 ## Build and run
 
 Needs an Apple Silicon Mac, macOS 14+, and Xcode 26 (Swift 6.2).

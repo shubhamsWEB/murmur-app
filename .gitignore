@@ -24,3 +24,6 @@ evals/*.local.json
 shell/src-tauri/target/
 shell/src-tauri/gen/
 dist/
+
+# The product website lives in its own repo (murmur-web)
+website/
