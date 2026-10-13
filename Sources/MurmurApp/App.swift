@@ -17,8 +17,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if isAlreadyRunning() {
-            NSApp.terminate(nil)
+        if let other = otherRunningCopy() {
+            // Murmur is already running (often a copy from another folder, like the dev build): opening it again from
+            // Spotlight, Launchpad or /Applications brings that one's window forward instead of quietly doing nothing.
+            log("launch: another Murmur is running (\(other.bundleURL?.path ?? "?")); showing that one")
+            if let url = other.bundleURL {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                }
+            } else {
+                other.activate()
+                NSApp.terminate(nil)
+            }
             return
         }
         // For testing both themes: `-forceAppearance dark` (or light).
@@ -51,11 +63,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Another copy is running (a second copy of the app, launched from elsewhere). Dev and test runs, which keep their
     /// own settings, index and models (`-defaultsSuite`), run alongside an installed Murmur that's in use.
-    private func isAlreadyRunning() -> Bool {
+    private func otherRunningCopy() -> NSRunningApplication? {
         guard UserDefaults.standard.string(forKey: "defaultsSuite") == nil,
-              let id = Bundle.main.bundleIdentifier else { return false }
+              let id = Bundle.main.bundleIdentifier else { return nil }
         return NSRunningApplication.runningApplications(withBundleIdentifier: id)
-            .contains { $0 != NSRunningApplication.current }
+            .first { $0 != NSRunningApplication.current }
     }
 
     /// The menu bar while a window is open (the Dock icon shows then). It also gives text fields ⌘C/⌘V/⌘A/⌘Z.
