@@ -37,12 +37,14 @@ enum HomeSection: String, CaseIterable, Identifiable {
 @Observable
 final class HomeState {
     var section: HomeSection = .home
+    /// The tab on the Folders page (General, Folders, Code, Storage).
+    var foldersTab: SettingsTab = .folders
 }
 
 /// Murmur's one window: status and recent dictations, then each part's settings.
 final class HomeWindowController: NSObject, NSWindowDelegate {
     private unowned let app: AppController
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
     let state = HomeState()
 
     init(app: AppController) {
@@ -120,7 +122,7 @@ private struct HomeView: View {
         case .search: SearchPage(app: app)
         case .dictation: DictationPage(dictation: app.dictation)
         case .commands: CommandsPage(dictation: app.dictation)
-        case .folders: FoldersPage(app: app)
+        case .folders: FoldersPage(app: app, state: state)
         case .about: AboutPage(app: app)
         }
     }
@@ -417,19 +419,19 @@ private struct CommandsPage: View {
 
 private struct FoldersPage: View {
     let app: AppController
-    @State private var tab = SettingsTab.folders
+    @Bindable var state: HomeState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "Folders", subtitle: "What file search reads, and what it keeps on this Mac.")
-            Picker("", selection: $tab) {
+            PageTitle(title: "Folders", subtitle: "What file search reads, the search shortcut, and what's kept on this Mac.")
+            Picker("", selection: $state.foldersTab) {
                 ForEach(SettingsTab.allCases, id: \.self) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.bottom, 16)
-            SettingsPane(tab: tab, state: app.settingsWindow.state)
-                .task(id: tab) { await app.settingsWindow.state.refresh() }
+            SettingsPane(tab: state.foldersTab, state: app.settingsWindow.state)
+                .task(id: state.foldersTab) { await app.settingsWindow.state.refresh() }
         }
     }
 }

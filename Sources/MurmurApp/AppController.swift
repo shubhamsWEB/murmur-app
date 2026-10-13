@@ -66,6 +66,7 @@ final class AppController {
         searchWindow = SearchWindowController(app: self)
         settingsWindow = SettingsWindowController(app: self)
         home = HomeWindowController(app: self)
+        settingsWindow.sheetParent = { [weak self] in self?.home.window }
         statusMenu = StatusMenuController(model: model)
         statusMenu.onSearch = { [weak self] in self?.panel.show() }
         statusMenu.onOpenWindow = { [weak self] in self?.showHome() }
@@ -293,8 +294,10 @@ final class AppController {
         home.show(section)
     }
 
+    /// The old Settings window's tabs live on the Murmur window's Folders page now.
     func showSettings(_ tab: SettingsTab = .general) {
-        settingsWindow.show(tab)
+        home.state.foldersTab = tab
+        home.show(.folders)
     }
 
     func showOnboarding() {

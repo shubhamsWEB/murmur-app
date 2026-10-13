@@ -54,13 +54,16 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     /// Opens Add Folders on the Folders tab.
+    /// The window the folder sheets attach to (the Murmur window), when this one isn't open.
+    var sheetParent: () -> NSWindow? = { nil }
+
     func addFolders() {
-        addSheet.begin(on: window)
+        addSheet.begin(on: window ?? sheetParent())
     }
 
     /// Opens the code folders' sheet on the Code tab.
     func addCodeFolders() {
-        codeSheet.begin(on: window)
+        codeSheet.begin(on: window ?? sheetParent())
     }
 
     var isVisible: Bool { window?.isVisible == true }
@@ -230,25 +233,27 @@ private struct GeneralSettings: View {
                     }
                 }
             }
-            Section {
-                Toggle(isOn: Binding(get: { state.checksForUpdates }, set: { on in
-                    state.app.updates.automaticallyChecks = on
-                    state.checksForUpdates = on
-                })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Check for updates automatically")
-                        Text("Once a day Murmur asks GitHub for its newest version; nothing about your files is sent. "
-                             + "Updates install with one click.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+            if Updates.hasFeed {
+                Section {
+                    Toggle(isOn: Binding(get: { state.checksForUpdates }, set: { on in
+                        state.app.updates.automaticallyChecks = on
+                        state.checksForUpdates = on
+                    })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Check for updates automatically")
+                            Text("Once a day Murmur asks GitHub for its newest version; nothing about your files is sent. "
+                                 + "Updates install with one click.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                }
-                LabeledContent {
-                    Button("Check Now") { state.app.updates.checkNow() }
-                } label: {
-                    Text(state.model.updateAvailable.map { "Murmur \($0) is available" }
-                         ?? "Murmur \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                    LabeledContent {
+                        Button("Check Now") { state.app.updates.checkNow() }
+                    } label: {
+                        Text(state.model.updateAvailable.map { "Murmur \($0) is available" }
+                             ?? "Murmur \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                    }
                 }
             }
         }

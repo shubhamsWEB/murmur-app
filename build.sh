@@ -39,6 +39,14 @@ BIN_DIR="$(swift build -c release --show-bin-path)"
 # Assets.car), older macOS the .icns. Without the former, macOS 26 shows the icon shrunk inside a gray square.
 ICON="Resources/AppIcon.icns"
 
+# A Murmur still running from this build would keep showing the old version (and lose its helper when the bundle is
+# replaced), and `open` would only bring that old copy forward: quit it first.
+if pgrep -f "$PWD/$APP/Contents/MacOS/" > /dev/null 2>&1; then
+  echo "Quitting the running Murmur so the new build opens…"
+  pkill -TERM -f "$PWD/$APP/Contents/MacOS/" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$PWD/$APP/Contents/MacOS/" > /dev/null 2>&1 || break; sleep 0.3; done
+  pkill -KILL -f "$PWD/$APP/Contents/MacOS/" 2>/dev/null || true
+fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 # The binary is MurmurApp in SwiftPM (it can't share a name with the `murmur-engine` CLI on a case-insensitive disk).

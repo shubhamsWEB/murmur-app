@@ -54,7 +54,10 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         if UserDefaults.standard.string(forKey: "defaultsSuite") == nil {
             window.setFrameAutosaveName("MurmurSearchWindow")
         }
-        window.contentView = NSHostingView(rootView: SearchWindowView(search: search, model: app.model, app: app).murmurStyle())
+        window.backgroundColor = Brand.paperNS
+        window.contentView = NSHostingView(rootView: SearchWindowView(search: search, model: app.model, app: app)
+            .background(Brand.paper)
+            .murmurStyle())
         if window.frame.origin == .zero { window.center() }
         self.window = window
         return window
@@ -400,7 +403,7 @@ struct SearchWindowView: View {
                 .buttonStyle(.plain)
                 .help(search.showsPreview ? "Hide Preview" : "Show Preview")
                 Button {
-                    app.showSettings()
+                    app.showHome(.dictation)
                 } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 15))
@@ -457,7 +460,7 @@ struct SearchWindowView: View {
                 ProgressView(value: progress).progressViewStyle(.circular).controlSize(.mini)
             }
             // What's indexed: a click shows the folders and their progress.
-            Button(model.statusLine) { app.showSettings(.folders) }
+            Button(model.statusLine) { app.showHome(.folders) }
                 .buttonStyle(.plain)
                 .lineLimit(1)
                 .help("Folders and indexing")
@@ -849,21 +852,20 @@ private struct SearchHome: View {
     var body: some View {
         VStack(spacing: 0) {
             BrandMark()
-            Text("Describe it. Dig it up.")
-                .font(.system(size: 24, weight: .bold))
+            Text("Find it by describing it.")
+                .font(.system(size: 26, weight: .semibold, design: .rounded))
                 .padding(.top, 18)
-            Text("Type what you remember in the search field above: what's in it, what it looks or sounds like, or "
-                 + "words from it.")
+            Text("Type what you remember above: what's in it, what it looks or sounds like, or words from it. "
+                 + "Or hold Fn and say “find my files about…”.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 440)
                 .padding(.top, 6)
-            Text("TRY")
-                .font(.system(size: 10, weight: .semibold))
-                .tracking(0.8)
-                .foregroundStyle(.tertiary)
+            Text("Try one of these")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
                 .padding(.top, 26)
             FlowRow(spacing: 8) {
                 ForEach(examples, id: \.text) { example in
