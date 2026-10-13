@@ -33,6 +33,15 @@ public final class DictationController {
     private var commandRequested = false
     /// The app you were in when you pressed the key (commands paste back into it).
     private var previousApp: NSRunningApplication?
+    /// At the key press: whether a text field had the focus, and what was selected.
+    private var textFieldFocusedAtPress = true
+    private var selectionAtPress: String?
+
+    /// Decide from the words whether you're dictating or giving a command (on by default). Fn+⌃ always means a command.
+    public var detectCommands: Bool {
+        get { UserDefaults.standard.object(forKey: "detectCommands") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "detectCommands") }
+    }
     private let answerPanel = AnswerPanel()
     private lazy var agent = CommandAgent(host: makeHost())
     /// Opens Murmur's file search with a query (set by the app).
@@ -78,6 +87,9 @@ public final class DictationController {
         }
         startMonitor(prompt: true)
         Task { await prepareModel() }
+        // Load the router model now, so the first command or decision doesn't wait for it.
+        let router = agent.routerModel
+        Task.detached { await OllamaClient(model: router).warmUp() }
     }
 
     public func setKey(_ key: DictationKeyMonitor.Key) {
@@ -154,7 +166,12 @@ public final class DictationController {
         modelItem.submenu = modelMenu
         items.append(modelItem)
         let assistants = NSMenu()
-        let hint = NSMenuItem(title: "Hold Fn+⌃ and speak a command", action: nil, keyEquivalent: "")
+        assistants.addItem(ClosureMenuItem("Detect Commands Automatically", checked: detectCommands) { [weak self] in
+            guard let self else { return }
+            detectCommands.toggle()
+            log("intent: automatic detection \(detectCommands ? "on" : "off")")
+        })
+        let hint = NSMenuItem(title: "Fn+⌃ always runs a command", action: nil, keyEquivalent: "")
         hint.isEnabled = false
         assistants.addItem(hint)
         assistants.addItem(.separator())
@@ -202,6 +219,8 @@ public final class DictationController {
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(.control)
             previousApp = NSWorkspace.shared.frontmostApplication
+            textFieldFocusedAtPress = Self.textFieldFocused()
+            selectionAtPress = Self.selectedText()
             begin(handsFree: doubleTap)
         default:
             break
@@ -277,9 +296,11 @@ public final class DictationController {
         let samples = leveled.samples
         lastSamples = samples
         let transcriber = transcriber
-        let isCommand = commandRequested
+        let forcedCommand = commandRequested
         let frontApp = previousApp?.localizedName
-        let selection = isCommand ? Self.selectedText() : nil
+        let selection = selectionAtPress
+        let textFieldFocused = textFieldFocusedAtPress
+        let detect = detectCommands
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
@@ -296,7 +317,14 @@ public final class DictationController {
                     hud.flash("Didn't catch that")
                     return
                 }
-                if isCommand {
+                let decision = detect
+                    ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
+                                                    textFieldFocused: textFieldFocused, frontApp: frontApp,
+                                                    hasSelection: selection != nil, model: agent.routerModel)
+                    : IntentClassifier.Decision(intent: forcedCommand ? .command : .dictation,
+                                                reason: forcedCommand ? "⌃ held" : "detection off")
+                log("intent: \(decision.intent.rawValue) (\(decision.reason))")
+                if decision.intent == .command {
                     log("command: \"\(text)\"")
                     hud.show(.working("“\(text.prefix(60))”"))
                     await agent.run(text, frontApp: frontApp, selection: selection)
@@ -431,6 +459,32 @@ extension DictationController {
         } else {
             report(TextInserter.insert(text))
         }
+    }
+
+    /// Whether the focused element takes text. When Accessibility can't say (some apps don't report focus), this
+    /// answers true, so speech is typed rather than taken as a command.
+    static func textFieldFocused() -> Bool {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused)
+        if status == .noValue {
+            // Nothing has the focus: the desktop, an empty Finder window, a video player.
+            return false
+        }
+        guard status == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return true }
+        let element = focused as! AXUIElement
+        var role: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXWebArea"]
+        if let role = role as? String, textRoles.contains(role) { return true }
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
+           settable.boolValue { return true }
+        var range: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &range) == .success {
+            return true
+        }
+        return false
     }
 
     /// The text selected in the focused app, through Accessibility (for "make this shorter", "reply to this").

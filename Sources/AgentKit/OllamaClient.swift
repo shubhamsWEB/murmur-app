@@ -81,6 +81,44 @@ public struct OllamaClient: Sendable {
         return Reply(content: content, toolCalls: calls)
     }
 
+    /// One short completion constrained to a JSON schema (for quick decisions). Nil on any failure or timeout.
+    public func decide(system: String, user: String, schema: [String: Any], timeout: TimeInterval) async
+        -> [String: Any]? {
+        var request = URLRequest(url: base.appendingPathComponent("api/chat"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = timeout
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [["role": "system", "content": system], ["role": "user", "content": user]],
+            "format": schema,
+            "stream": false,
+            "think": false,
+            "keep_alive": "30m",
+            "options": ["temperature": 0, "num_predict": 24],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        request.httpBody = data
+        guard let (reply, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = (try? JSONSerialization.jsonObject(with: reply)) as? [String: Any],
+              let message = json["message"] as? [String: Any],
+              let content = message["content"] as? String,
+              let object = (try? JSONSerialization.jsonObject(with: Data(content.utf8))) as? [String: Any]
+        else { return nil }
+        return object
+    }
+
+    /// Loads the model into memory ahead of the first command, so it answers fast.
+    public func warmUp() async {
+        var request = URLRequest(url: base.appendingPathComponent("api/generate"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "keep_alive": "30m"])
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
     /// Whether Ollama answers at all (for the menu's status line).
     public func isRunning() async -> Bool {
         var request = URLRequest(url: base.appendingPathComponent("api/tags"))

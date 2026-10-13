@@ -18,7 +18,13 @@ Code: `Sources/VoiceKit` (new). Small hooks in `Sources/DigUpApp/AppController.s
 
 ## Commands (milestones 3 and 5)
 
-Hold **Fn+⌃** (or press ⌃ while holding Fn) and speak a command instead of text.
+Just hold **Fn** and speak: Murmur decides whether it's a command or text to type (Commands & Assistants →
+Detect Commands Automatically, on by default). **Fn+⌃** always means a command.
+
+How it decides, cheapest first: ⌃ held → command; no text field focused → command; a known command like "open Slack"
+→ command; starts with "Murmur…" → command; in a text field and it opens like an instruction ("send…", "summarise…",
+"what's…") → the router model decides in under ~0.5 s (typed if it can't answer in 2.5 s); anything else → typed.
+The log line `intent: … (reason)` says which rule decided.
 
 - **Instant, no model:** "open Slack", "quit Spotify", "hide Xcode", "volume 30", "volume up", "mute", "brightness
   down", "lock the screen", "take a screenshot", "search the web for …", "find my files about …", "open downloads",
