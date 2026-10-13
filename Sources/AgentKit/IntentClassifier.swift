@@ -65,6 +65,11 @@ public enum IntentClassifier {
         if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {
             return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")
         }
+        // "open Notes and write a shopping list", "open TextEdit and type…": a task in an app.
+        if cleaned.range(of: #"^(open|launch|start|go to|switch to) .+ (and|then) (then )?(write|type|draft|jot|note|add|put|create|make|compose|list)\b"#,
+                         options: .regularExpression) != nil {
+            return Decision(intent: .command, reason: "open an app and write in it")
+        }
         if WakeName.strip(utterance) != nil {
             return Decision(intent: .command, reason: "addressed to Murmur")
         }

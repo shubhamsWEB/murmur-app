@@ -11,6 +11,8 @@ public struct CommandHost {
     public var insert: (String) -> Void
     /// Open Murmur's file search with this query.
     public var searchFiles: (String) -> Void
+    /// Paste into the app in front now (not the one you were in when you spoke): after Murmur opened it.
+    public var pasteHere: (String) -> Void
     /// Open the file that best matches a description ("my resume pdf"), or show the matches when it isn't clear
     /// which one. Returns what happened, to show.
     public var openFile: (String) async -> String
@@ -22,12 +24,14 @@ public struct CommandHost {
     public init(confirm: @escaping (String, String) async -> Bool, showAnswer: @escaping (String) -> Void,
                 insert: @escaping (String) -> Void, searchFiles: @escaping (String) -> Void,
                 progress: @escaping (String) -> Void, log: @escaping (String) -> Void,
+                pasteHere: @escaping (String) -> Void = { _ in },
                 openFile: @escaping (String) async -> String = { _ in "" }) {
         self.confirm = confirm
         self.showAnswer = showAnswer
         self.insert = insert
         self.searchFiles = searchFiles
         self.openFile = openFile
+        self.pasteHere = pasteHere
         self.progress = progress
         self.log = log
     }
@@ -320,6 +324,20 @@ public final class CommandAgent {
             host.progress("Asking \(helper.display)…")
             let answer = await helper.run(task)
             return Outcome(result: "\(helper.display) answered:\n\(answer.prefix(6000))")
+        case "write_in_app":
+            let appName = text("app")
+            let body = text("text").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return Outcome(result: "There was nothing to write.") }
+            host.progress("Writing in \(appName)…")
+            let (opened, ready) = await MacActions.prepareToWrite(in: appName, newDocument: text("new_document") != "false")
+            guard ready else {
+                host.showAnswer("\(opened)\n\nHere's what I wrote:\n\n\(body)")
+                return Outcome(result: opened, finished: true, shown: true)
+            }
+            host.pasteHere(body)
+            host.log("command: wrote \(body.count) characters in \(appName)")
+            host.progress("Written in \(appName)")
+            return Outcome(result: "Wrote it in \(appName).", finished: true, shown: true)
         case "insert_text":
             host.insert(text("text"))
             return Outcome(result: "Pasted.", finished: true, shown: true)
@@ -345,6 +363,10 @@ public final class CommandAgent {
                 + "open_url for a site.",
             "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot.",
             "- Shortcuts: list_shortcuts, run_shortcut.",
+            "- To write something in an app (\"open Notes and write a shopping list\", \"open TextEdit and draft a "
+                + "letter to…\"): call write_in_app ONCE with the app and the finished text, written by you in full "
+                + "(plain text, a short title line first for notes). Don't call open_app as well. new_document false "
+                + "only when the user wants it added to what's already open.",
             "- To write or rewrite text for the user (a reply, a shorter version of the selection, a translation), "
                 + "call insert_text with the finished text only.",
             "- To answer a question, call reply with a short answer.",
@@ -391,6 +413,10 @@ public final class CommandAgent {
             tool("list_shortcuts", "List the user's Shortcuts"),
             tool("run_shortcut", "Run one of the user's Shortcuts (asks first)",
                  ["name": ("string", "shortcut name"), "input": ("string", "optional text input")], required: ["name"]),
+            tool("write_in_app", "Open an app (Notes, TextEdit, Pages…), start a new note or document, and type the text",
+                 ["app": ("string", "app name"), "text": ("string", "the full finished text to write"),
+                  "new_document": ("boolean", "true for a new note/document (default), false to add to the open one")],
+                 required: ["app", "text"]),
             tool("insert_text", "Paste finished text where the user is typing", ["text": ("string", "the text")]),
             tool("reply", "Show a short answer to the user", ["text": ("string", "the answer")]),
             tool("done", "Finish when nothing more is needed"),

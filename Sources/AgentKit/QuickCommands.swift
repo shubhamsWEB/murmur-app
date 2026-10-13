@@ -31,6 +31,8 @@ public enum QuickCommands {
         // "open my resume pdf", "pull up the lease document", "open my cv": open the best match straight away.
         (#"^(?:open|pull up|bring up)(?: up)? (?:my |the |that |this |our )?((?:.+? )?(?:pdfs?|docx?|documents?|word doc|files?|photos?|pictures?|images?|videos?|screenshots?|recordings?|spreadsheets?|sheets?|slides|decks?|presentations?|resumes?|résumés?|cvs?|receipts?|invoices?|contracts?|leases?|statements?|notes?))$"#, { m in
             let query = m[1]
+            // "open notes and write…" is a chain for the router, not a file called that.
+            if query.range(of: #"\b(and|then)\b"#, options: .regularExpression) != nil { return nil }
             // "open photos" / "open notes" are apps; a file needs more than the type word.
             if !query.contains(" "), !["resume", "resumes", "résumé", "cv", "receipt", "invoice", "contract", "lease"]
                 .contains(query) { return nil }
@@ -128,6 +130,8 @@ public enum QuickCommands {
                 // "open X" only takes the fast path when X is a real app; otherwise the router decides.
                 if action.tool == "open_app" || action.tool == "quit_app" || action.tool == "hide_app" {
                     let name = action.arguments["name"] ?? ""
+                    // "open notes and write a list": more than opening an app; the router does the whole thing.
+                    if name.range(of: #"\b(and|then|to|with|about)\b"#, options: .regularExpression) != nil { return nil }
                     if action.tool == "open_app", AppCatalog.shared.resolve(name) == nil { return nil }
                     if name.split(separator: " ").count > 4 { return nil }
                 }

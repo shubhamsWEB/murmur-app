@@ -250,7 +250,7 @@ public struct AnthropicRouter: Router {
     }
 
     public func chat(system: String, turns: [RouterTurn], tools: [ToolSpec]) async throws -> RouterReply {
-        var body = base(system: system, maxTokens: tools.isEmpty ? 2048 : 1024)
+        var body = base(system: system, maxTokens: 2048)
         body["messages"] = messages(turns)
         if !tools.isEmpty {
             body["tools"] = tools.map { tool -> [String: Any] in

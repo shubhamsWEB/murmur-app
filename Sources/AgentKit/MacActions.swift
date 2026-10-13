@@ -25,6 +25,24 @@ public enum MacActions {
         }
     }
 
+    /// Opens the app, waits until it's in front, and starts a new document (⌘N) when asked, so what's pasted next
+    /// lands in it. Returns what happened and whether it's ready for typing.
+    static func prepareToWrite(in spoken: String, newDocument: Bool) async -> (String, Bool) {
+        let (result, app) = await openAppReturningApp(spoken)
+        guard let app else { return (result, false) }
+        for _ in 0..<50 {
+            let front = NSWorkspace.shared.frontmostApplication
+            if front?.bundleIdentifier == app.bundleID || front?.localizedName == app.name { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)   // its window comes up
+        if newDocument {
+            postKey(CGKeyCode(kVK_ANSI_N), flags: .maskCommand)
+            try? await Task.sleep(nanoseconds: 700_000_000)   // the new note or document takes the cursor
+        }
+        return (result, true)
+    }
+
     static let browserIDs: Set<String> = [
         "com.google.Chrome", "com.apple.Safari", "org.mozilla.firefox", "com.brave.Browser", "com.microsoft.edgemac",
         "company.thebrowser.Browser", "ai.perplexity.comet", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",

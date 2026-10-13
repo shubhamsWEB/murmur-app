@@ -517,6 +517,12 @@ extension DictationController {
                 if text.hasSuffix("…") { hud.show(.working(text)) } else { hud.flash(text, seconds: 2) }
             },
             log: { [weak self] line in self?.log(line) },
+            pasteHere: { [weak self] text in
+                guard let self else { return }
+                lastText = text
+                hud.hide()
+                report(TextInserter.insert(text))
+            },
             openFile: { [weak self] query in
                 guard let open = self?.onOpenFile else { return "File search isn't ready." }
                 return await open(query)
