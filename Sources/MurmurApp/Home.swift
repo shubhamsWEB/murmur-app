@@ -1,6 +1,7 @@
 import AgentKit
 import AppKit
 import AVFoundation
+import Observation
 import SwiftUI
 import VoiceKit
 
