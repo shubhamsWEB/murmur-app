@@ -160,6 +160,25 @@ public final class DictationController: ObservableObject {
     }
 
     /// Items for the menu bar menu.
+    /// The few dictation items the menu bar menu keeps (everything else is in Murmur's window): fixing
+    /// Accessibility, Whisper Mode, and the last dictation again.
+    public func compactMenuItems() -> [NSMenuItem] {
+        var items: [NSMenuItem] = []
+        if !monitor.isRunning || !AXIsProcessTrusted() {
+            items.append(ClosureMenuItem("Allow Typing in Other Apps…") { Self.openPrivacyPane("Privacy_Accessibility") })
+        }
+        if let lastText {
+            items.append(ClosureMenuItem("Paste Last Dictation Again") { [weak self] in self?.pasteLast() })
+            items.append(ClosureMenuItem("Copy Last Dictation") { TextInserter.copy(lastText) })
+        }
+        items.append(ClosureMenuItem("Whisper Mode", checked: whisperMode) { [weak self] in
+            guard let self else { return }
+            whisperMode.toggle()
+            log("dictation: whisper mode \(whisperMode ? "on" : "off")")
+        })
+        return items
+    }
+
     public func menuItems() -> [NSMenuItem] {
         var items: [NSMenuItem] = []
         let header = NSMenuItem(title: "Dictation: hold \(monitor.key.display) to talk", action: nil, keyEquivalent: "")
@@ -638,13 +657,10 @@ extension DictationController {
     /// A Murmur dialog for actions that change something. It floats above every window.
     private func confirm(_ title: String, _ detail: String) -> Bool {
         hud.hide()
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = detail
-        alert.addButton(withTitle: "Go Ahead")
-        alert.addButton(withTitle: "Cancel")
-        Self.bringToFront(alert)
-        let answer = alert.runModal() == .alertFirstButtonReturn
+        let action = title.hasPrefix("Build") ? "Start Building" : title.hasPrefix("Quit") ? "Quit"
+            : title.hasPrefix("Click") ? "Click" : "Go Ahead"
+        let answer = ConfirmPanel.run(title: title, detail: detail, confirm: action,
+                                      symbol: ConfirmPanel.symbol(for: title))
         log("command: \(title) → \(answer ? "yes" : "no")")
         return answer
     }

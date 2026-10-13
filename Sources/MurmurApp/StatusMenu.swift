@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import VoiceKit
 
 /// The menubar icon: the app icon's mark, a boxed waveform (`Resources/AppIcon/menubar.svg`, drawn here from the same geometry
 /// so it's sharp at any scale). While the model downloads or files index, a progress ring takes the box's place; while
@@ -76,8 +77,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     var onChooseFolders: () -> Void = {}
     var onPauseChanged: (Bool) -> Void = { _ in }
     var onCheckForUpdates: () -> Void = {}
-    /// Murmur: the dictation items shown at the top of the menu.
+    /// Murmur: the dictation items shown in the menu.
     var dictationItems: () -> [NSMenuItem] = { [] }
+    /// Murmur's voice side, for the status at the top of the menu.
+    weak var dictation: DictationController?
+    var onCommands: () -> Void = {}
     private var shownProgress: Double?
     private var shownPaused = false
     private var shownUpdate = false
@@ -120,16 +124,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let header = NSMenuItem()
-        let view = NSHostingView(rootView: MenuStatusView(model: model).murmurStyle())
+        let view = NSHostingView(rootView: MenuStatusView(model: model, dictation: dictation).murmurStyle())
         view.frame.size = view.fittingSize
         header.view = view
         menu.addItem(header)
         menu.addItem(.separator())
-        let dictation = dictationItems()
-        if !dictation.isEmpty {
-            for item in dictation { menu.addItem(item) }
-            menu.addItem(.separator())
-        }
         if let version = model.updateAvailable {
             menu.addItem(ActionMenuItem("Update to Murmur \(version)…") { [weak self] in self?.onCheckForUpdates() })
             menu.addItem(.separator())
@@ -138,13 +137,19 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         if !model.hasFolders {
             menu.addItem(ActionMenuItem("Choose Folders to Search…") { [weak self] in self?.onChooseFolders() })
         }
-        let search = ActionMenuItem("Search…") { [weak self] in self?.onSearch() }
+        let search = ActionMenuItem("Search Files…") { [weak self] in self?.onSearch() }
         if let hotkey = model.hotkey, let (key, modifiers) = hotkey.menuEquivalent {
             search.keyEquivalent = key
             search.keyEquivalentModifierMask = modifiers
         }
         menu.addItem(search)
         menu.addItem(ActionMenuItem("Open Murmur") { [weak self] in self?.onOpenWindow() })
+        menu.addItem(ActionMenuItem("Commands & AI…") { [weak self] in self?.onCommands() })
+        let dictationItems = dictationItems()
+        if !dictationItems.isEmpty {
+            menu.addItem(.separator())
+            for item in dictationItems { menu.addItem(item) }
+        }
         if model.hasFolders {
             menu.addItem(.separator())
             let paused = model.status.paused
@@ -186,30 +191,50 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 }
 
-/// The top of the menu: the status line, a detail (where, or how long), and progress while there is some.
+/// The top of the menu: is Murmur ready to listen, how indexing is going, and the last thing you said.
 struct MenuStatusView: View {
     let model: AppModel
+    let dictation: DictationController?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(model.statusLine)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-            if let detail {
-                Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+        VStack(alignment: .leading, spacing: 10) {
+            if let dictation {
+                let ready = Readiness(dictation)
+                HStack(spacing: 10) {
+                    Circle().fill(ready.dot).frame(width: 8, height: 8)
+                        .padding(3)
+                        .background(Circle().fill(ready.dot.opacity(0.18)))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(ready.title).font(.system(size: 13, weight: .semibold))
+                        Text(ready.problem ? ready.detail : "\(ready.detail) · add ⌃ for a command")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.ink2)
+                            .lineLimit(1)
+                    }
+                }
             }
-            if let progress = model.progress {
-                ProgressView(value: progress)
-                    .controlSize(.small)
-                    .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text.magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.ink2)
+                    Text(model.statusLine).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                }
+                if let detail {
+                    Text(detail).font(.system(size: 11)).foregroundStyle(Theme.ink2).lineLimit(2)
+                }
+                if let progress = model.progress {
+                    ThinProgress(fraction: progress).padding(.top, 2)
+                }
+            }
+            if let last = dictation?.lastText, !last.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    SectionLabel("Last dictation").padding(.horizontal, -4)
+                    Text(last).font(.system(size: 12)).foregroundStyle(Theme.ink).lineLimit(2)
+                }
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 5)
-        .frame(width: 280, alignment: .leading)
+        .padding(.vertical, 8)
+        .frame(width: 300, alignment: .leading)
     }
 
     private var detail: String? {

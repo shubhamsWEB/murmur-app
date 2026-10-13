@@ -82,7 +82,9 @@ final class AppController {
         // Voice searches land in Murmur's own window (its Search page), not a separate one.
         dictation.onSearchFiles = { [weak self] query in self?.showSearchWindow(query: query) }
         dictation.onOpenFile = { [weak self] query in await self?.openBestFile(query) ?? "" }
-        statusMenu.dictationItems = { [weak self] in self?.dictation.menuItems() ?? [] }
+        statusMenu.dictationItems = { [weak self] in self?.dictation.compactMenuItems() ?? [] }
+        statusMenu.dictation = dictation
+        statusMenu.onCommands = { [weak self] in self?.showHome(.commands) }
         dictation.start()
 
         hotkeys.onPress = { [weak self] in

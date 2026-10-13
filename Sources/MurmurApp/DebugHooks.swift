@@ -676,7 +676,7 @@ enum DebugHooks {
 
     /// The menu's header view, as it would show if the menu opened now.
     private static func drawMenuHeader(_ app: AppController, to url: URL) {
-        let view = NSHostingView(rootView: MenuStatusView(model: app.model))
+        let view = NSHostingView(rootView: MenuStatusView(model: app.model, dictation: app.dictation))
         view.frame.size = view.fittingSize
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view

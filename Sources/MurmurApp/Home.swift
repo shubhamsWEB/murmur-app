@@ -175,7 +175,7 @@ struct BrandTile: View {
 }
 
 /// Whether Murmur can be used now, in a few words, for the headline and the sidebar.
-private struct Readiness {
+struct Readiness {
     let title: String
     let detail: String
     let busy: Bool
