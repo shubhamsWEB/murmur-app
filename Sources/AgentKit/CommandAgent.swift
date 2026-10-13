@@ -93,6 +93,19 @@ public final class CommandAgent {
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
     }
 
+    /// No model to ask, but it sounds like a search ("search my resume", "find the lease"): search your files rather
+    /// than show an error.
+    private func searchInstead(_ utterance: String) -> Bool {
+        let text = QuickCommands.clean(utterance)
+        guard let range = text.range(of: #"^(search|find|look for|look up|open|show me|show|get)( for)? "#,
+                                     options: .regularExpression) else { return false }
+        let query = String(text[range.upperBound...])
+        guard !query.isEmpty else { return false }
+        host.log("command: no model answered; searching files for \"\(query)\"")
+        host.searchFiles(query)
+        return true
+    }
+
     // MARK: - Selected text
 
     public struct SelectionTask: Sendable {
@@ -188,10 +201,12 @@ public final class CommandAgent {
                     do {
                         reply = try await router.chat(system: system, turns: turns, tools: tools)
                     } catch {
+                        if searchInstead(utterance) { return }
                         host.showAnswer(error.localizedDescription)
                         return
                     }
                 } else {
+                    if searchInstead(utterance) { return }
                     host.showAnswer(error.localizedDescription)
                     return
                 }
@@ -266,8 +281,11 @@ public final class CommandAgent {
             host.progress("Finding “\(text("query"))”…")
             return Outcome(result: await host.openFile(text("query")), finished: true)
         case "search_files":
-            host.searchFiles(text("query"))
-            return Outcome(result: "Showing file search results for \"\(text("query"))\".", finished: true, shown: true)
+            // "my resume" → "resume": the possessive only adds noise to the search.
+            let query = text("query").replacingOccurrences(of: #"^(my|the|all|some) "#, with: "",
+                                                           options: [.regularExpression, .caseInsensitive])
+            host.searchFiles(query)
+            return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url": return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))
         case "web_search": return Outcome(result: MacActions.webSearch(text("query"), in: lastBrowser))
         case "set_volume": return Outcome(result: MacActions.setVolume(Int(args["percent"]?.number ?? 50)))
@@ -328,7 +346,8 @@ public final class CommandAgent {
         if !helpers.isEmpty {
             let names = helpers.map { $0 == .claude ? "ask_claude" : "ask_codex" }.joined(separator: " or ")
             lines.append("- For hard reasoning, coding, long writing or anything you are unsure of, call \(names) with a "
-                + "self-contained task, then pass the answer on with reply or insert_text.")
+                + "self-contained task, then pass the answer on with reply or insert_text. Never use \(names) to find, "
+                + "search or open the user's files or apps: use open_file, search_files or open_app.")
         }
         lines.append("- When nothing more is needed, call done.")
         return lines.joined(separator: "\n")

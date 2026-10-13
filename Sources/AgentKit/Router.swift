@@ -67,7 +67,11 @@ public enum RouterError: LocalizedError {
         switch self {
         case .noKey(let provider): return "No \(provider) API key. Add one under Commands & Assistants."
         case .http(let provider, let code, let detail):
-            if code == 401 || code == 403 { return "\(provider) rejected the API key (\(code))." }
+            // Keep the provider's own words: "workspace", "model", "organization" say what's actually wrong.
+            let why = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            if code == 401 || code == 403 {
+                return "\(provider) rejected the API key (\(code))" + (why.isEmpty ? "." : ": \(why.prefix(160))")
+            }
             if code == 429 { return "\(provider) says you're over your rate limit or quota (429)." }
             return "\(provider) returned \(code): \(detail.prefix(120))"
         case .unreachable(let provider): return "Couldn't reach \(provider)."
@@ -443,7 +447,7 @@ public enum KeyCheck {
         }
         request.timeoutInterval = 10
         let provider = choice == .openai ? "OpenAI" : "Anthropic"
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
               let code = (response as? HTTPURLResponse)?.statusCode else {
             return "Couldn't reach \(provider) to check the key. Check your internet connection."
         }
@@ -452,8 +456,14 @@ public enum KeyCheck {
             RouterDiagnostics.lastError = nil
             return nil
         case 401, 403:
-            let message = "\(provider) rejected this key (\(code)). Copy the whole key again from your \(provider) account."
-            RouterDiagnostics.lastError = RouterError.http(provider, code, "").localizedDescription
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let detail = ((json?["error"] as? [String: Any])?["message"] as? String) ?? ""
+            let message = "\(provider) rejected this key (\(code))"
+                + (detail.isEmpty ? "." : ": \(detail.prefix(200))")
+                + (code == 401 ? " Copy the whole key again from your \(provider) account."
+                   : " The key works, but its workspace or organization isn't allowed this. Check its permissions in "
+                     + "your \(provider) console, or make a key in your default workspace.")
+            RouterDiagnostics.lastError = RouterError.http(provider, code, detail).localizedDescription
             return message
         default:
             return "\(provider) answered \(code) when checking the key. It may still work; try a command."
