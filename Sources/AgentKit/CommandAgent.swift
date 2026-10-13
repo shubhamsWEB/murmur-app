@@ -62,8 +62,10 @@ public final class CommandAgent {
         if let actions = QuickCommands.parseAll(utterance) {
             var results: [String] = []
             for action in actions {
-                host.log("command: quick path → \(action.tool) \(action.arguments)")
-                let outcome = await execute(action.tool, action.arguments.mapValues { JSONValue.string($0) })
+                // "open chrome and search facebook": after opening a browser, "search" means the web, in it.
+                let tool = action.tool == "search_files" && lastBrowser != nil ? "web_search" : action.tool
+                host.log("command: quick path → \(tool) \(action.arguments)")
+                let outcome = await execute(tool, action.arguments.mapValues { JSONValue.string($0) })
                 results.append(outcome.result)
                 if outcome.finished { break }
                 if actions.count > 1, action.tool == "open_app" {
@@ -236,8 +238,10 @@ public final class CommandAgent {
             "- Respond only with tool calls. Call every tool the request needs in ONE response, in order "
                 + "(e.g. open_app then web_search). Keep it to the fewest steps.",
             "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said.",
-            "- Files: search_files for finding the user's own files by what they contain; open_folder for standard folders.",
-            "- Web: open_url for a site, web_search to search.",
+            "- Files: \"search\", \"find\" or \"look for\" means the user's own files on this Mac: search_files. "
+                + "open_folder for standard folders.",
+            "- Web: web_search only when the user says web, online, internet or Google, or after opening a browser; "
+                + "open_url for a site.",
             "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot.",
             "- Shortcuts: list_shortcuts, run_shortcut.",
             "- To write or rewrite text for the user (a reply, a shorter version of the selection, a translation), "

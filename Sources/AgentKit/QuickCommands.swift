@@ -25,11 +25,17 @@ public enum QuickCommands {
             Action(tool: "search_files", arguments: ["query": m[1]]) }),
         (#"^(?:find|search for|search) (?:my |the )?(?:file|files|document|documents|pdf|photo|picture)s?(?: about| called| named| with)? (.+)$"#, { m in
             Action(tool: "search_files", arguments: ["query": m[1]]) }),
-        (#"^(?:search|google|look up)(?: the web| online| google)? for (.+)$"#, { m in
+        // The web only when you say so: "google …", "search the web for …", "… on google", "look up …".
+        (#"^(?:search|look) (?:on |in )?(?:the web|the internet|online|google)(?: for)? (.+)$"#, { m in
             Action(tool: "web_search", arguments: ["query": m[1]]) }),
-        (#"^(?:google|look up) (.+)$"#, { m in Action(tool: "web_search", arguments: ["query": m[1]]) }),
-        (#"^search (?!(?:my |the )?(?:file|files|document|documents|pdf|photo|picture)s?\b)(?:on google |google |the web )?(?:for )?(.+)$"#, { m in
+        (#"^(?:search|look up|find) (?:for )?(.+?) (?:on google|on the web|on the internet|online)$"#, { m in
             Action(tool: "web_search", arguments: ["query": m[1]]) }),
+        (#"^google (?:for )?(.+)$"#, { m in Action(tool: "web_search", arguments: ["query": m[1]]) }),
+        (#"^look up (.+)$"#, { m in Action(tool: "web_search", arguments: ["query": m[1]]) }),
+        // Everything else called "search" or "find" is your Mac: "search beach photos", "find the lease",
+        // "search my laptop for the invoice", "look for … on my mac".
+        (#"^(?:search|find|look for)(?: (?:my |the )?(?:laptop|mac|computer|files|drive|disk))?(?: for)? (.+?)(?: (?:on|in) (?:my |the )?(?:laptop|mac|computer|files|drive|disk))?$"#, { m in
+            Action(tool: "search_files", arguments: ["query": m[1]]) }),
         (#"^open (?:my |the )?(downloads|documents|desktop|pictures|music|movies|home|applications)(?: folder)?$"#, { m in
             Action(tool: "open_folder", arguments: ["name": m[1]]) }),
         (#"^(?:open|go to|visit) ((?:https?://)?[a-z0-9-]+(?:\.| dot )[a-z.]{2,}(?:/\S*)?)$"#, { m in
