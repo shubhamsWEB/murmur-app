@@ -511,41 +511,63 @@ extension DictationController {
         )
     }
 
-    /// Asks for an API key and saves it in the Keychain. An empty field removes the key. Returns true when a key is set.
+    /// Asks for an API key, checks its shape, saves it in the Keychain, then tests it with the provider and says
+    /// whether it works. An empty field removes the key. Returns true when a key is set.
     @discardableResult
     public func askForKey(_ choice: RouterChoice) -> Bool {
         guard let account = choice.keyAccount else { return true }
         let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
-        let alert = NSAlert()
-        alert.messageText = "\(provider) API key"
-        alert.informativeText = "Used only for commands (the words you said, the front app's name and any selected "
-            + "text). Speech never leaves your Mac. Stored in your Keychain. Leave empty to remove the key."
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        field.placeholderString = choice == .anthropic ? "sk-ant-…" : "sk-…"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        Self.bringToFront(alert)
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return choice.hasKey }
-        Keychain.set(account, field.stringValue)
-        log("command: \(provider) key \(field.stringValue.isEmpty ? "removed" : "saved")")
-        if field.stringValue.isEmpty, RouterChoice.current == choice { RouterChoice.current = .local }
-        return choice.hasKey
-    }
-
-    /// A Murmur dialog for actions that change something. Murmur comes to the front while it's open.
-    private func confirm(_ title: String, _ detail: String) -> Bool {
-        hud.hide()
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = detail
-        alert.addButton(withTitle: "Go Ahead")
-        alert.addButton(withTitle: "Cancel")
-        Self.bringToFront(alert)
-        let answer = alert.runModal() == .alertFirstButtonReturn
-        log("command: \(title) → \(answer ? "yes" : "no")")
-        return answer
+        var problem: String?
+        while true {
+            let alert = NSAlert()
+            alert.messageText = "\(provider) API key"
+            alert.informativeText = (problem.map { "\($0)\n\n" } ?? "")
+                + "Used only for commands (your words, the front app's name and any selected text). Speech never "
+                + "leaves your Mac. Stored in your Keychain. Leave empty to remove the key."
+            if problem != nil { alert.alertStyle = .warning }
+            let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+            field.placeholderString = choice == .anthropic ? "sk-ant-…" : "sk-proj-…"
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            Self.bringToFront(alert)
+            alert.window.initialFirstResponder = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return choice.hasKey }
+            let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if key.isEmpty {
+                Keychain.set(account, "")
+                log("command: \(provider) key removed")
+                if RouterChoice.current == choice { RouterChoice.current = .local }
+                return false
+            }
+            if let shape = KeyCheck.shapeProblem(choice, key) {
+                problem = shape          // ask again, saying what looks wrong
+                continue
+            }
+            Keychain.set(account, key)
+            log("command: \(provider) key saved, checking it")
+            hud.show(.working("Checking the \(provider) key…"))
+            Task { [weak self] in
+                let result = await KeyCheck.verify(choice)
+                guard let self else { return }
+                if let result {
+                    self.log("command: \(provider) key check: \(result)")
+                    self.hud.hide()
+                    let warning = NSAlert()
+                    warning.alertStyle = .warning
+                    warning.messageText = "That \(provider) key didn't work"
+                    warning.informativeText = result
+                    warning.addButton(withTitle: "Enter It Again")
+                    warning.addButton(withTitle: "Later")
+                    Self.bringToFront(warning)
+                    if warning.runModal() == .alertFirstButtonReturn { self.askForKey(choice) }
+                } else {
+                    self.log("command: \(provider) key works")
+                    self.hud.flash("\(provider) key works", seconds: 2)
+                }
+            }
+            return true
+        }
     }
 
     /// Murmur lives in the menu bar, and macOS may ignore a background app asking to come forward: float the dialog

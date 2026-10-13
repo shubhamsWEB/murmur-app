@@ -66,7 +66,10 @@ public enum RouterError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .noKey(let provider): return "No \(provider) API key. Add one under Commands & Assistants."
-        case .http(let provider, let code, let detail): return "\(provider) returned \(code): \(detail)"
+        case .http(let provider, let code, let detail):
+            if code == 401 || code == 403 { return "\(provider) rejected the API key (\(code))." }
+            if code == 429 { return "\(provider) says you're over your rate limit or quota (429)." }
+            return "\(provider) returned \(code): \(detail.prefix(120))"
         case .unreachable(let provider): return "Couldn't reach \(provider)."
         }
     }
@@ -93,7 +96,8 @@ public enum RouterDiagnostics {
     /// True for errors that mean the API key is wrong (401/403).
     public static func isKeyProblem(_ error: String?) -> Bool {
         guard let error else { return false }
-        return error.contains(" 401") || error.contains(" 403") || error.contains("No ") && error.contains("API key")
+        return error.contains("rejected the API key") || error.contains("401") || error.contains("403")
+            || error.contains("No ") && error.contains("API key")
     }
 }
 
@@ -398,5 +402,56 @@ public struct OllamaRouter: Router {
         let answer = await OllamaClient(model: model).decide(system: system, user: user, schema: schema,
                                                             timeout: timeout)
         return answer?[field] as? String
+    }
+}
+
+
+/// Checks an API key before you rely on it: the shape first, then one cheap call to the provider (listing models).
+public enum KeyCheck {
+    /// What looks wrong with a key's shape, or nil.
+    public static func shapeProblem(_ choice: RouterChoice, _ key: String) -> String? {
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch choice {
+        case .openai where !key.hasPrefix("sk-"):
+            return "OpenAI keys start with “sk-” (project keys with “sk-proj-”). This one starts with “\(key.prefix(6))…”, so part of it may be missing."
+        case .anthropic where !key.hasPrefix("sk-ant-"):
+            return "Anthropic keys start with “sk-ant-”. This one starts with “\(key.prefix(6))…”, so part of it may be missing."
+        default:
+            return key.count < 20 ? "That key looks too short." : nil
+        }
+    }
+
+    /// Asks the provider whether the saved key works. Nil when it does, else what's wrong.
+    public static func verify(_ choice: RouterChoice) async -> String? {
+        guard let account = choice.keyAccount, let key = Keychain.get(account) else { return "No key saved." }
+        var request: URLRequest
+        switch choice {
+        case .openai:
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        case .anthropic:
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
+            request.setValue(key, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        case .local:
+            return nil
+        }
+        request.timeoutInterval = 10
+        let provider = choice == .openai ? "OpenAI" : "Anthropic"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let code = (response as? HTTPURLResponse)?.statusCode else {
+            return "Couldn't reach \(provider) to check the key. Check your internet connection."
+        }
+        switch code {
+        case 200:
+            RouterDiagnostics.lastError = nil
+            return nil
+        case 401, 403:
+            let message = "\(provider) rejected this key (\(code)). Copy the whole key again from your \(provider) account."
+            RouterDiagnostics.lastError = RouterError.http(provider, code, "").localizedDescription
+            return message
+        default:
+            return "\(provider) answered \(code) when checking the key. It may still work; try a command."
+        }
     }
 }
