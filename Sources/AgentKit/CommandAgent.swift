@@ -50,13 +50,16 @@ public final class CommandAgent {
     }
 
     private let host: CommandHost
-    private let maxSteps = 6
+    private let maxSteps = 16
     /// A browser opened earlier in this command: web searches and addresses open there.
     private var lastBrowser: AppCatalog.App?
-    /// Tools whose result the model needs to read before it can go on. After any other step, the command is done.
+    /// Tools whose result the model needs to read before it can go on (the screen, a list, a helper's answer).
+    /// A step without any of them is the last one, unless the model is still working (no `done` yet and it looked).
     private static let informationTools: Set<String> = [
-        "find_apps", "list_running_apps", "list_shortcuts", "ask_claude", "ask_codex",
+        "find_apps", "list_running_apps", "list_shortcuts", "ask_claude", "ask_codex", "read_screen",
     ]
+    /// A click on one of these asks you first.
+    private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
 
     public init(host: CommandHost) {
         self.host = host
@@ -230,11 +233,13 @@ public final class CommandAgent {
             }
             turns.append(.assistant(text: reply.text, calls: reply.calls))
             var needsAnotherLook = false
+            var finishedNow = false
             var results: [String] = []
             for call in reply.calls {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
                 if call.name == "done" {
                     turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
+                    finishedNow = true
                     continue
                 }
                 let outcome = await execute(call.name, call.arguments)
@@ -243,8 +248,9 @@ public final class CommandAgent {
                 if Self.informationTools.contains(call.name) { needsAnotherLook = true }
                 turns.append(.toolResult(callID: call.id, name: call.name, content: outcome.result))
             }
-            // Actions only (open, search, volume…): done, without another trip to the model just to say so.
-            if !needsAnotherLook {
+            // Actions only (open, search, volume…), or the model said done: finished, without another trip to the
+            // model just to say so. Otherwise it looked at something (the screen, a list) and goes on from there.
+            if !needsAnotherLook || finishedNow {
                 if !results.isEmpty { host.progress(results.joined(separator: " ")) }
                 return
             }
@@ -324,6 +330,43 @@ public final class CommandAgent {
             host.progress("Asking \(helper.display)…")
             let answer = await helper.run(task)
             return Outcome(result: "\(helper.display) answered:\n\(answer.prefix(6000))")
+        case "site_search":
+            return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
+        case "read_screen":
+            host.progress("Looking at the screen…")
+            let screen = await ScreenControl.read()
+            host.log("command: screen has \(screen.split(separator: "\n").count - 2) things")
+            return Outcome(result: screen)
+        case "click":
+            let id = Int(args["id"]?.number ?? 0)
+            let what = ScreenControl.name(of: id) ?? "[\(id)]"
+            if what.range(of: Self.riskyWords, options: .regularExpression) != nil {
+                guard await host.confirm("Click \(what)?", "This may send, buy, post or delete something.") else {
+                    return Outcome(result: "You said no to clicking \(what).", finished: true)
+                }
+            }
+            host.progress("Clicking \(what)…")
+            return Outcome(result: await ScreenControl.click(id))
+        case "type_text":
+            let words = text("text")
+            if let id = args["into"]?.number, id > 0 {
+                _ = await ScreenControl.focus(Int(id))
+            }
+            host.pasteHere(words)
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if text("submit") == "true" {
+                _ = ScreenControl.press("return")
+                try? await Task.sleep(nanoseconds: 600_000_000)
+            }
+            return Outcome(result: "Typed \(words.count) characters\(text("submit") == "true" ? " and pressed Return" : "").")
+        case "press_keys":
+            let result = ScreenControl.press(text("keys"))
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            return Outcome(result: result)
+        case "wait":
+            let seconds = min(max(args["seconds"]?.number ?? 1, 0.2), 6)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            return Outcome(result: "Waited \(seconds) s.")
         case "write_in_app":
             let appName = text("app")
             let body = text("text").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -363,6 +406,16 @@ public final class CommandAgent {
                 + "open_url for a site.",
             "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot.",
             "- Shortcuts: list_shortcuts, run_shortcut.",
+            "- You can see and use the front app like a person: read_screen lists its window's buttons, links and "
+                + "fields as [n]; click n; type_text (into field n, submit true to press Return); press_keys "
+                + "(\"return\", \"cmd+l\", \"cmd+n\", \"down\", \"pagedown\"); wait. Use them for any task the other "
+                + "tools don't cover, step by step: act, then read_screen in the SAME response to see the result, and "
+                + "go on until the whole request is done. Numbers change on every read: only use numbers from the "
+                + "latest read_screen. When everything is done, call done.",
+            "- Websites: open the result page directly when you can: site_search (YouTube, Amazon, GitHub, Maps, "
+                + "Wikipedia…) or open_url with a search URL; then read_screen and click what the user wants "
+                + "(\"the first video\": the first link that is a video title, not an ad or a channel).",
+            "- Clicking send, buy, post or delete asks the user; only do it when they asked for it.",
             "- To write something in an app (\"open Notes and write a shopping list\", \"open TextEdit and draft a "
                 + "letter to…\"): call write_in_app ONCE with the app and the finished text, written by you in full "
                 + "(plain text, a short title line first for notes). Don't call open_app as well. new_document false "
@@ -413,6 +466,15 @@ public final class CommandAgent {
             tool("list_shortcuts", "List the user's Shortcuts"),
             tool("run_shortcut", "Run one of the user's Shortcuts (asks first)",
                  ["name": ("string", "shortcut name"), "input": ("string", "optional text input")], required: ["name"]),
+            tool("site_search", "Search a website in the browser (youtube, google, amazon, github, maps, wikipedia, "
+                 + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
+            tool("read_screen", "See the front app's window: its buttons, links and fields, numbered"),
+            tool("click", "Click element [n] from the latest read_screen", ["id": ("number", "the element's number")]),
+            tool("type_text", "Type text into the front app (optionally into field [n] first; submit presses Return)",
+                 ["text": ("string", "what to type"), "into": ("number", "field number from read_screen, optional"),
+                  "submit": ("boolean", "press Return afterwards")], required: ["text"]),
+            tool("press_keys", "Press a key or shortcut in the front app", ["keys": ("string", "e.g. return, cmd+l, down")]),
+            tool("wait", "Wait for a page or app to load", ["seconds": ("number", "0.5 to 6")]),
             tool("write_in_app", "Open an app (Notes, TextEdit, Pages…), start a new note or document, and type the text",
                  ["app": ("string", "app name"), "text": ("string", "the full finished text to write"),
                   "new_document": ("boolean", "true for a new note/document (default), false to add to the open one")],

@@ -378,8 +378,10 @@ private struct ThingsToSay: View {
                  how: "Select text in any app first, then hold \(key) and say what to do.",
                  say: ["Summarise this", "Make this more formal", "Translate this to Hindi"]),
             Idea(symbol: "macwindow", title: "Control your Mac",
-                 how: "Apps, volume, brightness, Shortcuts. Common ones run instantly.",
-                 say: ["Open Slack", "Volume 30", "Open Chrome and search Facebook"]),
+                 how: "Apps, settings, websites, several steps in a row. Murmur looks at the screen and keeps "
+                     + "going until it's done.",
+                 say: ["Open Slack", "Search YouTube for lofi beats and play the first video",
+                       "Open Notes and write a packing list for Coorg"]),
             Idea(symbol: "doc.text.magnifyingglass", title: "Find and open files",
                  how: "Describe a file: its name, what's in it, what it looks like.",
                  say: ["Open my resume PDF", "Find my beach photos"]),

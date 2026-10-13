@@ -42,6 +42,11 @@ public enum QuickCommands {
             Action(tool: "search_files", arguments: ["query": m[1]]) }),
         (#"^(?:find|search for|search) (?:my |the )?(?:file|files|document|documents|pdf|photo|picture)s?(?: about| called| named| with)? (.+)$"#, { m in
             Action(tool: "search_files", arguments: ["query": m[1]]) }),
+        // A site's own search: "search youtube for lofi", "find usb hubs on amazon", "look up swift actors on github".
+        (#"^(?:search|look up|find|look for) (?:on |in )?(youtube|google images|google maps|google|amazon|flipkart|github|wikipedia|reddit|twitter|linkedin|stack ?overflow|spotify|netflix|maps)(?: for)? (.+)$"#, { m in
+            Action(tool: "site_search", arguments: ["site": m[1], "query": m[2]]) }),
+        (#"^(?:search|look up|find|look for) (?:for )?(.+?) (?:on|in) (youtube|google images|google maps|amazon|flipkart|github|wikipedia|reddit|twitter|linkedin|stack ?overflow|spotify|netflix)$"#, { m in
+            Action(tool: "site_search", arguments: ["site": m[2], "query": m[1]]) }),
         // The web only when you say so: "google …", "search the web for …", "… on google", "look up …".
         (#"^(?:search|look) (?:on |in )?(?:the web|the internet|online|google)(?: for)? (.+)$"#, { m in
             Action(tool: "web_search", arguments: ["query": m[1]]) }),
@@ -82,6 +87,7 @@ public enum QuickCommands {
         "open", "launch", "start", "switch", "go", "visit", "show", "quit", "close", "exit", "kill", "hide",
         "search", "google", "look", "find", "set", "turn", "volume", "mute", "unmute", "louder", "quieter", "softer",
         "brightness", "brighter", "dimmer", "lock", "take", "screenshot", "run", "my", "photos", "pictures",
+        "play", "watch", "click", "type", "write", "press", "select", "pick", "add", "send", "scroll",
     ]
 
     /// All the actions in a chained command, in order, or nil unless every part is a known command.

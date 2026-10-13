@@ -132,6 +132,31 @@ public enum MacActions {
         return "Opened \(url.host ?? raw)."
     }
 
+    /// Search pages that take the query in their address, so a search on a site is one step, not typing into it.
+    static let siteSearches: [String: String] = [
+        "youtube": "https://www.youtube.com/results?search_query=",
+        "google": "https://www.google.com/search?q=",
+        "google images": "https://www.google.com/search?tbm=isch&q=", "images": "https://www.google.com/search?tbm=isch&q=",
+        "google maps": "https://www.google.com/maps/search/", "maps": "https://www.google.com/maps/search/",
+        "amazon": "https://www.amazon.in/s?k=", "flipkart": "https://www.flipkart.com/search?q=",
+        "github": "https://github.com/search?q=", "wikipedia": "https://en.wikipedia.org/w/index.php?search=",
+        "reddit": "https://www.reddit.com/search/?q=", "twitter": "https://x.com/search?q=", "x": "https://x.com/search?q=",
+        "linkedin": "https://www.linkedin.com/search/results/all/?keywords=",
+        "stack overflow": "https://stackoverflow.com/search?q=", "stackoverflow": "https://stackoverflow.com/search?q=",
+        "spotify": "https://open.spotify.com/search/", "netflix": "https://www.netflix.com/search?q=",
+        "chatgpt": "https://chatgpt.com/?q=", "perplexity": "https://www.perplexity.ai/search?q=",
+    ]
+
+    static func siteSearch(_ site: String, _ query: String, in browser: AppCatalog.App?) -> String {
+        let key = site.lowercased().trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: #"\.(com|in|org)$"#, with: "", options: .regularExpression)
+        guard let base = siteSearches[key] else { return webSearch("\(query) site:\(site)", in: browser) }
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(["&", "+", "=", "?", "/"])) ?? query
+        guard let url = URL(string: base + encoded) else { return "Couldn't build the search." }
+        open(url, in: browser)
+        return "Searching \(site) for \"\(query)\"\(browser.map { " in \($0.name)" } ?? "")."
+    }
+
     public static func webSearch(_ query: String) -> String {
         webSearch(query, in: nil)
     }
