@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import AVFoundation
 import Carbon.HIToolbox
 
@@ -25,6 +26,7 @@ public final class DictationController {
     private var pressedAt = Date.distantPast
     private var lastTapAt = Date.distantPast
     private var retryTimer: Timer?
+    private var openedAccessibilitySettings = false
 
     /// A press shorter than this is a tap, not a hold (taps start hands-free dictation).
     private let tapLength: TimeInterval = 0.3
@@ -81,7 +83,13 @@ public final class DictationController {
                                 action: nil, keyEquivalent: "")
         status.isEnabled = false
         items.append(status)
-        if !monitor.isRunning {
+        let canPaste = AXIsProcessTrusted()
+        if monitor.isRunning, !canPaste {
+            let note = NSMenuItem(title: "Can't paste yet: allow Murmur in Accessibility", action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            items.append(note)
+        }
+        if !monitor.isRunning || !canPaste {
             items.append(ClosureMenuItem("Open Accessibility Settings…") {
                 Self.openPrivacyPane("Privacy_Accessibility")
             })
@@ -207,8 +215,14 @@ public final class DictationController {
         case .secureInput:
             hud.flash("Can't type into a password field · use Paste Last Dictation")
         case .needsAccessibility:
-            hud.flash("Murmur needs Accessibility permission to paste")
-            Self.openPrivacyPane("Privacy_Accessibility")
+            // Keep the words: they go on the clipboard, so ⌘V still works. Settings opens once per launch, not on
+            // every dictation.
+            if let lastText { TextInserter.copy(lastText) }
+            hud.flash("Copied · press ⌘V. Allow Murmur in Accessibility to paste automatically", seconds: 4)
+            if !openedAccessibilitySettings {
+                openedAccessibilitySettings = true
+                Self.openPrivacyPane("Privacy_Accessibility")
+            }
         }
     }
 
