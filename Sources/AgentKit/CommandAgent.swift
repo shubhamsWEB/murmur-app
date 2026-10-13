@@ -370,6 +370,7 @@ public final class CommandAgent {
             return Outcome(result: "\(helper.display) answered:\n\(answer.prefix(6000))")
         case "build_with_agent":
             return await build(text("task"), helper: text("helper"), folderName: text("folder_name"))
+        case "open_settings": return Outcome(result: MacActions.openSettings(text("pane")))
         case "site_search":
             return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
         case "read_screen":
@@ -444,6 +445,8 @@ public final class CommandAgent {
                 + "open_folder for standard folders.",
             "- Web: web_search only when the user says web, online, internet or Google, or after opening a browser; "
                 + "open_url for a site.",
+            "- Mac settings and updates: open_settings (\"check for updates\" → software update); then read_screen "
+                + "and click if the user asked for a specific switch.",
             "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot.",
             "- Shortcuts: list_shortcuts, run_shortcut.",
             "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
@@ -513,6 +516,8 @@ public final class CommandAgent {
                  + "project folder", ["task": ("string", "the user's full request"),
                                       "helper": ("string", "claude or codex; empty for the default"),
                                       "folder_name": ("string", "short folder name, optional")], required: ["task"]),
+            tool("open_settings", "Open a System Settings pane (software update, wifi, bluetooth, battery, display, "
+                 + "sound, privacy, keyboard…) or \"app store updates\"", ["pane": ("string", "the pane")]),
             tool("site_search", "Search a website in the browser (youtube, google, amazon, github, maps, wikipedia, "
                  + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
             tool("read_screen", "See the front app's window: its buttons, links and fields, numbered"),

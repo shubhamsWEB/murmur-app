@@ -44,8 +44,15 @@ public enum IntentClassifier {
     static let commandOpeners: Set<String> = [
         "open", "launch", "start", "quit", "close", "exit", "hide", "switch", "find", "search", "google", "play",
         "pause", "set", "turn", "mute", "unmute", "lock", "run", "summarize", "summarise", "translate", "rewrite",
-        "rephrase", "shorten", "schedule", "remind",
+        "rephrase", "shorten", "schedule", "remind", "check", "update", "upgrade", "install", "uninstall",
+        "enable", "disable", "connect", "disconnect", "empty", "restart", "reboot", "shut", "sleep", "show", "go",
+        "navigate", "take", "download", "clear", "change", "increase", "decrease", "reduce", "raise", "lower",
+        "toggle", "create", "make", "build", "add", "delete", "remove", "move", "rename", "copy", "watch",
+        "explain", "ask", "tell", "dim", "brighten",
     ]
+
+    /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.
+    static let aboutTheMac = #"\b(on|for|of|in) (my|this|the) (mac|macbook|laptop|computer|system|screen|desktop)\b"#
 
     public static func decide(_ utterance: String, forcedCommand: Bool, focus: Focus, frontApp: String?,
                               hasSelection: Bool, router: Router) async -> Decision {
@@ -81,7 +88,10 @@ public enum IntentClassifier {
         // Somewhere you can't type (the desktop, a Finder window, a player): whatever you said is for Murmur.
         if focus == .notText { return Decision(intent: .command, reason: "nowhere to type") }
         let first = cleaned.split(separator: " ").first.map(String.init) ?? ""
-        guard commandOpeners.contains(first) else { return Decision(intent: .dictation, reason: "reads as text") }
+        let mentionsMac = cleaned.range(of: aboutTheMac, options: .regularExpression) != nil
+        guard commandOpeners.contains(first) || mentionsMac else {
+            return Decision(intent: .dictation, reason: "reads as text")
+        }
         if focus == .notText { return Decision(intent: .command, reason: "instruction, and nowhere to type") }
 
         let system = """

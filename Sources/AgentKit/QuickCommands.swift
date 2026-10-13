@@ -28,6 +28,14 @@ public enum QuickCommands {
     }
 
     private static let rules: [(String, (Match) -> Action?)] = [
+        // "check for updates on my macbook", "update my mac", "is there a macos update"
+        (#"^(?:check|look|search)(?: for)? (?:any |new |the )?(?:software |system |macos |mac ?os |mac )?updates?(?: (?:on|for) (?:my |the |this )?(?:mac|macbook|laptop|computer|system))?$|^(?:update|upgrade) (?:my |the |this )?(?:mac|macbook|macos|mac os|laptop|computer|system)$|^(?:is there|are there) (?:a |an |any )?(?:software |system |macos |mac )?updates?.*$"#, { _ in
+            Action(tool: "open_settings", arguments: ["pane": "software update"]) }),
+        (#"^(?:check for |update |show )?(?:my |all )?app (?:store )?updates$|^update (?:my |all )?apps$"#, { _ in
+            Action(tool: "open_settings", arguments: ["pane": "app store updates"]) }),
+        // "open wifi settings", "show battery settings", "open settings for bluetooth", "open system settings"
+        (#"^(?:open|show|go to) (?:the |my )?(?:system )?(?:settings|preferences)(?: for)?(?: (.+))?$|^(?:open|show|go to) (?:the |my )?(.+?) (?:settings|preferences)$"#, { m in
+            Action(tool: "open_settings", arguments: ["pane": m[1].isEmpty ? m[2] : m[1]]) }),
         // "open my resume pdf", "pull up the lease document", "open my cv": open the best match straight away.
         (#"^(?:open|pull up|bring up)(?: up)? (?:my |the |that |this |our )?((?:.+? )?(?:pdfs?|docx?|documents?|word doc|files?|photos?|pictures?|images?|videos?|screenshots?|recordings?|spreadsheets?|sheets?|slides|decks?|presentations?|resumes?|résumés?|cvs?|receipts?|invoices?|contracts?|leases?|statements?|notes?))$"#, { m in
             let query = m[1]

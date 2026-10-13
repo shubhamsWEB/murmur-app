@@ -116,6 +116,57 @@ public enum MacActions {
         return "Opened \(url.lastPathComponent)."
     }
 
+    // MARK: System Settings
+
+    /// System Settings panes by what you'd call them (macOS 13+ pane IDs).
+    static let settingsPanes: [String: String] = [
+        "software update": "com.apple.Software-Update-Settings.extension",
+        "update": "com.apple.Software-Update-Settings.extension",
+        "updates": "com.apple.Software-Update-Settings.extension",
+        "wifi": "com.apple.wifi-settings-extension", "wi-fi": "com.apple.wifi-settings-extension",
+        "bluetooth": "com.apple.BluetoothSettings", "network": "com.apple.Network-Settings.extension",
+        "display": "com.apple.Displays-Settings.extension", "displays": "com.apple.Displays-Settings.extension",
+        "sound": "com.apple.Sound-Settings.extension", "battery": "com.apple.Battery-Settings.extension",
+        "notifications": "com.apple.Notifications-Settings.extension", "focus": "com.apple.Focus-Settings.extension",
+        "privacy": "com.apple.settings.PrivacySecurity.extension",
+        "privacy and security": "com.apple.settings.PrivacySecurity.extension",
+        "security": "com.apple.settings.PrivacySecurity.extension",
+        "accessibility": "com.apple.Accessibility-Settings.extension",
+        "keyboard": "com.apple.Keyboard-Settings.extension", "trackpad": "com.apple.Trackpad-Settings.extension",
+        "mouse": "com.apple.Mouse-Settings.extension", "general": "com.apple.systempreferences.GeneralSettings",
+        "storage": "com.apple.settings.Storage", "appearance": "com.apple.Appearance-Settings.extension",
+        "dark mode": "com.apple.Appearance-Settings.extension",
+        "desktop": "com.apple.Desktop-Settings.extension", "dock": "com.apple.Desktop-Settings.extension",
+        "desktop and dock": "com.apple.Desktop-Settings.extension",
+        "wallpaper": "com.apple.Wallpaper-Settings.extension",
+        "users": "com.apple.Users-Groups-Settings.extension", "passwords": "com.apple.Passwords-Settings.extension",
+        "time machine": "com.apple.Time-Machine-Settings.extension", "backup": "com.apple.Time-Machine-Settings.extension",
+        "date and time": "com.apple.Date-Time-Settings.extension", "time": "com.apple.Date-Time-Settings.extension",
+        "login items": "com.apple.LoginItems-Settings.extension", "screen time": "com.apple.Screen-Time-Settings.extension",
+        "lock screen": "com.apple.Lock-Screen-Settings.extension", "touch id": "com.apple.Touch-ID-Settings.extension",
+        "control center": "com.apple.ControlCenter-Settings.extension", "siri": "com.apple.Siri-Settings.extension",
+        "night shift": "com.apple.Displays-Settings.extension", "microphone": "com.apple.settings.PrivacySecurity.extension",
+    ]
+
+    /// Opens a System Settings pane ("software update", "wifi", "battery"…), or the App Store's updates.
+    public static func openSettings(_ spoken: String) -> String {
+        let key = spoken.lowercased()
+            .replacingOccurrences(of: #"\b(settings?|preferences|pane|page|the|my)\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "&", with: "and")
+            .split(separator: " ").joined(separator: " ")
+        if key.contains("app store") || key == "app updates" || key == "apps" {
+            NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!)
+            return "Opened the App Store's updates."
+        }
+        let pane = settingsPanes[key] ?? settingsPanes.first { key.contains($0.key) }?.value
+        let url = URL(string: pane.map { "x-apple.systempreferences:\($0)" } ?? "x-apple.systempreferences:")!
+        NSWorkspace.shared.open(url)
+        if pane == "com.apple.Software-Update-Settings.extension" {
+            return "Opened Software Update. It checks for updates as it opens."
+        }
+        return pane == nil ? "Opened System Settings." : "Opened \(spoken.capitalized) settings."
+    }
+
     // MARK: Web
 
     public static func openURL(_ text: String) -> String {
