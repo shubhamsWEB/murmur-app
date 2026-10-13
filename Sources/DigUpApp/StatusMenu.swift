@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// The menubar icon: the app icon's mark, a boxed D (`Resources/AppIcon/menubar.svg`, drawn here from the same geometry
+/// The menubar icon: the app icon's mark, a boxed waveform (`Resources/AppIcon/menubar.svg`, drawn here from the same geometry
 /// so it's sharp at any scale). While the model downloads or files index, a progress ring takes the box's place; while
-/// indexing is paused, two bars take the D's (at full strength: a dimmed icon reads as "off", and search still works).
+/// indexing is paused, two bars take the waveform's (at full strength: a dimmed icon reads as "off", and search still works).
 enum StatusIcon {
     /// `update`: a newer version is waiting, a dot at the box's top right.
     static func image(progress: Double?, paused: Bool = false, update: Bool = false) -> NSImage {
@@ -28,10 +28,6 @@ enum StatusIcon {
                 arc.stroke()
             } else {
                 let box = NSBezierPath(roundedRect: NSRect(x: 4.5, y: 4.5, width: 55, height: 55), xRadius: 12, yRadius: 12)
-                for (from, to) in [((32, 5), (32, 16)), ((32, 48), (32, 59)), ((5, 32), (17, 32)), ((47, 32), (59, 32))] {
-                    box.move(to: NSPoint(x: from.0, y: from.1))
-                    box.line(to: NSPoint(x: to.0, y: to.1))
-                }
                 box.lineWidth = 4.5
                 NSColor.black.setStroke()
                 box.stroke()
@@ -54,22 +50,18 @@ enum StatusIcon {
             return true
         }
         image.isTemplate = true   // takes the menubar's color, light or dark
-        image.accessibilityDescription = "DigUp"
+        image.accessibilityDescription = "Murmur"
         return image
     }
 
-    /// The D: a stem with rounded corners and a half circle.
+    /// Murmur's mark: three rounded bars of a voice waveform (`Resources/AppIcon/menubar.svg`).
     private static var letter: NSBezierPath {
-        let d = NSBezierPath()
-        d.move(to: NSPoint(x: 25, y: 21))
-        d.line(to: NSPoint(x: 30, y: 21))
-        d.appendArc(withCenter: NSPoint(x: 30, y: 32), radius: 11, startAngle: -90, endAngle: 90, clockwise: false)
-        d.line(to: NSPoint(x: 25, y: 43))
-        d.appendArc(withCenter: NSPoint(x: 25, y: 41), radius: 2, startAngle: 90, endAngle: 180, clockwise: false)
-        d.line(to: NSPoint(x: 23, y: 23))
-        d.appendArc(withCenter: NSPoint(x: 25, y: 23), radius: 2, startAngle: 180, endAngle: 270, clockwise: false)
-        d.close()
-        return d
+        let wave = NSBezierPath()
+        for (x, height) in [(20.0, 14.0), (29.0, 28.0), (38.0, 18.0)] {
+            wave.append(NSBezierPath(roundedRect: NSRect(x: x, y: 32 - height / 2, width: 6, height: height),
+                                     xRadius: 3, yRadius: 3))
+        }
+        return wave
     }
 }
 
@@ -122,7 +114,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             shownPaused = paused
             shownUpdate = update
         }
-        button.toolTip = "DigUp — \(model.statusLine)"
+        button.toolTip = "Murmur — \(model.statusLine)"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -139,7 +131,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(.separator())
         }
         if let version = model.updateAvailable {
-            menu.addItem(ActionMenuItem("Update to DigUp \(version)…") { [weak self] in self?.onCheckForUpdates() })
+            menu.addItem(ActionMenuItem("Update to Murmur \(version)…") { [weak self] in self?.onCheckForUpdates() })
             menu.addItem(.separator())
         }
 
@@ -152,7 +144,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             search.keyEquivalentModifierMask = modifiers
         }
         menu.addItem(search)
-        menu.addItem(ActionMenuItem("Open DigUp") { [weak self] in self?.onOpenWindow() })
+        menu.addItem(ActionMenuItem("Open Murmur") { [weak self] in self?.onOpenWindow() })
         if model.hasFolders {
             menu.addItem(.separator())
             let paused = model.status.paused
@@ -171,7 +163,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         if model.updateAvailable == nil {
             menu.addItem(ActionMenuItem("Check for Updates…") { [weak self] in self?.onCheckForUpdates() })
         }
-        menu.addItem(ActionMenuItem("Quit DigUp", key: "q") { NSApp.terminate(nil) })
+        menu.addItem(ActionMenuItem("Quit Murmur", key: "q") { NSApp.terminate(nil) })
     }
 
     /// The menu as text, for the -debugMenu launch argument (menus can't be clicked from a script).

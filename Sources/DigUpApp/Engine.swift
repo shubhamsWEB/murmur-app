@@ -87,11 +87,11 @@ nonisolated final class Engine: @unchecked Sendable {
     let indexDirectory: URL
     let modelsDirectory: URL
     let encoderIdleSeconds: Double
-    private let indexQueue = DispatchQueue(label: "DigUp.index", qos: .utility)
-    private let searchQueue = DispatchQueue(label: "DigUp.search", qos: .userInitiated)
-    private let encoderQueue = DispatchQueue(label: "DigUp.encoder", qos: .userInitiated)
+    private let indexQueue = DispatchQueue(label: "Murmur.index", qos: .utility)
+    private let searchQueue = DispatchQueue(label: "Murmur.search", qos: .userInitiated)
+    private let encoderQueue = DispatchQueue(label: "Murmur.encoder", qos: .userInitiated)
 
-    private let watchQueue = DispatchQueue(label: "DigUp.watch", qos: .utility)
+    private let watchQueue = DispatchQueue(label: "Murmur.watch", qos: .utility)
 
     // indexQueue only
     private var helper: Process?
@@ -629,7 +629,7 @@ nonisolated final class Engine: @unchecked Sendable {
         case "stopped":
             log("indexer: skipped \(tildePath(event["path"] as? String ?? "?")): it \(event["why"] as? String ?? "")")
         case "rescan":
-            log("indexer: reading \(int("files")) files again that DigUp reads better now (scans' words, SVGs)")
+            log("indexer: reading \(int("files")) files again that Murmur reads better now (scans' words, SVGs)")
         case "pruned":
             log("indexer: \(int("files")) files under folders no longer chosen left the index")
         case "reindex":

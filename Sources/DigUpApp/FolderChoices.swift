@@ -341,7 +341,7 @@ private struct FolderRow: View {
                         .foregroundStyle(.secondary)
                 } else if let estimate, !estimate.readable {
                     HStack(spacing: 6) {
-                        Text("macOS isn't letting DigUp read it.")
+                        Text("macOS isn't letting Murmur read it.")
                             .font(.system(size: 11))
                             .foregroundStyle(.orange)
                         Button("Allow in Settings…", action: openFolderPrivacySettings)

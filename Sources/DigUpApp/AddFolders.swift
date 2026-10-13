@@ -107,11 +107,11 @@ private struct AddFoldersView: View {
                 if choices.code {
                     StepTitle(title: "Search your code",
                               subtitle: "Pick the folders that hold your projects; open one to pick among its repos. "
-                                  + "DigUp reads each once, then what changes. Code is searched on its own: type "
+                                  + "Murmur reads each once, then what changes. Code is searched on its own: type "
                                   + "code: in the search panel.")
                 } else {
                     StepTitle(title: "Add folders to search",
-                              subtitle: "DigUp reads a new folder once, then keeps up with what changes in it. "
+                              subtitle: "Murmur reads a new folder once, then keeps up with what changes in it. "
                                   + "Open a folder to pick some of its subfolders.")
                 }
                 ScrollView {

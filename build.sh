@@ -35,7 +35,7 @@ swift build -c release --product DigUpApp
 swift build -c release --product digup
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
-# The app icon ("One space", moss; Resources/AppIcon/README.md): macOS 26 draws the layered AppIcon.icon (compiled into
+# The app icon ("Voice", indigo; Resources/AppIcon/README.md): macOS 26 draws the layered AppIcon.icon (compiled into
 # Assets.car), older macOS the .icns. Without the former, macOS 26 shows the icon shrunk inside a gray square.
 ICON="Resources/AppIcon.icns"
 

@@ -64,7 +64,7 @@ struct SearchPanelView: View {
                     Text("Searching…").foregroundStyle(.secondary)
                 } else if !controller.model.hasFolders {
                     Text("No folders chosen yet").font(.system(size: 15, weight: .semibold))
-                    Text("DigUp only searches the folders you pick.").foregroundStyle(.secondary)
+                    Text("Murmur only searches the folders you pick.").foregroundStyle(.secondary)
                     Button("Choose Folders…") { controller.chooseFolders() }
                         .padding(.top, 4)
                 } else if controller.isCode {
@@ -180,7 +180,7 @@ private struct ResultList: View {
                                     .padding(.vertical, 3)
                             }
                             .buttonStyle(.plain)
-                            .help("Open them in the DigUp window (⌘O shows everything)")
+                            .help("Open them in the Murmur window (⌘O shows everything)")
                         }
                     }
                     if !controller.results.weaker.isEmpty {
@@ -521,7 +521,7 @@ private struct CodeHint: View {
                 .foregroundStyle(Brand.gradient)
             if controller.phase == .codeOff {
                 Text("Code search is off").font(.system(size: 15, weight: .semibold))
-                Text("DigUp can find code by what it does, in the folders you pick. Code gets an index of its own "
+                Text("Murmur can find code by what it does, in the folders you pick. Code gets an index of its own "
                      + "and never shows up in other searches.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

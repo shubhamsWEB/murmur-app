@@ -61,7 +61,7 @@ cp -cR ~/Library/Application\ Support/DigUp/Models ~/Library/Application\ Suppor
 - No LLM cleanup yet: you get Parakeet's text as heard, with its punctuation (milestone 2).
 - English and 24 other European languages only. Hindi arrives with WhisperKit in milestone 3.
 - The first word can be clipped if you start talking the instant you press Fn (the mic takes about 0.2 s to open).
-- Some menu labels and windows still say DigUp.
+- Internal names (the `DigUpApp` target, `DigUpKit`) still say DigUp; everything you see says Murmur.
 
 ## Data and privacy
 
