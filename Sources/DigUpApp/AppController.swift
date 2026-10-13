@@ -1,6 +1,7 @@
 import AppKit
 import DigUpKit
 import ServiceManagement
+import VoiceKit
 
 /// Owns the app's parts (engine, model download, hotkey, panel, windows, menu) and carries out what they ask for:
 /// new folders, a new hotkey, the login item, which window to show.
@@ -14,6 +15,8 @@ final class AppController {
     let download: ModelDownload
     let hotkeys = HotkeyCenter()
     let updates: Updates
+    /// Murmur's dictation (hold Fn to talk).
+    let dictation = DictationController()
     private let power: PowerPolicy
     private let schedule: IndexSchedule
     private(set) var panel: SearchPanelController!
@@ -69,6 +72,10 @@ final class AppController {
         statusMenu.onCheckForUpdates = { [weak self] in self?.updates.checkNow() }
         updates.onSessionEnded = { [weak self] in self?.windowClosed() }
         updates.start()
+
+        dictation.log = { line in log(line) }
+        statusMenu.dictationItems = { [weak self] in self?.dictation.menuItems() ?? [] }
+        dictation.start()
 
         hotkeys.onPress = { [weak self] in
             guard let self else { return }

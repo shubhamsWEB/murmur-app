@@ -84,6 +84,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     var onChooseFolders: () -> Void = {}
     var onPauseChanged: (Bool) -> Void = { _ in }
     var onCheckForUpdates: () -> Void = {}
+    /// Murmur: the dictation items shown at the top of the menu.
+    var dictationItems: () -> [NSMenuItem] = { [] }
     private var shownProgress: Double?
     private var shownPaused = false
     private var shownUpdate = false
@@ -131,6 +133,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         header.view = view
         menu.addItem(header)
         menu.addItem(.separator())
+        let dictation = dictationItems()
+        if !dictation.isEmpty {
+            for item in dictation { menu.addItem(item) }
+            menu.addItem(.separator())
+        }
         if let version = model.updateAvailable {
             menu.addItem(ActionMenuItem("Update to DigUp \(version)…") { [weak self] in self?.onCheckForUpdates() })
             menu.addItem(.separator())

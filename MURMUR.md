@@ -1,0 +1,70 @@
+# Murmur
+
+Murmur is a free, fully local voice assistant for macOS, built on [DigUp](https://github.com/ARahim3/DigUp) (MIT).
+Speech recognition, cleanup and search all run on your Mac. The design spec is in your Claude docs:
+"Local Voice Assistant for Mac — Design Spec".
+
+## Milestone 1: dictation core (this commit)
+
+- **Hold Fn (🌐)** to talk, release to insert the text into whatever app you're typing in.
+- **Double-tap Fn** for hands-free dictation. Tap Fn again to finish, or press Esc to cancel.
+- Speech to text is Parakeet TDT v3 on the Neural Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio).
+  The model downloads once (about 600 MB) on first launch, then works offline.
+- Text goes in with clipboard + ⌘V, and your clipboard is restored afterwards.
+- No Fn key on your keyboard? Pick **Right ⌥** in the menu bar under **Dictation Key**.
+- DigUp's search panel still opens with **⇧⌘Space**.
+
+Code: `Sources/VoiceKit` (new). Small hooks in `Sources/DigUpApp/AppController.swift` and `StatusMenu.swift`.
+
+## Build and run
+
+Needs an Apple Silicon Mac, macOS 14+, and Xcode 26 (Swift 6.2).
+
+```bash
+cd ~/IdeaProjects/murmur
+./build.sh                         # first build fetches packages and compiles llama.cpp: 10+ minutes
+open build.noindex/Murmur.app
+```
+
+To work in Xcode instead: `open Package.swift`, pick the **DigUpApp** scheme, and run. Use `./build.sh` to test
+permissions, because only a signed .app bundle keeps them.
+
+### Signing (so permissions stick between builds)
+
+With no identity, `build.sh` signs ad hoc, and macOS forgets the Accessibility permission after every rebuild.
+Use your free Apple Development certificate instead (Xcode → Settings → Accounts → add your Apple ID):
+
+```bash
+security find-identity -v -p codesigning     # copy the "Apple Development: …" name
+echo "Apple Development: Your Name (TEAMID)" > .sign-id
+```
+
+## First launch checklist
+
+1. **Microphone:** allow when asked.
+2. **Accessibility:** System Settings → Privacy & Security → Accessibility → turn on Murmur. Murmur needs this to
+   see the Fn key and to paste. It starts working within 2 seconds of being allowed.
+3. **Fn key:** System Settings → Keyboard → "Press 🌐 key to" → **Do Nothing**. Otherwise Fn also opens the
+   emoji picker or Apple's dictation.
+4. Wait for the menu bar menu to say "Speech model ready", then hold Fn in Notes and talk.
+
+Optional: DigUp's search model (865 MB) downloads again into Murmur's own folder. If DigUp is already installed,
+copy its model instead (APFS clones it, so it takes no extra space):
+
+```bash
+mkdir -p ~/Library/Application\ Support/Murmur
+cp -cR ~/Library/Application\ Support/DigUp/Models ~/Library/Application\ Support/Murmur/
+```
+
+## Known limits in milestone 1
+
+- No LLM cleanup yet: you get Parakeet's text as heard, with its punctuation (milestone 2).
+- English and 24 other European languages only. Hindi arrives with WhisperKit in milestone 3.
+- The first word can be clipped if you start talking the instant you press Fn (the mic takes about 0.2 s to open).
+- Some menu labels and windows still say DigUp.
+
+## Data and privacy
+
+Murmur's settings, index and models live in `~/Library/Application Support/Murmur`, apart from DigUp's.
+Audio is held in memory only for transcription and is never saved. The only network use is the one-time model
+downloads from Hugging Face. DigUp's update checks are turned off.

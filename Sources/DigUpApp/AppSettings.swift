@@ -44,7 +44,7 @@ nonisolated struct AppSettings: Sendable {
     var codeQuietSeconds: Double
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/DigUp")
+        .appendingPathComponent("Library/Application Support/Murmur")
     static let defaultIndexDirectory = supportDirectory.appendingPathComponent("index.noindex")
     static let defaultHotkey = "cmd+shift+space"
 

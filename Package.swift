@@ -54,13 +54,21 @@ let appProducts: [Product] = [.executable(name: "DigUpApp", targets: ["DigUpApp"
 let appDependencies: [Package.Dependency] = [
     // In-app updates (the app only). build.sh embeds the framework in Contents/Frameworks and signs it.
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+    // Murmur: on-device speech to text (Parakeet on the Neural Engine). Its text-normalization trait is off: unused.
+    .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7", traits: []),
 ]
 let appTargets: [Target] = [
+    // Murmur's dictation: microphone, Parakeet, the dictation key, pasting into the focused app, the HUD.
+    .target(
+        name: "VoiceKit",
+        dependencies: [.product(name: "FluidAudio", package: "FluidAudio")],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
     // The menubar + hotkey app. build.sh wraps it into build.noindex/DigUp.app. (The product can't be called
     // "DigUp": on a case-insensitive disk it would collide with the `digup` CLI binary.)
     .executableTarget(
         name: "DigUpApp",
-        dependencies: ["DigUpKit", .product(name: "Sparkle", package: "Sparkle")],
+        dependencies: ["DigUpKit", "VoiceKit", .product(name: "Sparkle", package: "Sparkle")],
         swiftSettings: [.defaultIsolation(MainActor.self)],
         linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
     ),

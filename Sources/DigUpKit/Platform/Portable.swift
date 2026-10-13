@@ -29,7 +29,7 @@ public enum AppPaths {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let environment = ProcessInfo.processInfo.environment
         #if os(macOS)
-        return home.appendingPathComponent("Library/Application Support/DigUp")
+        return home.appendingPathComponent("Library/Application Support/Murmur")   // Murmur: its own folder, apart from DigUp's
         #elseif os(Windows)
         if let local = environment["LOCALAPPDATA"], !local.isEmpty {
             return URL(fileURLWithPath: local).appendingPathComponent("DigUp")

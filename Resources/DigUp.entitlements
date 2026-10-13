@@ -5,5 +5,8 @@
 	<!-- Opening a recording at the moment that matched asks QuickTime Player to go there (macOS asks you once). -->
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
+	<!-- Murmur: dictation records the microphone (the hardened runtime blocks it without this). -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
 </dict>
 </plist>

@@ -20,9 +20,13 @@ final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate
         controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: self)
     }
 
+    /// Murmur has no update feed yet (Info.plist has no SUFeedURL), so Sparkle stays off.
+    static var hasFeed: Bool { Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil }
+
     /// Dev and test runs (their own defaults suite) don't check: Sparkle keeps its state in the app's real defaults.
     /// `-debugUpdates YES` lets one check anyway.
     func start() {
+        guard Self.hasFeed else { log("updates: off (no feed)"); return }
         let defaults = UserDefaults.standard
         guard defaults.string(forKey: "defaultsSuite") == nil || defaults.bool(forKey: "debugUpdates") else { return }
         controller.startUpdater()
@@ -39,6 +43,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate
 
     /// "Check for Updates…" and the waiting update's menu item: Sparkle's window, in front.
     func checkNow() {
+        guard Self.hasFeed else { return }
         controller.checkForUpdates(nil)
     }
 

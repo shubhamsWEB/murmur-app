@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="DigUp"
+APP_NAME="Murmur"
 # ".noindex" keeps Spotlight (and the Apps list) from showing this staging copy.
 APP="build.noindex/$APP_NAME.app"
 
