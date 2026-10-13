@@ -19,6 +19,11 @@ public enum IntentClassifier {
     public struct Decision: Sendable {
         public let intent: Intent
         public let reason: String
+
+        public init(intent: Intent, reason: String) {
+            self.intent = intent
+            self.reason = reason
+        }
     }
 
     /// Words that start an instruction to the computer. Dictated prose rarely opens with these bare.
