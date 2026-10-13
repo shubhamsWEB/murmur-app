@@ -79,53 +79,66 @@ public final class CommandAgent {
 
     // MARK: - Router loop
 
+    /// The router for this command: the cloud model you chose, else the local one.
+    public func currentRouter() -> Router {
+        Routers.current(localModel: routerModel)
+    }
+
     private func route(_ utterance: String, frontApp: String?, selection: String?) async {
-        let client = OllamaClient(model: routerModel)
         var context = "Front app: \(frontApp ?? "unknown")."
         if let selection, !selection.isEmpty {
             context += "\nSelected text:\n\"\"\"\n\(selection.prefix(4000))\n\"\"\""
         }
         let helpers = AssistantCLI.allCases.filter(\.isAllowed)
-        var messages: [[String: Any]] = [
-            ["role": "system", "content": Self.systemPrompt(helpers: helpers) + "\n\n" + context],
-            ["role": "user", "content": utterance],
-        ]
+        let system = Self.systemPrompt(helpers: helpers) + "\n\n" + context
         let tools = Self.tools(helpers: helpers)
+        var turns: [RouterTurn] = [.user(utterance)]
+        var router = currentRouter()
         host.progress("Thinking…")
         for step in 0..<maxSteps {
-            let reply: OllamaClient.Reply
+            let reply: RouterReply
             let asked = Date()
             do {
-                reply = try await client.chat(messages: messages, tools: tools)
-                host.log(String(format: "command: router step %d took %.2f s", step + 1, Date().timeIntervalSince(asked)))
+                reply = try await router.chat(system: system, turns: turns, tools: tools)
+                host.log(String(format: "command: %@ step %d took %.2f s", router.name, step + 1,
+                                Date().timeIntervalSince(asked)))
             } catch {
-                host.log("command: router failed: \(error.localizedDescription)")
-                host.showAnswer(error.localizedDescription)
-                return
+                host.log("command: \(router.name) failed: \(error.localizedDescription)")
+                // A cloud model that fails (offline, bad key) hands over to the local model once.
+                if !(router is OllamaRouter) {
+                    router = OllamaRouter(model: routerModel)
+                    host.progress("\(error.localizedDescription) Using the local model…")
+                    do {
+                        reply = try await router.chat(system: system, turns: turns, tools: tools)
+                    } catch {
+                        host.showAnswer(error.localizedDescription)
+                        return
+                    }
+                } else {
+                    host.showAnswer(error.localizedDescription)
+                    return
+                }
             }
-            if reply.toolCalls.isEmpty {
-                // A small model sometimes answers in plain text: treat that as the reply.
-                let text = reply.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if reply.calls.isEmpty {
+                // A model sometimes answers in plain text: treat that as the reply.
+                let text = reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { host.showAnswer(text) }
                 return
             }
-            let calls: [[String: Any]] = reply.toolCalls.map { call in
-                let function: [String: Any] = ["name": call.name,
-                                               "arguments": call.arguments.mapValues { $0.description }]
-                return ["function": function]
-            }
-            let assistant: [String: Any] = ["role": "assistant", "content": reply.content, "tool_calls": calls]
-            messages.append(assistant)
+            turns.append(.assistant(text: reply.text, calls: reply.calls))
             var needsAnotherLook = false
             var results: [String] = []
-            for call in reply.toolCalls {
+            for call in reply.calls {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
-                if call.name == "done" { break }
+                if call.name == "done" {
+                    turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
+                    continue
+                }
                 let outcome = await execute(call.name, call.arguments)
                 if outcome.finished { return }
                 results.append(outcome.result)
                 if Self.informationTools.contains(call.name) { needsAnotherLook = true }
-                messages.append(["role": "tool", "tool_name": call.name, "content": outcome.result])
+                turns.append(.toolResult(callID: call.id, name: call.name, content: outcome.result))
             }
             // Actions only (open, search, volume…): done, without another trip to the model just to say so.
             if !needsAnotherLook {
@@ -231,17 +244,16 @@ public final class CommandAgent {
         return lines.joined(separator: "\n")
     }
 
-    static func tools(helpers: [AssistantCLI]) -> [[String: Any]] {
+    static func tools(helpers: [AssistantCLI]) -> [ToolSpec] {
         func tool(_ name: String, _ description: String, _ properties: [String: (String, String)] = [:],
-                  required: [String]? = nil) -> [String: Any] {
+                  required: [String]? = nil) -> ToolSpec {
             var props: [String: Any] = [:]
             for (key, (type, detail)) in properties { props[key] = ["type": type, "description": detail] }
             let parameters: [String: Any] = ["type": "object", "properties": props,
                                              "required": required ?? Array(properties.keys)]
-            let function: [String: Any] = ["name": name, "description": description, "parameters": parameters]
-            return ["type": "function", "function": function]
+            return ToolSpec(name: name, description: description, parameters: parameters)
         }
-        var list: [[String: Any]] = [
+        var list: [ToolSpec] = [
             tool("open_app", "Open or switch to an app", ["name": ("string", "app name as spoken")]),
             tool("quit_app", "Quit a running app (asks the user first)", ["name": ("string", "app name")]),
             tool("hide_app", "Hide a running app", ["name": ("string", "app name")]),

@@ -37,7 +37,7 @@ public enum IntentClassifier {
     ]
 
     public static func decide(_ utterance: String, forcedCommand: Bool, textFieldFocused: Bool, frontApp: String?,
-                              hasSelection: Bool, model: String) async -> Decision {
+                              hasSelection: Bool, router: Router) async -> Decision {
         if forcedCommand { return Decision(intent: .command, reason: "⌃ held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
@@ -56,22 +56,18 @@ public enum IntentClassifier {
         COMMAND to carry out (open or quit apps, search, change settings, ask Murmur a question, rewrite or \
         summarise the selected text, write something for them), or they are DICTATING words to be typed as-is into \
         the text field they are in (a message, an email body, notes), even if those words contain verbs or questions. \
-        Answer with JSON {"intent": "command"} or {"intent": "dictation"}.
+        Answer "command" or "dictation".
         """
         let user = """
         App in front: \(frontApp ?? "unknown"). A text field has the focus. Text selected: \(hasSelection ? "yes" : "no").
         Utterance: "\(utterance)"
         """
-        let schema: [String: Any] = [
-            "type": "object",
-            "properties": ["intent": ["type": "string", "enum": ["command", "dictation"]]],
-            "required": ["intent"],
-        ]
-        let answer = await OllamaClient(model: model).decide(system: system, user: user, schema: schema, timeout: 2.5)
-        switch answer?["intent"] as? String {
-        case "command": return Decision(intent: .command, reason: "model: command")
-        case "dictation": return Decision(intent: .dictation, reason: "model: dictation")
-        default: return Decision(intent: .dictation, reason: "model unavailable, typed")
+        let answer = await router.choose(system: system, user: user, field: "intent",
+                                         options: ["command", "dictation"], timeout: 2.5)
+        switch answer {
+        case "command": return Decision(intent: .command, reason: "\(router.name): command")
+        case "dictation": return Decision(intent: .dictation, reason: "\(router.name): dictation")
+        default: return Decision(intent: .dictation, reason: "\(router.name) didn't answer, typed")
         }
     }
 }

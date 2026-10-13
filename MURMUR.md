@@ -38,6 +38,12 @@ The log line `intent: … (reason)` says which rule decided.
   files on their own.
 - **Asks first:** quitting an app, running a Shortcut, and every Claude Code or Codex run.
 
+**Router choice** (Commands & Assistants → Router): Local (Ollama, free, offline), Claude (`claude-haiku-5-5`,
+fastest, thinking off and low effort) or OpenAI (`gpt-6-luna`). Cloud routers need an API key, added from the same
+menu and kept in the macOS Keychain. Only command text goes to the cloud (your words, the front app's name and any
+selected text), never audio. If the cloud call fails, Murmur falls back to the local model. Other model ids:
+`defaults write com.copico.Murmur anthropicModel <id>` / `openaiModel <id>`.
+
 Setup: install [Ollama](https://ollama.com) (you have it), then `ollama pull qwen3:4b`. Pick another router model
 under Commands & Assistants (`qwen3:1.7b` is faster, `qwen3:8b` is smarter).
 

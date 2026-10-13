@@ -87,9 +87,11 @@ public final class DictationController {
         }
         startMonitor(prompt: true)
         Task { await prepareModel() }
-        // Load the router model now, so the first command or decision doesn't wait for it.
-        let router = agent.routerModel
-        Task.detached { await OllamaClient(model: router).warmUp() }
+        // Load the local router model now, so the first command or decision doesn't wait for it.
+        if RouterChoice.current == .local {
+            let router = agent.routerModel
+            Task.detached { await OllamaClient(model: router).warmUp() }
+        }
     }
 
     public func setKey(_ key: DictationKeyMonitor.Key) {
@@ -182,13 +184,33 @@ public final class DictationController {
             })
         }
         assistants.addItem(.separator())
-        let routerTitle = NSMenuItem(title: "Router model (Ollama)", action: nil, keyEquivalent: "")
+        let routerTitle = NSMenuItem(title: "Router (decides and picks actions)", action: nil, keyEquivalent: "")
         routerTitle.isEnabled = false
         assistants.addItem(routerTitle)
+        for choice in RouterChoice.allCases {
+            let needsKey = choice != .local && !choice.hasKey
+            let title = choice.display + (needsKey ? " · needs API key" : "")
+            assistants.addItem(ClosureMenuItem(title, checked: choice == RouterChoice.current) { [weak self] in
+                guard let self else { return }
+                if needsKey, !askForKey(choice) { return }
+                RouterChoice.current = choice
+                log("command: router is now \(choice.display)")
+            })
+        }
+        let localMenu = NSMenu()
         for model in ["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "llama3.2:3b"] {
-            assistants.addItem(ClosureMenuItem(model, checked: model == agent.routerModel) { [weak self] in
+            localMenu.addItem(ClosureMenuItem(model, checked: model == agent.routerModel) { [weak self] in
                 self?.agent.routerModel = model
             })
+        }
+        let localItem = NSMenuItem(title: "Local Model", action: nil, keyEquivalent: "")
+        localItem.submenu = localMenu
+        assistants.addItem(localItem)
+        assistants.addItem(.separator())
+        for choice in [RouterChoice.anthropic, .openai] {
+            let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
+            let title = choice.hasKey ? "Change \(provider) API Key…" : "Add \(provider) API Key…"
+            assistants.addItem(ClosureMenuItem(title) { [weak self] in _ = self?.askForKey(choice) })
         }
         let assistantsItem = NSMenuItem(title: "Commands & Assistants", action: nil, keyEquivalent: "")
         assistantsItem.submenu = assistants
@@ -320,7 +342,7 @@ public final class DictationController {
                 let decision = detect
                     ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
                                                     textFieldFocused: textFieldFocused, frontApp: frontApp,
-                                                    hasSelection: selection != nil, model: agent.routerModel)
+                                                    hasSelection: selection != nil, router: agent.currentRouter())
                     : IntentClassifier.Decision(intent: forcedCommand ? .command : .dictation,
                                                 reason: forcedCommand ? "⌃ held" : "detection off")
                 log("intent: \(decision.intent.rawValue) (\(decision.reason))")
@@ -431,6 +453,29 @@ extension DictationController {
             },
             log: { [weak self] line in self?.log(line) }
         )
+    }
+
+    /// Asks for an API key and saves it in the Keychain. An empty field removes the key. Returns true when a key is set.
+    @discardableResult
+    func askForKey(_ choice: RouterChoice) -> Bool {
+        guard let account = choice.keyAccount else { return true }
+        let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
+        let alert = NSAlert()
+        alert.messageText = "\(provider) API key"
+        alert.informativeText = "Used only for commands (the words you said, the front app's name and any selected "
+            + "text). Speech never leaves your Mac. Stored in your Keychain. Leave empty to remove the key."
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = choice == .anthropic ? "sk-ant-…" : "sk-…"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return choice.hasKey }
+        Keychain.set(account, field.stringValue)
+        log("command: \(provider) key \(field.stringValue.isEmpty ? "removed" : "saved")")
+        if field.stringValue.isEmpty, RouterChoice.current == choice { RouterChoice.current = .local }
+        return choice.hasKey
     }
 
     /// A Murmur dialog for actions that change something. Murmur comes to the front while it's open.
