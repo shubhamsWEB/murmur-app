@@ -350,6 +350,7 @@ private struct HomePage: View {
         case .local: .done("Ollama, \(dictation.localRouterModel)")
         case .anthropic, .openai:
             !RouterChoice.current.hasKey ? .problem("Needs an API key")
+                : AnthropicWorkspace.isNeeded(RouterDiagnostics.lastError) ? .problem("Needs a workspace ID")
                 : RouterDiagnostics.isKeyProblem(RouterDiagnostics.lastError) ? .problem("Key was rejected")
                 : .done("Your API key")
         }
@@ -642,6 +643,10 @@ private struct CommandsPage: View {
                 HStack {
                     Button(RouterChoice.anthropic.hasKey ? "Change Anthropic Key…" : "Add Anthropic Key…") {
                         dictation.askForKey(.anthropic)
+                        state.revision += 1
+                    }
+                    Button(AnthropicWorkspace.id == nil ? "Workspace ID…" : "Workspace ID ✓") {
+                        dictation.askForWorkspaceID()
                         state.revision += 1
                     }
                     Button(RouterChoice.openai.hasKey ? "Change OpenAI Key…" : "Add OpenAI Key…") {

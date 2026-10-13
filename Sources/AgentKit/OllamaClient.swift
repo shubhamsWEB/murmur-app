@@ -34,7 +34,8 @@ public struct OllamaClient: Sendable {
     }
 
     /// One chat turn. `messages` are Ollama message objects; `tools` are function definitions.
-    public func chat(messages: [[String: Any]], tools: [[String: Any]]) async throws -> Reply {
+    /// `maxTokens`: a cap on the answer (a small local model can ramble on for thousands of words).
+    public func chat(messages: [[String: Any]], tools: [[String: Any]], maxTokens: Int? = nil) async throws -> Reply {
         var request = URLRequest(url: base.appendingPathComponent("api/chat"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -46,7 +47,7 @@ public struct OllamaClient: Sendable {
             "stream": false,
             "think": false,                 // a router needs a decision, not a chain of thought
             "keep_alive": "30m",            // stay loaded between commands
-            "options": ["temperature": 0],
+            "options": maxTokens.map { ["temperature": 0, "num_predict": $0] } ?? ["temperature": 0],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let data: Data

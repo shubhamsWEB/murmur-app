@@ -564,6 +564,12 @@ extension DictationController {
             Task { [weak self] in
                 let result = await KeyCheck.verify(choice)
                 guard let self else { return }
+                if choice == .anthropic, let result, result.contains("workspace") && result.contains("ID") {
+                    self.log("command: Anthropic key check: needs a workspace ID")
+                    self.hud.hide()
+                    self.askForWorkspaceID(reason: result)
+                    return
+                }
                 if let result {
                     self.log("command: \(provider) key check: \(result)")
                     self.hud.hide()
@@ -581,6 +587,45 @@ extension DictationController {
                 }
             }
             return true
+        }
+    }
+
+    /// Asks for the Anthropic workspace an organization-wide key should use, then checks the key again.
+    public func askForWorkspaceID(reason: String? = nil) {
+        let alert = NSAlert()
+        alert.messageText = "Anthropic workspace ID"
+        alert.informativeText = (reason.map { "\($0)\n\n" } ?? "")
+            + "Paste the workspace ID (it starts with “wrkspc_”). Leave empty if your key is made inside a workspace."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        field.placeholderString = "wrkspc_…"
+        field.stringValue = AnthropicWorkspace.id ?? ""
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        Self.bringToFront(alert)
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        AnthropicWorkspace.id = field.stringValue
+        RouterDiagnostics.lastError = nil
+        log("command: Anthropic workspace ID \(AnthropicWorkspace.id == nil ? "removed" : "saved"), checking the key")
+        hud.show(.working("Checking the Anthropic key…"))
+        Task { [weak self] in
+            let result = await KeyCheck.verify(.anthropic)
+            guard let self else { return }
+            if let result {
+                self.log("command: Anthropic key check: \(result)")
+                self.hud.hide()
+                let warning = NSAlert()
+                warning.alertStyle = .warning
+                warning.messageText = "Anthropic still says no"
+                warning.informativeText = result
+                warning.addButton(withTitle: "OK")
+                Self.bringToFront(warning)
+                warning.runModal()
+            } else {
+                self.log("command: Anthropic key works")
+                self.hud.flash("Anthropic key works", seconds: 2)
+            }
         }
     }
 

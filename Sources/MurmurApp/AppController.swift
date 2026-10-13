@@ -399,6 +399,10 @@ struct SpokenFile {
         }
         let filler: Set<String> = ["my", "the", "a", "an", "that", "this", "our", "of", "called", "named"]
         rest = rest.filter { !filler.contains($0) }
+        // A CV is a résumé: look for both.
+        if rest.contains(where: { ["cv", "resume", "résumé"].contains($0) }) {
+            rest = rest.filter { !["cv", "resume", "résumé"].contains($0) } + ["resume", "cv"]
+        }
         text = rest.isEmpty ? spoken : rest.joined(separator: " ")
         // A photo can be a screenshot and the other way round; "file" says nothing.
         if kinds.contains(.image) { kinds.insert(.screenshot) }
@@ -411,7 +415,9 @@ struct SpokenFile {
         let words = fold(text).split(separator: " ").map(String.init)
         if let named = rows.first(where: { row in
             let name = fold(row.name)
-            return words.allSatisfy { name.contains($0) }
+            return words.allSatisfy { word in
+                ["resume", "cv"].contains(word) ? (name.contains("resume") || name.contains("cv")) : name.contains(word)
+            }
         }) { return named }
         return rows.count == 1 ? rows[0] : nil
     }

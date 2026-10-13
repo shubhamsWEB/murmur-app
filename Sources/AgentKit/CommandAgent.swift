@@ -137,8 +137,8 @@ public final class CommandAgent {
         let system = """
         You help with text the user selected on their Mac. Follow their spoken instruction on the selected text and \
         reply with only the result: no preamble, no quotation marks, no notes about what you did. Keep the text's \
-        language unless asked to translate. A summary is a few short sentences or bullet points. An explanation is \
-        short and plain.
+        language unless asked to translate. A summary is at most \(max(30, selection.split(separator: " ").count / 4)) \
+        words: a few short sentences or bullet points, never longer than the text. An explanation is short and plain.
         """
         let turns: [RouterTurn] = [.user("Instruction: \(WakeName.strip(instruction) ?? instruction)\n\n"
             + "Selected text:\n\"\"\"\n\(selection.prefix(12_000))\n\"\"\"")]
@@ -282,8 +282,14 @@ public final class CommandAgent {
             return Outcome(result: await host.openFile(text("query")), finished: true)
         case "search_files":
             // "my resume" → "resume": the possessive only adds noise to the search.
-            let query = text("query").replacingOccurrences(of: #"^(my|the|all|some) "#, with: "",
+            var query = text("query").replacingOccurrences(of: #"^(my|the|all|some) "#, with: "",
                                                            options: [.regularExpression, .caseInsensitive])
+            // A CV is a résumé: search for both words.
+            if query.range(of: #"\b(cv|resume|résumé)\b"#, options: [.regularExpression, .caseInsensitive]) != nil,
+               query.split(separator: " ").count <= 3 {
+                query = "resume cv" + (query.lowercased().hasPrefix("cv") || query.lowercased().hasPrefix("resume")
+                    ? "" : " " + query)
+            }
             host.searchFiles(query)
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url": return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))

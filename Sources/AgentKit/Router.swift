@@ -101,7 +101,27 @@ public enum RouterDiagnostics {
     public static func isKeyProblem(_ error: String?) -> Bool {
         guard let error else { return false }
         return error.contains("rejected the API key") || error.contains("401") || error.contains("403")
+            || AnthropicWorkspace.isNeeded(error)
             || error.contains("No ") && error.contains("API key")
+    }
+}
+
+/// Organization-wide Anthropic keys aren't tied to one workspace: every request has to name it
+/// (`anthropic-workspace-id`). Not a secret, so it's kept in defaults.
+public enum AnthropicWorkspace {
+    private static let key = "anthropicWorkspaceID"
+
+    public static var id: String? {
+        get {
+            let value = UserDefaults.standard.string(forKey: key)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }
+        set { UserDefaults.standard.set(newValue ?? "", forKey: key) }
+    }
+
+    /// Anthropic said this key needs a workspace ID.
+    public static func isNeeded(_ message: String?) -> Bool {
+        message?.lowercased().contains("workspace-id") == true || message?.contains("not scoped to a workspace") == true
     }
 }
 
@@ -188,7 +208,9 @@ public struct AnthropicRouter: Router {
 
     private func headers() throws -> [String: String] {
         guard let key = Keychain.get("anthropic") else { throw RouterError.noKey("Anthropic") }
-        return ["x-api-key": key, "anthropic-version": "2023-06-01"]
+        var headers = ["x-api-key": key, "anthropic-version": "2023-06-01"]
+        if let workspace = AnthropicWorkspace.id { headers["anthropic-workspace-id"] = workspace }
+        return headers
     }
 
     private func messages(_ turns: [RouterTurn]) -> [[String: Any]] {
@@ -397,7 +419,9 @@ public struct OllamaRouter: Router {
                                            "parameters": tool.parameters]
             return ["type": "function", "function": function]
         }
-        let reply = try await OllamaClient(model: model).chat(messages: messages(system: system, turns), tools: list)
+        // Plain text (no tools) is writing for you: capped, so a summary can't run to pages.
+        let reply = try await OllamaClient(model: model).chat(messages: messages(system: system, turns), tools: list,
+                                                              maxTokens: tools.isEmpty ? 700 : nil)
         let calls = reply.toolCalls.enumerated().map { index, call in
             RouterCall(id: "call_\(index)", name: call.name, arguments: call.arguments)
         }
@@ -442,6 +466,9 @@ public enum KeyCheck {
             request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
             request.setValue(key, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            if let workspace = AnthropicWorkspace.id {
+                request.setValue(workspace, forHTTPHeaderField: "anthropic-workspace-id")
+            }
         case .local:
             return nil
         }
@@ -466,7 +493,15 @@ public enum KeyCheck {
             RouterDiagnostics.lastError = RouterError.http(provider, code, detail).localizedDescription
             return message
         default:
-            return "\(provider) answered \(code) when checking the key. It may still work; try a command."
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let detail = ((json?["error"] as? [String: Any])?["message"] as? String) ?? ""
+            if AnthropicWorkspace.isNeeded(detail) {
+                RouterDiagnostics.lastError = detail
+                return "This Anthropic key belongs to your whole organization, so Murmur also needs the ID of the "
+                    + "workspace to use. Find it in the Anthropic Console under Settings → Workspaces."
+            }
+            return "\(provider) answered \(code) when checking the key"
+                + (detail.isEmpty ? "" : ": \(detail.prefix(200))") + ". It may still work; try a command."
         }
     }
 }

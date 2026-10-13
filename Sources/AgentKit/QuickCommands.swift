@@ -16,6 +16,12 @@ public enum QuickCommands {
         s = s.replacingOccurrences(of: #"^(please |can you |could you )+"#, with: "", options: .regularExpression)
         s = s.replacingOccurrences(of: #"( please)$"#, with: "", options: .regularExpression)
         s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        // Spelled-out letters: "C V" → "cv", "P D F" → "pdf".
+        s = s.replacingOccurrences(of: #"\bc\.? ?v\b\.?"#, with: "cv", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\bp\.? ?d\.? ?f\b\.?"#, with: "pdf", options: .regularExpression)
+        // A false start before the command: "a search for…", "uh, open…", "so find…".
+        s = s.replacingOccurrences(of: #"^(?:a|uh|um|erm|so|and|okay so|ok so),? (?=(?:search|find|open|show|look|pull|bring)\b)"#,
+                                   with: "", options: .regularExpression)
         // "Search, my resume": Parakeet's comma after the verb isn't a pause between two commands.
         s = s.replacingOccurrences(of: #"^([a-z]+), "#, with: "$1 ", options: .regularExpression)
         return s.trimmingCharacters(in: .whitespaces)
