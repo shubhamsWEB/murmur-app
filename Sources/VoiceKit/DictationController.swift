@@ -436,11 +436,11 @@ public final class DictationController: ObservableObject {
                     guard let self else { return }
                     let percent = Int((fraction * 100).rounded())
                     if downloading {
-                        speechModelState = .downloading(fraction)
-                        modelStatus = "Downloading the speech model · \(percent)%"
+                        self.speechModelState = .downloading(fraction)
+                        self.modelStatus = "Downloading the speech model · \(percent)%"
                     } else {
-                        speechModelState = .preparing(fraction)
-                        modelStatus = "Preparing the speech model · \(percent)%"
+                        self.speechModelState = .preparing(fraction)
+                        self.modelStatus = "Preparing the speech model · \(percent)%"
                     }
                 }
             }
