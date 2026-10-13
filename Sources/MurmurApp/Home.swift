@@ -847,11 +847,15 @@ private struct CommandsPage: View {
     let dictation: DictationController
     let state: HomeState
     @State private var installed: [AssistantCLI: Bool] = [:]
+    /// The model picked, held by the page itself so the cards change the moment you click (the setting lives in
+    /// UserDefaults, which SwiftUI doesn't watch).
+    @State private var picked = RouterChoice.current
+    /// Bumped after a key is added, changed or tested: the key rows and pills read it.
+    @State private var keysChanged = 0
 
     var body: some View {
-        // Most of this page's settings live outside SwiftUI (UserDefaults, the Keychain): every change bumps
-        // `revision`, and reading it here redraws the page at once.
         let _ = state.revision
+        let _ = keysChanged
         VStack(alignment: .leading, spacing: 26) {
             PageHeader(title: "Commands & AI",
                        subtitle: "Common commands like “open Slack” run instantly with no model. Everything else goes to the model you pick here.")
@@ -868,6 +872,7 @@ private struct CommandsPage: View {
                         Button("Workspace ID…") {
                             dictation.askForWorkspaceID()
                             state.revision += 1
+                            keysChanged += 1
                         }
                         .buttonStyle(.murmurSecondary)
                         if RouterChoice.anthropic.hasKey {
@@ -876,6 +881,7 @@ private struct CommandsPage: View {
                         Button(RouterChoice.anthropic.hasKey ? "Change…" : "Add Key…") {
                             dictation.askForKey(.anthropic)
                             state.revision += 1
+                            keysChanged += 1
                         }
                         .buttonStyle(.murmurSecondary)
                     }
@@ -890,6 +896,7 @@ private struct CommandsPage: View {
                         Button(RouterChoice.openai.hasKey ? "Change…" : "Add Key…") {
                             dictation.askForKey(.openai)
                             state.revision += 1
+                            keysChanged += 1
                         }
                         .buttonStyle(.murmurSecondary)
                     }
@@ -977,6 +984,7 @@ private struct CommandsPage: View {
                 installed[helper] = await helper.locate() != nil
             }
         }
+        .onAppear { picked = RouterChoice.current }
     }
 
     private static func pretty(_ id: String) -> String {
@@ -989,7 +997,7 @@ private struct CommandsPage: View {
     }
 
     private func modelCard(_ choice: RouterChoice) -> some View {
-        let selected = RouterChoice.current == choice
+        let selected = picked == choice
         let (name, model, tags): (String, String, [String]) = switch choice {
         case .local: ("On this Mac", "Ollama · \(dictation.localRouterModel)", ["Free", "Private", "Slower"])
         case .anthropic: ("Claude", Self.pretty(AnthropicRouter.model), ["Fastest", "Your key"])
@@ -998,6 +1006,8 @@ private struct CommandsPage: View {
         return Button {
             if choice != .local, !choice.hasKey, !dictation.askForKey(choice) { return }
             RouterChoice.current = choice
+            picked = choice
+            keysChanged += 1
             state.revision += 1
         } label: {
             VStack(alignment: .leading, spacing: 4) {
