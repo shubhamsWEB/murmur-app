@@ -315,26 +315,40 @@ struct SearchWindowView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Rectangle().fill(Theme.line).frame(height: 1)
             HStack(spacing: 0) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if search.showsPreview, let row = search.selectedRow, search.hasResults {
-                    Divider()
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
+                    Rectangle().fill(Theme.line).frame(width: 1)
+                    VStack(spacing: 0) {
+                        ScrollView {
+                            PreviewPane(row: row, imageSize: CGSize(width: 300, height: 230),
                                         open: { search.open(row) })
-                            PreviewActions(row: row, open: { search.open(row) },
-                                           reveal: { NSWorkspace.shared.activateFileViewerSelecting([row.url]) })
+                                .padding(20)
                         }
-                        .padding(16)
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) {
+                                Button(row.openTitle) { search.open(row) }
+                                    .buttonStyle(.murmurPrimary)
+                                    .keyboardShortcut(.defaultAction)
+                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([row.url]) }
+                                    .buttonStyle(.murmurSecondary)
+                            }
+                            Text("↩ open · ⌘↩ Finder · Space Quick Look · ⌘C copy")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.ink3)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
                     }
-                    .frame(width: 324)
+                    .frame(width: 340)
                     .background(Theme.card)
                 }
             }
-            Divider()
+            Rectangle().fill(Theme.line).frame(height: 1)
             statusBar
         }
         .frame(minWidth: 560, minHeight: 420)
@@ -391,8 +405,8 @@ struct SearchWindowView: View {
     @ViewBuilder private var content: some View {
         if !model.hasFolders {
             VStack(spacing: 0) {
-                BrandMark()
-                Text("Choose folders to search").font(.system(size: 20, weight: .bold)).padding(.top, 18)
+                BrandTile(size: 84)
+                Text("Choose folders to search").font(.system(size: 20, weight: .semibold)).padding(.top, 18)
                 Text("Murmur only looks where you tell it to.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
@@ -424,6 +438,9 @@ struct SearchWindowView: View {
 
     private var statusBar: some View {
         HStack(spacing: 10) {
+            Circle()
+                .fill(model.progress == nil ? Theme.goodDot : Theme.accent)
+                .frame(width: 6, height: 6)
             if let progress = model.progress {
                 ProgressView(value: progress).progressViewStyle(.circular).controlSize(.mini)
             }
@@ -527,11 +544,20 @@ private struct ResultsGrid: View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: Self.cell.width, maximum: 230), spacing: 14)],
-                              alignment: .leading, spacing: 18) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Best matches").font(.system(size: 13, weight: .semibold))
+                        Text("\(search.results.ranked.count)").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 18)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: Self.cell.width, maximum: 240), spacing: 16)],
+                              alignment: .leading, spacing: 16) {
                         ForEach(search.results.ranked) { row in cell(row) }
                     }
-                    .padding(16)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+                    .padding(.bottom, 16)
                     if !search.results.weaker.isEmpty {
                         WeakerToggle(count: search.results.weaker.count, expanded: search.showWeaker) {
                             search.showWeaker.toggle()
@@ -557,7 +583,7 @@ private struct ResultsGrid: View {
     }
 
     private func updateColumns(_ width: CGFloat) {
-        search.columns = max(1, Int((width - 32 + 14) / (Self.cell.width + 14)))
+        search.columns = max(1, Int((width - 40 + 16) / (Self.cell.width + 16)))
     }
 
     private func cell(_ row: ResultRow) -> some View {
@@ -571,52 +597,61 @@ private struct ResultsGrid: View {
 private struct GridCell: View {
     let row: ResultRow
     let selected: Bool
+    @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             // A fixed box the picture fills and is clipped to: a picture's own shape must never size the cell.
-            Color.primary.opacity(0.05)
-                .frame(height: 132)
+            Theme.fill
+                .frame(height: 128)
                 .frame(maxWidth: .infinity)
                 .overlay {
                     if row.kind == .audio {
                         Image(systemName: "waveform")
                             .font(.system(size: 34, weight: .light))
-                            .foregroundStyle(Brand.gradient)
+                            .foregroundStyle(Theme.accentText)
                     } else {
                         MomentThumbnail(row: row)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(alignment: .topLeading) {
-                if row.kind != .image && row.kind != .screenshot {
-                    Image(systemName: row.kind.symbol)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(5)
-                        .background(Circle().fill(.black.opacity(0.5)))
-                        .padding(6)
+                .clipped()
+                .overlay(alignment: .topLeading) {
+                    if row.kind != .image {
+                        Label(row.kind.title, systemImage: row.kind.symbol)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.ink)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Theme.card.opacity(0.92)))
+                            .padding(8)
+                    }
                 }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if let place = row.place { PlaceBadge(text: place, onImage: true).padding(6) }
-            }
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(selected ? Brand.coral : Color.primary.opacity(0.08), lineWidth: selected ? 3 : 0.5)
-                .padding(selected ? -3 : 0))
-            VStack(alignment: .leading, spacing: 1) {
+                .overlay(alignment: .bottomTrailing) {
+                    if let place = row.place { PlaceBadge(text: place, onImage: true).padding(8) }
+                }
+            VStack(alignment: .leading, spacing: 2) {
                 Text(row.title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 12.5, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(row.folder)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.ink2)
                     .lineLimit(1)
                     .truncationMode(.head)
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(Theme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(selected ? Theme.accent : Theme.line, lineWidth: selected ? 1.5 : 1))
+        .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Theme.accentRing)
+            .padding(-3).opacity(selected ? 1 : 0))
+        .shadow(color: .black.opacity(hovering && !selected ? 0.08 : 0), radius: 8, y: 3)
+        .onHover { hovering = $0 }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)")
@@ -785,9 +820,8 @@ private struct EmptyState: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: symbol)
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(.tertiary)
+            StarlingMark(.mono(Theme.control))
+                .frame(width: 56, height: 56)
             Text(title)
                 .font(.system(size: 17, weight: .semibold))
                 .lineLimit(2)
@@ -813,57 +847,51 @@ private struct SearchHome: View {
     @State private var kinds: [FileKind: Int] = [:]
 
     private static let examples: [(text: String, kind: ResultGroupKind)] = [
-        ("a screenshot of an error message", .screenshots), ("receipt", .documents), ("whiteboard notes", .images),
-        ("someone laughing", .audio), ("a dog on the beach", .video), ("slides about the budget", .documents),
+        ("a screenshot of an error message", .screenshots), ("receipt from the hardware store", .documents),
+        ("whiteboard notes", .images), ("someone laughing", .audio), ("a dog on the beach", .video),
+        ("slides about the budget", .documents),
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            BrandMark()
-            Text("Find it by describing it.")
-                .font(.system(size: 26, weight: .semibold))
-                .padding(.top, 18)
-            Text("Type what you remember above: what's in it, what it looks or sounds like, or words from it. "
-                 + "Or hold Fn and say “find my files about…”.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 440)
-                .padding(.top, 6)
-            Text("Try one of these")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .padding(.top, 26)
-            FlowRow(spacing: 8) {
-                ForEach(examples, id: \.text) { example in
-                    ExampleChip(text: example.text, kind: example.kind) { search.query = example.text }
-                }
-            }
-            .frame(maxWidth: 560)
-            .padding(.top, 8)
-            VStack(spacing: 8) {
-                if !kinds.isEmpty {
-                    HStack(spacing: 8) {
-                        KindCounts(counts: kinds)
-                        Text("in \(folders)")
-                    }
-                } else if model.status.searchable > 0 {
-                    Text("\(model.status.searchable.formatted()) files to search in \(folders)")
-                }
-                if let hotkey = model.hotkey {
-                    HStack(spacing: 6) {
-                        Keycaps(caps: hotkey.caps, size: 10)
-                        Text("opens Murmur from any app")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                HStack(spacing: 18) {
+                    BrandTile(size: 64)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Find anything by describing it")
+                            .font(.system(size: 24, weight: .semibold))
+                            .tracking(-0.4)
+                        Text("What's in it, what it looks or sounds like, or words you remember. Murmur reads photos, "
+                             + "PDFs, documents, recordings and video on this Mac.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionLabel("Try one")
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                        ForEach(examples, id: \.text) { example in
+                            ExampleChip(text: example.text, kind: example.kind) { search.query = example.text }
+                        }
+                    }
+                }
+                HStack(alignment: .top, spacing: 10) {
+                    infoCard(symbol: "folder", title: "What's here", detail: indexed)
+                    infoCard(symbol: "mic", title: "Or say it",
+                             detail: "Hold fn anywhere and say “find my beach photos” or “open my resume PDF”.")
+                    if let hotkey = model.hotkey {
+                        infoCard(symbol: "command", title: "From any app",
+                                 detail: "Press \(hotkey.display) for the quick search panel.")
+                    }
+                }
+                if model.progress != nil { IndexingCard(model: model) }
             }
-            .font(.system(size: 11))
-            .foregroundStyle(.tertiary)
-            .padding(.top, 30)
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 30)
+            .frame(maxWidth: .infinity)
         }
-        .padding(.bottom, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { search.focusField() }
         .task(id: model.status.files) {
@@ -871,6 +899,29 @@ private struct SearchHome: View {
             for summary in await engine.rootSummaries() { counts.merge(summary.kinds, uniquingKeysWith: +) }
             kinds = counts
         }
+    }
+
+    private func infoCard(symbol: String, title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(Theme.ink)
+            Text(detail)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.line))
+    }
+
+    private var indexed: String {
+        let total = kinds.values.reduce(0, +)
+        let count = total > 0 ? total : model.status.searchable
+        guard count > 0 else { return "Nothing indexed yet in \(folders)." }
+        return "\(count.formatted()) files in \(folders)."
     }
 
     /// With code search on, one of code's too.
@@ -911,17 +962,25 @@ private struct ExampleChip: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 10) {
                 Image(systemName: kind.symbol)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Brand.coral)
-                Text(text)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.accentText)
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.accentTint))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("“\(text)”").font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.ink)
+                        .lineLimit(2)
+                    Text(kind.title).font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                }
+                Spacer(minLength: 0)
             }
-            .font(.system(size: 12.5))
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(Brand.coral.opacity(hovering ? 0.2 : 0.1)))
-            .contentShape(Capsule())
+            .padding(10)
+            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(hovering ? Theme.accent.opacity(0.6) : Theme.line))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("Search for “\(text)”")

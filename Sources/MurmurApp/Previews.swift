@@ -133,7 +133,7 @@ struct PreviewPane: View {
                 .frame(maxWidth: .infinity)
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
@@ -153,7 +153,11 @@ struct PreviewPane: View {
             }
             .padding(.top, 12)
             WhyItMatched(row: row)
-                .padding(.top, 12)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.page))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline))
+                .padding(.top, 14)
             Spacer(minLength: 0)
         }
     }
@@ -326,7 +330,7 @@ struct WhyItMatched: View {
                 Text(row.reason)
             } icon: {
                 Image(systemName: row.matchedMeaning ? "sparkle.magnifyingglass" : "textformat")
-                    .foregroundStyle(row.matchedMeaning ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(row.matchedMeaning ? AnyShapeStyle(Theme.accentText) : AnyShapeStyle(Theme.ink2))
             }
             .font(.system(size: 12, weight: .medium))
             // Code shows its lines above, the words marked there.

@@ -18,20 +18,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let other = otherRunningCopy() {
-            // Murmur is already running (often a copy from another folder, like the dev build): opening it again from
-            // Spotlight, Launchpad or /Applications brings that one's window forward instead of quietly doing nothing.
-            log("launch: another Murmur is running (\(other.bundleURL?.path ?? "?")); showing that one")
-            if let url = other.bundleURL {
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = true
-                NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in
-                    DispatchQueue.main.async { NSApp.terminate(nil) }
-                }
-            } else {
-                other.activate()
-                NSApp.terminate(nil)
+            // Another Murmur is running (an older install, or the dev build): the one you just opened takes over, so
+            // you always get the copy you chose, and only one listens to the fn key.
+            log("launch: replacing the Murmur already running (\(other.bundleURL?.path ?? "?"))")
+            other.terminate()
+            let deadline = Date().addingTimeInterval(4)
+            while !other.isTerminated, Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
             }
-            return
+            if !other.isTerminated { other.forceTerminate() }
         }
         // For testing both themes: `-forceAppearance dark` (or light).
         switch UserDefaults.standard.string(forKey: "forceAppearance") {
