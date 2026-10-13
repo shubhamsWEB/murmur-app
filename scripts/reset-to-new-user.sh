@@ -1,13 +1,16 @@
 #!/bin/zsh
 # Puts Murmur back to how a brand-new user finds it, to test the whole first-run flow:
 # permissions, settings, setup, and (if you choose) API keys, index and downloaded models.
-# Run it yourself: ./scripts/reset-to-new-user.sh
+# Run it yourself: ./scripts/reset-to-new-user.sh          (asks about keys, index and models)
+#                  ./scripts/reset-to-new-user.sh --all    (removes everything, no questions)
 set -u
+ALL=0; [[ "${1:-}" == "--all" ]] && ALL=1
 BUNDLE=com.copico.Murmur
 SUPPORT="$HOME/Library/Application Support/Murmur"
 FLUID="$HOME/Library/Application Support/FluidAudio"
 
 ask() {  # ask "question" default(y|n)
+  if [[ $ALL == 1 ]]; then echo "$1 → yes (--all)"; return 0; fi
   local reply
   if [[ $2 == y ]]; then printf "%s [Y/n] " "$1"; else printf "%s [y/N] " "$1"; fi
   read -r reply
@@ -17,6 +20,7 @@ ask() {  # ask "question" default(y|n)
 
 echo "› Quitting Murmur"
 pkill -x Murmur 2>/dev/null; pkill -f murmur-engine 2>/dev/null; sleep 1
+pkill -9 -x Murmur 2>/dev/null; pkill -9 -f murmur-engine 2>/dev/null
 
 echo "› Resetting Murmur's permissions (Microphone, Accessibility, Automation, Input Monitoring, files…)"
 tccutil reset All "$BUNDLE"
@@ -39,6 +43,11 @@ if ask "Also remove the downloaded models (search ~865 MB, speech ~500 MB; they 
   rm -rf "$SUPPORT/Models" && echo "  search model removed"
   [[ -d "$FLUID" ]] && rm -rf "$FLUID" && echo "  speech model removed"
 fi
+
+# Caches and saved window positions.
+rm -rf "$HOME/Library/Caches/$BUNDLE" "$HOME/Library/HTTPStorages/$BUNDLE" \
+       "$HOME/Library/Saved Application State/$BUNDLE.savedState" 2>/dev/null
+rm -rf "${TMPDIR:-/tmp}/murmur-sessions" 2>/dev/null
 
 echo
 echo "Done. Murmur is back to first launch."
