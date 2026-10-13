@@ -4,13 +4,12 @@ import Observation
 import Quartz
 import SwiftUI
 
-/// The search window, for the searches the panel is too small for: a big field, kind filters with counts, the results
-/// as a grid of pictures, and the selected one in a preview pane with why it matched. The Dock icon shows while it's
-/// open, and closing it frees its views (the app goes back to its idle size).
-final class SearchWindowController: NSObject, NSWindowDelegate {
+/// Search inside Murmur's window (its Search page): a big field, kind filters with counts, the results as a grid of
+/// pictures, and the selected one in a preview pane with why it matched. There's no separate search window any more;
+/// this drives the page's keys (arrows, ↩, Space for Quick Look) while it's the one showing.
+final class SearchWindowController: NSObject {
     let search: SearchModel
     private unowned let app: AppController
-    private var window: QuickLookWindow?
     private var keyMonitor: Any?
     private var mouseMonitor: Any?
 
@@ -19,59 +18,41 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         search = SearchModel(engine: app.engine)
     }
 
-    var isVisible: Bool { window?.isVisible == true }
+    /// Murmur's window, which hosts the search.
+    private var window: QuickLookWindow? { app.home?.window as? QuickLookWindow }
+    private var isShowing: Bool { window?.isVisible == true && app.home.state.section == .search }
+    var isVisible: Bool { isShowing }
 
     func show(query: String? = nil, kind: ResultGroupKind? = nil) {
-        let window = self.window ?? makeWindow()
         if let query {
             search.filter = kind
             search.query = query
         }
-        app.present(window)
-        if !AppController.offscreen { window.makeFirstResponder(search.field) }
+        app.showHome(.search)
         installKeyMonitor()
+        // The page is drawn on the next turn of the main loop: then the field exists to type in.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !AppController.offscreen, let field = search.field else { return }
+            field.window?.makeFirstResponder(field)
+        }
+    }
+
+    /// The Search page appeared (from the sidebar too): its keys work from now on.
+    func pageAppeared() {
+        installKeyMonitor()
+    }
+
+    /// The Search page went away: stop any playing preview.
+    func pageDisappeared() {
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible,
+           QLPreviewPanel.shared().dataSource === window {
+            QLPreviewPanel.shared().orderOut(nil)
+        }
+        PreviewPlayback.shared.stop()
     }
 
     func close() {
         window?.close()
-    }
-
-    private func makeWindow() -> QuickLookWindow {
-        let window = QuickLookWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 700),
-                                     styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                     backing: .buffered, defer: false)
-        // An empty unified toolbar makes the title bar tall enough for the search field to sit beside the window
-        // buttons.
-        window.toolbar = NSToolbar(identifier: "MurmurSearch")
-        window.toolbarStyle = .unified
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.title = "Murmur"
-        window.minSize = NSSize(width: 820, height: 520)
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        // The frame is remembered in the app's real defaults, so dev runs (their own -defaultsSuite) don't keep it.
-        if UserDefaults.standard.string(forKey: "defaultsSuite") == nil {
-            window.setFrameAutosaveName("MurmurSearchWindow")
-        }
-        window.backgroundColor = Brand.paperNS
-        window.contentView = NSHostingView(rootView: SearchWindowView(search: search, model: app.model, app: app)
-            .background(Brand.paper)
-            .murmurStyle())
-        if window.frame.origin == .zero { window.center() }
-        self.window = window
-        return window
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
-            QLPreviewPanel.shared().orderOut(nil)
-        }
-        removeKeyMonitor()
-        PreviewPlayback.shared.stop()
-        window?.contentView = nil
-        window = nil
-        app.windowClosed()
     }
 
     func snapshot(to url: URL) throws {
@@ -87,21 +68,15 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             // Keys typed here, or in Quick Look while this window is the one showing it (not the panel's).
             let previewing = QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
                 && event.window === QLPreviewPanel.shared() && QLPreviewPanel.shared().dataSource === window
-            guard event.window === window || previewing else { return event }
+            guard (event.window === window && isShowing) || previewing else { return event }
             return handle(event) ? nil : event
         }
         // A click back in the search field: Space and ← → type again (after a click on a result, they were its).
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            guard let self, let window, event.window === window, let field = search.field else { return event }
+            guard let self, let window, event.window === window, isShowing, let field = search.field else { return event }
             if field.bounds.contains(field.convert(event.locationInWindow, from: nil)) { search.editing() }
             return event
         }
-    }
-
-    private func removeKeyMonitor() {
-        for monitor in [keyMonitor, mouseMonitor].compactMap({ $0 }) { NSEvent.removeMonitor(monitor) }
-        keyMonitor = nil
-        mouseMonitor = nil
     }
 
     /// Arrows move through the grid (← → only once you've arrowed, so they still move the cursor while you type),
@@ -362,8 +337,9 @@ struct SearchWindowView: View {
             Divider()
             statusBar
         }
-        .ignoresSafeArea(.container, edges: .top)
-        .frame(minWidth: 820, minHeight: 520)
+        .frame(minWidth: 560, minHeight: 420)
+        .onAppear { app.searchWindow.pageAppeared() }
+        .onDisappear { app.searchWindow.pageDisappeared() }
     }
 
     private var header: some View {
@@ -391,28 +367,18 @@ struct SearchWindowView: View {
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
                 // Where typing goes, as a Mac text field shows it: a ring in the accent color while it has the cursor.
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
+                    .strokeBorder(Brand.coral.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
                 .animation(.easeOut(duration: 0.15), value: fieldFocused)
                 Button {
                     search.showsPreview.toggle()
                 } label: {
                     Image(systemName: "sidebar.right")
                         .font(.system(size: 15))
-                        .foregroundStyle(search.showsPreview ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(search.showsPreview ? AnyShapeStyle(Brand.coral) : AnyShapeStyle(.secondary))
                 }
                 .buttonStyle(.plain)
                 .help(search.showsPreview ? "Hide Preview" : "Show Preview")
-                Button {
-                    app.showHome(.dictation)
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 15))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Settings (⌘,)")
             }
-            .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
             KindFilters(search: search, showsCode: model.hasCode)
         }
@@ -541,7 +507,7 @@ private struct KindFilters: View {
             .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .background(Capsule().fill(selected ? AnyShapeStyle(Color.accentColor)
+            .background(Capsule().fill(selected ? AnyShapeStyle(Brand.coral)
                                                 : AnyShapeStyle(Color.primary.opacity(0.06))))
             .contentShape(Capsule())
         }
@@ -634,7 +600,7 @@ private struct GridCell: View {
                 if let place = row.place { PlaceBadge(text: place, onImage: true).padding(6) }
             }
             .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: selected ? 3 : 0.5)
+                .strokeBorder(selected ? Brand.coral : Color.primary.opacity(0.08), lineWidth: selected ? 3 : 0.5)
                 .padding(selected ? -3 : 0))
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.title)
@@ -723,7 +689,7 @@ private struct CodeResultRow: View {
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(selected ? Color.accentColor.opacity(0.22) : Color.clear))
+            .fill(selected ? Brand.coral.opacity(0.22) : Color.clear))
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Code, \(row.name), \(row.reason)")
@@ -853,7 +819,7 @@ private struct SearchHome: View {
         VStack(spacing: 0) {
             BrandMark()
             Text("Find it by describing it.")
-                .font(.system(size: 26, weight: .semibold, design: .rounded))
+                .font(.system(size: 26, weight: .semibold))
                 .padding(.top, 18)
             Text("Type what you remember above: what's in it, what it looks or sounds like, or words from it. "
                  + "Or hold Fn and say “find my files about…”.")

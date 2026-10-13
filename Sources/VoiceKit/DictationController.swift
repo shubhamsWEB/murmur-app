@@ -61,6 +61,8 @@ public final class DictationController: ObservableObject {
     public var logFile: URL?
     /// Opens Murmur's file search with a query (set by the app).
     public var onSearchFiles: ((String) -> Void)?
+    /// Opens the file that best matches a description, or shows the matches (set by the app). Returns what it did.
+    public var onOpenFile: ((String) async -> String)?
 
     /// A press shorter than this is a tap, not a hold (taps start hands-free dictation).
     private let tapLength: TimeInterval = 0.3
@@ -507,7 +509,11 @@ extension DictationController {
                 guard let self else { return }
                 if text.hasSuffix("…") { hud.show(.working(text)) } else { hud.flash(text, seconds: 2) }
             },
-            log: { [weak self] line in self?.log(line) }
+            log: { [weak self] line in self?.log(line) },
+            openFile: { [weak self] query in
+                guard let open = self?.onOpenFile else { return "File search isn't ready." }
+                return await open(query)
+            }
         )
     }
 
@@ -545,6 +551,7 @@ extension DictationController {
                 continue
             }
             Keychain.set(account, key)
+            RouterDiagnostics.lastError = nil   // a new key gets a fresh chance
             log("command: \(provider) key saved, checking it")
             hud.show(.working("Checking the \(provider) key…"))
             Task { [weak self] in

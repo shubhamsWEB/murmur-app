@@ -20,6 +20,13 @@ public enum QuickCommands {
     }
 
     private static let rules: [(String, (Match) -> Action?)] = [
+        // "open my resume pdf", "pull up the lease document", "open my cv": open the best match straight away.
+        (#"^(?:open|pull up|bring up)(?: up)? (?:my |the |that |this |our )?((?:.+? )?(?:pdfs?|docx?|documents?|word doc|files?|photos?|pictures?|images?|videos?|screenshots?|recordings?|spreadsheets?|sheets?|slides|decks?|presentations?|resumes?|résumés?|cvs?|receipts?|invoices?|contracts?|leases?|statements?|notes?))$"#, { m in
+            let query = m[1]
+            // "open photos" / "open notes" are apps; a file needs more than the type word.
+            if !query.contains(" "), !["resume", "resumes", "résumé", "cv", "receipt", "invoice", "contract", "lease"]
+                .contains(query) { return nil }
+            return Action(tool: "open_file", arguments: ["query": query]) }),
         // "my photos on the beach", "show me pictures of the dog", "the pdf about my lease", "screenshots from last week"
         (#"^(?:show me |show |find |get |open |search for |look for )?(?:all )?(?:my |the |some )?((?:photos?|pictures?|pics|images?|screenshots?|videos?|clips?|recordings?|documents?|docs|pdfs?|files?|slides|presentations?|spreadsheets?|receipts?|invoices?)\b.*)$"#, { m in
             Action(tool: "search_files", arguments: ["query": m[1]]) }),

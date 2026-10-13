@@ -2,6 +2,7 @@ import AgentKit
 import AppKit
 import AVFoundation
 import Observation
+import Quartz
 import SwiftUI
 import VoiceKit
 
@@ -71,18 +72,19 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
     }
 
     private func makeWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
+        // A Quick Look window: Space previews the selected search result.
+        let window = QuickLookWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "Murmur"
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
-        window.minSize = NSSize(width: 780, height: 540)
+        window.minSize = NSSize(width: 860, height: 560)
         window.isReleasedWhenClosed = false
         window.backgroundColor = Brand.paperNS
         window.delegate = self
         if UserDefaults.standard.string(forKey: "defaultsSuite") == nil {
-            window.setFrameAutosaveName("MurmurHomeWindow")
+            window.setFrameAutosaveName("MurmurMainWindow")
         }
         window.contentView = NSHostingView(rootView: HomeView(app: app, state: state).murmurStyle())
         if window.frame.origin == .zero { window.center() }
@@ -91,6 +93,10 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().orderOut(nil)
+        }
+        PreviewPlayback.shared.stop()
         window?.contentView = nil
         window = nil
         app.windowClosed()
@@ -112,6 +118,18 @@ private struct HomeView: View {
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
         } detail: {
+            if state.section == .search {
+                // Search fills the page: field, results grid and preview, right here in Murmur's window.
+                SearchWindowView(search: app.searchWindow.search, model: app.model, app: app)
+                    .background(Brand.paper)
+            } else {
+                settingsPage
+            }
+        }
+    }
+
+    private var settingsPage: some View {
+        Group {
             // Statuses (permissions, model download, index) change outside SwiftUI: look again every second or so.
             TimelineView(.periodic(from: .now, by: 1.5)) { _ in
                 ScrollView {
@@ -130,7 +148,7 @@ private struct HomeView: View {
     private var page: some View {
         switch state.section {
         case .home: HomePage(app: app)
-        case .search: SearchPage(app: app)
+        case .search: EmptyView()   // drawn full-size by the detail column
         case .dictation: DictationPage(dictation: app.dictation, state: state)
         case .commands: CommandsPage(dictation: app.dictation, state: state)
         case .folders: FoldersPage(app: app, state: state)
@@ -476,51 +494,6 @@ private struct Fix: View {
 }
 
 // MARK: - Search
-
-private struct SearchPage: View {
-    let app: AppController
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "Search your files",
-                      subtitle: "Describe what you're looking for. Photos, PDFs, documents, recordings and video.")
-            HStack(spacing: 10) {
-                Button {
-                    app.panel.show()
-                } label: {
-                    Label("Open Search", systemImage: "magnifyingglass")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                Button("Search Window") { app.showSearchWindow() }
-                    .controlSize(.large)
-                Text("or press \(app.model.hotkey?.display ?? "⇧⌘Space") anywhere")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Brand.clay)
-            }
-            .padding(.bottom, 24)
-            Card("Try one") {
-                ForEach(["photos on the beach", "the clause about pets in the lease", "where they talk about sleep",
-                         "that payment declined screenshot", "code: retry a failed call with backoff"], id: \.self) {
-                    example in
-                    Button {
-                        app.panel.show()
-                        app.panel.query = example
-                    } label: {
-                        Label("“\(example)”", systemImage: "magnifyingglass")
-                            .font(.system(size: 14))
-                            .foregroundStyle(.primary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Search for this")
-                }
-            }
-            Card("By voice") {
-                Text("Hold Fn and say “find my files about the lease”.").font(.system(size: 14))
-            }
-        }
-    }
-}
 
 // MARK: - Dictation
 

@@ -79,11 +79,9 @@ final class AppController {
 
         dictation.log = { line in log(line) }
         dictation.logFile = model.settings.indexDirectory.appendingPathComponent("app.log")
-        dictation.onSearchFiles = { [weak self] query in
-            guard let self else { return }
-            panel.show()
-            panel.query = query
-        }
+        // Voice searches land in Murmur's own window (its Search page), not a separate one.
+        dictation.onSearchFiles = { [weak self] query in self?.showSearchWindow(query: query) }
+        dictation.onOpenFile = { [weak self] query in await self?.openBestFile(query) ?? "" }
         statusMenu.dictationItems = { [weak self] in self?.dictation.menuItems() ?? [] }
         dictation.start()
 
@@ -290,6 +288,27 @@ final class AppController {
         searchWindow.show(query: query, kind: kind)
     }
 
+    /// "Open my resume pdf": opens the file when one clearly matches (its name has every word you said, or it's the
+    /// only good match); otherwise shows the matches on the Search page to pick from.
+    func openBestFile(_ spoken: String) async -> String {
+        guard model.hasFolders else {
+            showSearchWindow(query: spoken)
+            return "Choose folders to search first."
+        }
+        let wanted = SpokenFile(spoken)
+        let vector = await engine.embedQuery(wanted.text)
+        let hits = await engine.search(wanted.text, vector: vector, prefixLast: false, kinds: wanted.kinds, limit: 30)
+        let rows = ResultSet(hits, query: wanted.text).ranked
+        let kindNames = wanted.kinds.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "any"
+        log("open file: \"\(spoken)\" → \"\(wanted.text)\" in \(kindNames): \(rows.count) strong, top \(rows.first?.name ?? "none")")
+        if let best = wanted.best(of: rows) {
+            engine.open(best)
+            return "Opened \(best.name)."
+        }
+        showSearchWindow(query: wanted.text)
+        return rows.isEmpty ? "Nothing matched “\(wanted.text)”." : "Which one? Showing \(rows.count) matches."
+    }
+
     func showHome(_ section: HomeSection? = nil) {
         home.show(section)
     }
@@ -352,5 +371,48 @@ final class AppController {
                 Previews.shared.clear()
             }
         }
+    }
+}
+
+/// A file as you'd say it: "my resume pdf" is the words "resume", in PDFs.
+struct SpokenFile {
+    let text: String
+    let kinds: Set<FileKind>?
+
+    private static let typeWords: [String: Set<FileKind>] = [
+        "pdf": [.pdf], "pdfs": [.pdf],
+        "doc": [.doc, .pdf], "docs": [.doc, .pdf], "docx": [.doc], "document": [.doc, .pdf], "documents": [.doc, .pdf],
+        "file": [], "files": [],
+        "photo": [.image], "photos": [.image], "picture": [.image], "pictures": [.image], "image": [.image],
+        "images": [.image], "screenshot": [.screenshot], "screenshots": [.screenshot],
+        "video": [.video], "videos": [.video], "recording": [.audio, .video], "recordings": [.audio, .video],
+        "spreadsheet": [.doc], "spreadsheets": [.doc], "sheet": [.doc], "slides": [.doc, .pdf], "deck": [.doc, .pdf],
+        "presentation": [.doc, .pdf],
+    ]
+
+    init(_ spoken: String) {
+        let words = spoken.lowercased().split(separator: " ").map(String.init)
+        var kinds = Set<FileKind>()
+        var rest: [String] = []
+        for word in words {
+            if let found = Self.typeWords[word] { kinds.formUnion(found) } else { rest.append(word) }
+        }
+        let filler: Set<String> = ["my", "the", "a", "an", "that", "this", "our", "of", "called", "named"]
+        rest = rest.filter { !filler.contains($0) }
+        text = rest.isEmpty ? spoken : rest.joined(separator: " ")
+        // A photo can be a screenshot and the other way round; "file" says nothing.
+        if kinds.contains(.image) { kinds.insert(.screenshot) }
+        self.kinds = kinds.isEmpty ? nil : kinds
+    }
+
+    /// The one to open: the best-ranked file whose name has every word, else the only strong match.
+    func best(of rows: [ResultRow]) -> ResultRow? {
+        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let words = fold(text).split(separator: " ").map(String.init)
+        if let named = rows.first(where: { row in
+            let name = fold(row.name)
+            return words.allSatisfy { name.contains($0) }
+        }) { return named }
+        return rows.count == 1 ? rows[0] : nil
     }
 }

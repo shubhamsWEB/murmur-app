@@ -103,10 +103,13 @@ public enum RouterDiagnostics {
 
 public enum Routers {
     /// The router for the current choice. Cloud choices without a key fall back to local.
+    /// A cloud model whose key was just rejected isn't asked again (every command would wait for the same 401) until
+    /// a new key is saved.
     public static func current(localModel: String) -> Router {
+        let rejected = RouterDiagnostics.isKeyProblem(RouterDiagnostics.lastError)
         switch RouterChoice.current {
-        case .anthropic where RouterChoice.anthropic.hasKey: return AnthropicRouter()
-        case .openai where RouterChoice.openai.hasKey: return OpenAIRouter()
+        case .anthropic where RouterChoice.anthropic.hasKey && !rejected: return AnthropicRouter()
+        case .openai where RouterChoice.openai.hasKey && !rejected: return OpenAIRouter()
         default: return OllamaRouter(model: localModel)
         }
     }

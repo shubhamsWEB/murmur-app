@@ -175,7 +175,7 @@ private struct ResultList: View {
                             } label: {
                                 Text("Show all \(group.total) \(group.kind.title.lowercased())…")
                                     .font(.system(size: 11.5, weight: .medium))
-                                    .foregroundStyle(Color.accentColor)
+                                    .foregroundStyle(Brand.coral)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 3)
                             }
@@ -266,7 +266,7 @@ private struct PanelRow: View {
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(selected ? Color.accentColor.opacity(0.24) : Color.clear))
+            .fill(selected ? Brand.coral.opacity(0.24) : Color.clear))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)")
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -292,7 +292,7 @@ private struct WeakerRow: View {
         .padding(.horizontal, 10)
         .frame(height: 26)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(selected ? Color.accentColor.opacity(0.24) : Color.clear))
+            .fill(selected ? Brand.coral.opacity(0.24) : Color.clear))
         .contentShape(Rectangle())
         .accessibilityAddTraits(.isButton)
     }

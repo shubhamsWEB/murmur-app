@@ -285,7 +285,7 @@ struct AudioMoment: View {
                     Image(systemName: playback.isCurrent(row) && playback.isPlaying ? "pause.circle.fill"
                                                                                      : "play.circle.fill")
                         .font(.system(size: 34))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(Brand.coral)
                 }
                 .buttonStyle(.plain)
                 .help(row.loc.map { "Play from \(ResultRow.clock($0))" } ?? "Play")

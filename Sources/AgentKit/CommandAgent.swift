@@ -11,6 +11,9 @@ public struct CommandHost {
     public var insert: (String) -> Void
     /// Open Murmur's file search with this query.
     public var searchFiles: (String) -> Void
+    /// Open the file that best matches a description ("my resume pdf"), or show the matches when it isn't clear
+    /// which one. Returns what happened, to show.
+    public var openFile: (String) async -> String
     /// A short status line while it works ("Asking Claude Code…").
     public var progress: (String) -> Void
     /// Log lines.
@@ -18,11 +21,13 @@ public struct CommandHost {
 
     public init(confirm: @escaping (String, String) async -> Bool, showAnswer: @escaping (String) -> Void,
                 insert: @escaping (String) -> Void, searchFiles: @escaping (String) -> Void,
-                progress: @escaping (String) -> Void, log: @escaping (String) -> Void) {
+                progress: @escaping (String) -> Void, log: @escaping (String) -> Void,
+                openFile: @escaping (String) async -> String = { _ in "" }) {
         self.confirm = confirm
         self.showAnswer = showAnswer
         self.insert = insert
         self.searchFiles = searchFiles
+        self.openFile = openFile
         self.progress = progress
         self.log = log
     }
@@ -108,6 +113,7 @@ public final class CommandAgent {
                                 Date().timeIntervalSince(asked)))
             } catch {
                 host.log("command: \(router.name) failed: \(error.localizedDescription)")
+                RouterDiagnostics.lastError = error.localizedDescription   // a rejected key isn't asked again
                 // A cloud model that fails (offline, bad key) hands over to the local model once.
                 if !(router is OllamaRouter) {
                     router = OllamaRouter(model: routerModel)
@@ -189,6 +195,9 @@ public final class CommandAgent {
         case "find_apps": return Outcome(result: MacActions.findApps(text("query")))
         case "list_running_apps": return Outcome(result: MacActions.runningApps())
         case "open_folder": return Outcome(result: MacActions.openFolder(text("name")))
+        case "open_file":
+            host.progress("Finding “\(text("query"))”…")
+            return Outcome(result: await host.openFile(text("query")), finished: true)
         case "search_files":
             host.searchFiles(text("query"))
             return Outcome(result: "Showing file search results for \"\(text("query"))\".", finished: true, shown: true)
@@ -238,6 +247,7 @@ public final class CommandAgent {
             "- Respond only with tool calls. Call every tool the request needs in ONE response, in order "
                 + "(e.g. open_app then web_search). Keep it to the fewest steps.",
             "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said.",
+            "- Opening a file (\"open my resume pdf\"): open_file with the description.",
             "- Files: \"search\", \"find\" or \"look for\" means the user's own files on this Mac: search_files. "
                 + "open_folder for standard folders.",
             "- Web: web_search only when the user says web, online, internet or Google, or after opening a browser; "
@@ -274,6 +284,8 @@ public final class CommandAgent {
             tool("list_running_apps", "List the apps that are running"),
             tool("open_folder", "Open a standard folder in Finder",
                  ["name": ("string", "downloads, documents, desktop, pictures, music, movies or home")]),
+            tool("open_file", "Open the user's own file that best matches a description, e.g. \"my resume pdf\"",
+                 ["query": ("string", "the file as described")]),
             tool("search_files", "Search the user's files by meaning and show the results",
                  ["query": ("string", "what to look for")]),
             tool("open_url", "Open a website", ["url": ("string", "address, e.g. github.com")]),

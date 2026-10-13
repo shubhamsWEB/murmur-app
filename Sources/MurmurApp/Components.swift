@@ -94,7 +94,7 @@ struct MomentBar: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(onImage ? Color.white.opacity(0.3) : Color.primary.opacity(0.12))
                 Capsule()
-                    .fill(onImage ? Color.white : Color.accentColor)
+                    .fill(onImage ? Color.white : Brand.coral)
                     .frame(width: max(4, width * (to - from)))
                     .offset(x: width * from)
                 if let playhead {
@@ -227,7 +227,7 @@ struct ShortcutRecorder: View {
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Color.primary.opacity(recording ? 0.03 : 0.05)))
                 .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(recording ? Color.accentColor : Color.primary.opacity(0.15),
+                    .strokeBorder(recording ? Brand.coral : Color.primary.opacity(0.15),
                                   lineWidth: recording ? 2 : 1))
             }
             .buttonStyle(.plain)

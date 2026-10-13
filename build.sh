@@ -56,7 +56,8 @@ cp "$BIN_DIR/murmur-engine" "$APP/Contents/Helpers/murmur-engine"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 xcrun actool --compile "$APP/Contents/Resources" --platform macosx --target-device mac --minimum-deployment-target 14.0 \
   --app-icon AppIcon --output-partial-info-plist "$(mktemp -d)/AppIcon.plist" --enable-on-demand-resources NO \
-  --development-region en "$PWD/Resources/AppIcon/AppIcon.icon" > /dev/null
+  --accent-color AccentColor --development-region en \
+  "$PWD/Resources/Assets.xcassets" "$PWD/Resources/AppIcon/AppIcon.icon" > /dev/null
 cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"   # over actool's plainer fallback: ours has simplified 16 and 32 px
 cp Resources/Acknowledgements.txt "$APP/Contents/Resources/Acknowledgements.txt"
 
