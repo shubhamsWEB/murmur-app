@@ -6,6 +6,8 @@ import SwiftUI
 final class DictationHUD {
     enum Mode: Equatable {
         case listening(handsFree: Bool)
+        case command
+        case working(String)
         case transcribing
         case preparing
         case message(String)
@@ -38,6 +40,12 @@ final class DictationHUD {
         state.level = 0
         place()
         panel.orderFrontRegardless()
+    }
+
+    /// Showing a "working" line (cleared when the command finishes).
+    var isWorking: Bool {
+        if case .working = state.mode { return panel.isVisible }
+        return false
     }
 
     func setLevel(_ level: Float) {
@@ -93,6 +101,8 @@ private struct HUDView: View {
     private var label: String {
         switch state.mode {
         case .listening(let handsFree): return handsFree ? "Listening · tap Fn to finish" : "Listening…"
+        case .command: return "Command · speak, then let go"
+        case .working(let text): return text
         case .transcribing: return "Transcribing…"
         case .preparing: return "Preparing speech model…"
         case .message(let text): return text
@@ -102,7 +112,7 @@ private struct HUDView: View {
     @ViewBuilder
     private var indicator: some View {
         switch state.mode {
-        case .listening:
+        case .listening, .command:
             HStack(spacing: 3) {
                 ForEach(0..<5, id: \.self) { i in
                     let weights: [Float] = [0.5, 0.8, 1, 0.8, 0.5]
@@ -113,7 +123,7 @@ private struct HUDView: View {
             }
             .frame(height: 18)
             .animation(.easeOut(duration: 0.08), value: state.level)
-        case .transcribing, .preparing:
+        case .transcribing, .preparing, .working:
             ProgressView().controlSize(.small).tint(.white)
         case .message:
             Image(systemName: "info.circle")

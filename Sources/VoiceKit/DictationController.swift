@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import AgentKit
 import AVFoundation
 import Carbon.HIToolbox
 
@@ -28,6 +29,14 @@ public final class DictationController {
     private var lastTapAt = Date.distantPast
     private var retryTimer: Timer?
     private var openedAccessibilitySettings = false
+    /// ⌃ was held with the dictation key: the speech is a command, not text to type.
+    private var commandRequested = false
+    /// The app you were in when you pressed the key (commands paste back into it).
+    private var previousApp: NSRunningApplication?
+    private let answerPanel = AnswerPanel()
+    private lazy var agent = CommandAgent(host: makeHost())
+    /// Opens Murmur's file search with a query (set by the app).
+    public var onSearchFiles: ((String) -> Void)?
 
     /// A press shorter than this is a tap, not a hold (taps start hands-free dictation).
     private let tapLength: TimeInterval = 0.3
@@ -54,6 +63,7 @@ public final class DictationController {
         monitor.onDown = { [weak self] in self?.keyDown() }
         monitor.onUp = { [weak self] in self?.keyUp() }
         monitor.onOtherKey = { [weak self] code in self?.otherKey(code) }
+        monitor.onModifiers = { [weak self] flags in self?.modifiersChanged(flags) }
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.hud.setLevel(level) }
         }
@@ -143,6 +153,29 @@ public final class DictationController {
         let modelItem = NSMenuItem(title: "Speech Model", action: nil, keyEquivalent: "")
         modelItem.submenu = modelMenu
         items.append(modelItem)
+        let assistants = NSMenu()
+        let hint = NSMenuItem(title: "Hold Fn+⌃ and speak a command", action: nil, keyEquivalent: "")
+        hint.isEnabled = false
+        assistants.addItem(hint)
+        assistants.addItem(.separator())
+        for helper in AssistantCLI.allCases {
+            assistants.addItem(ClosureMenuItem("Allow \(helper.display)", checked: helper.isAllowed) { [weak self] in
+                helper.isAllowed.toggle()
+                self?.log("command: \(helper.display) \(helper.isAllowed ? "allowed" : "not allowed")")
+            })
+        }
+        assistants.addItem(.separator())
+        let routerTitle = NSMenuItem(title: "Router model (Ollama)", action: nil, keyEquivalent: "")
+        routerTitle.isEnabled = false
+        assistants.addItem(routerTitle)
+        for model in ["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "llama3.2:3b"] {
+            assistants.addItem(ClosureMenuItem(model, checked: model == agent.routerModel) { [weak self] in
+                self?.agent.routerModel = model
+            })
+        }
+        let assistantsItem = NSMenuItem(title: "Commands & Assistants", action: nil, keyEquivalent: "")
+        assistantsItem.submenu = assistants
+        items.append(assistantsItem)
         items.append(ClosureMenuItem("Whisper Mode", checked: whisperMode) { [weak self] in
             guard let self else { return }
             whisperMode.toggle()
@@ -167,6 +200,8 @@ public final class DictationController {
         case .idle:
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
             pressedAt = Date()
+            commandRequested = NSEvent.modifierFlags.contains(.control)
+            previousApp = NSWorkspace.shared.frontmostApplication
             begin(handsFree: doubleTap)
         default:
             break
@@ -184,6 +219,13 @@ public final class DictationController {
         } else {
             finish()
         }
+    }
+
+    /// ⌃ pressed while the dictation key is held turns this recording into a command.
+    private func modifiersChanged(_ flags: CGEventFlags) {
+        guard case .listening = phase, flags.contains(.maskControl), !commandRequested else { return }
+        commandRequested = true
+        hud.show(.command)
     }
 
     private func otherKey(_ code: Int64) {
@@ -208,7 +250,7 @@ public final class DictationController {
         do {
             try recorder.start()
             phase = .listening(handsFree: handsFree)
-            hud.show(.listening(handsFree: handsFree))
+            hud.show(commandRequested ? .command : .listening(handsFree: handsFree))
         } catch {
             log("dictation: can't start the microphone: \(error.localizedDescription)")
             hud.flash("Can't start the microphone")
@@ -235,6 +277,9 @@ public final class DictationController {
         let samples = leveled.samples
         lastSamples = samples
         let transcriber = transcriber
+        let isCommand = commandRequested
+        let frontApp = previousApp?.localizedName
+        let selection = isCommand ? Self.selectedText() : nil
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
@@ -249,6 +294,13 @@ public final class DictationController {
                 phase = .idle
                 guard !text.isEmpty else {
                     hud.flash("Didn't catch that")
+                    return
+                }
+                if isCommand {
+                    log("command: \"\(text)\"")
+                    hud.show(.working("“\(text.prefix(60))”"))
+                    await agent.run(text, frontApp: frontApp, selection: selection)
+                    if hud.isWorking { hud.hide() }
                     return
                 }
                 lastText = text
@@ -327,6 +379,72 @@ public final class DictationController {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
             NSWorkspace.shared.open(url)
         }
+    }
+}
+
+extension DictationController {
+    private func makeHost() -> CommandHost {
+        CommandHost(
+            confirm: { [weak self] title, detail in self?.confirm(title, detail) ?? false },
+            showAnswer: { [weak self] text in
+                guard let self else { return }
+                hud.hide()
+                answerPanel.onPaste = { [weak self] text in self?.pasteIntoPreviousApp(text) }
+                answerPanel.show(text)
+            },
+            insert: { [weak self] text in self?.pasteIntoPreviousApp(text) },
+            searchFiles: { [weak self] query in
+                self?.hud.hide()
+                self?.onSearchFiles?(query)
+            },
+            progress: { [weak self] text in
+                guard let self else { return }
+                if text.hasSuffix("…") { hud.show(.working(text)) } else { hud.flash(text, seconds: 2) }
+            },
+            log: { [weak self] line in self?.log(line) }
+        )
+    }
+
+    /// A Murmur dialog for actions that change something. Murmur comes to the front while it's open.
+    private func confirm(_ title: String, _ detail: String) -> Bool {
+        hud.hide()
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Go Ahead")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        let answer = alert.runModal() == .alertFirstButtonReturn
+        log("command: \(title) → \(answer ? "yes" : "no")")
+        return answer
+    }
+
+    /// Brings back the app you were in, then pastes there.
+    private func pasteIntoPreviousApp(_ text: String) {
+        lastText = text
+        hud.hide()
+        if let previousApp, previousApp != NSRunningApplication.current, !previousApp.isActive {
+            previousApp.activate(options: [])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.report(TextInserter.insert(text))
+            }
+        } else {
+            report(TextInserter.insert(text))
+        }
+    }
+
+    /// The text selected in the focused app, through Accessibility (for "make this shorter", "reply to this").
+    static func selectedText() -> String? {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        var value: CFTypeRef?
+        let element = focused as! AXUIElement
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &value) == .success
+        else { return nil }
+        let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text?.isEmpty == false ? text : nil
     }
 }
 

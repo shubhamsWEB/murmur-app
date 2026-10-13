@@ -58,10 +58,12 @@ let appDependencies: [Package.Dependency] = [
     .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7", traits: []),
 ]
 let appTargets: [Target] = [
+    // Murmur's commands: the quick patterns, the Ollama router, Mac actions, Claude Code / Codex as helpers.
+    .target(name: "AgentKit", swiftSettings: [.swiftLanguageMode(.v5)]),
     // Murmur's dictation: microphone, Parakeet, the dictation key, pasting into the focused app, the HUD.
     .target(
         name: "VoiceKit",
-        dependencies: [.product(name: "FluidAudio", package: "FluidAudio")],
+        dependencies: ["AgentKit", .product(name: "FluidAudio", package: "FluidAudio")],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
     // The menubar + hotkey app. build.sh wraps it into build.noindex/DigUp.app. (The product can't be called

@@ -23,6 +23,8 @@ public final class DictationKeyMonitor {
     /// Another key was pressed: `keyCode` is its virtual key code. Used to cancel when Fn is part of a shortcut
     /// (Fn+Delete, Fn+F5…) and for Esc during hands-free dictation.
     public var onOtherKey: ((Int64) -> Void)?
+    /// Modifier keys changed (other than the dictation key itself): used to spot ⌃ for command mode.
+    public var onModifiers: ((CGEventFlags) -> Void)?
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -83,10 +85,10 @@ public final class DictationKeyMonitor {
             let pressed: Bool
             switch key {
             case .fn:
-                guard code == kVK_Function else { return }
+                guard code == kVK_Function else { onModifiers?(event.flags); return }
                 pressed = event.flags.contains(.maskSecondaryFn)
             case .rightOption:
-                guard code == kVK_RightOption else { return }
+                guard code == kVK_RightOption else { onModifiers?(event.flags); return }
                 pressed = event.flags.contains(.maskAlternate)
             }
             if pressed, !isDown {

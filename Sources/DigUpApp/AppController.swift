@@ -74,6 +74,11 @@ final class AppController {
         updates.start()
 
         dictation.log = { line in log(line) }
+        dictation.onSearchFiles = { [weak self] query in
+            guard let self else { return }
+            panel.show()
+            panel.query = query
+        }
         statusMenu.dictationItems = { [weak self] in self?.dictation.menuItems() ?? [] }
         dictation.start()
 

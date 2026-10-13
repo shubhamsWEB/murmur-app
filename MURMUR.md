@@ -16,6 +16,25 @@ Speech recognition, cleanup and search all run on your Mac. The design spec is i
 
 Code: `Sources/VoiceKit` (new). Small hooks in `Sources/DigUpApp/AppController.swift` and `StatusMenu.swift`.
 
+## Commands (milestones 3 and 5)
+
+Hold **Fn+⌃** (or press ⌃ while holding Fn) and speak a command instead of text.
+
+- **Instant, no model:** "open Slack", "quit Spotify", "hide Xcode", "volume 30", "volume up", "mute", "brightness
+  down", "lock the screen", "take a screenshot", "search the web for …", "find my files about …", "open downloads",
+  "open github.com", "run shortcut Morning".
+- **Everything else** goes to a small local model in Ollama (default `qwen3:4b`) that picks tools: apps, files, web,
+  system, Shortcuts, writing text into the app you're in ("make this shorter" works on the selected text), or
+  answering in a small panel.
+- **Claude Code and Codex as helpers:** off until you allow them in the menu (Commands & Assistants). The router
+  sends them a focused sub-task, reads the answer, and decides what to do with it. Each run asks first. They run with
+  your own login: Claude Code with `--permission-mode dontAsk`, Codex with `--sandbox read-only`, so they can't change
+  files on their own.
+- **Asks first:** quitting an app, running a Shortcut, and every Claude Code or Codex run.
+
+Setup: install [Ollama](https://ollama.com) (you have it), then `ollama pull qwen3:4b`. Pick another router model
+under Commands & Assistants (`qwen3:1.7b` is faster, `qwen3:8b` is smarter).
+
 ## Build and run
 
 Needs an Apple Silicon Mac, macOS 14+, and Xcode 26 (Swift 6.2).
