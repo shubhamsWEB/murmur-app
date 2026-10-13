@@ -865,6 +865,9 @@ private struct CommandsPage: View {
                             state.revision += 1
                         }
                         .buttonStyle(.murmurSecondary)
+                        if RouterChoice.anthropic.hasKey {
+                            Button("Test") { dictation.testKey(.anthropic) }.buttonStyle(.murmurSecondary)
+                        }
                         Button(RouterChoice.anthropic.hasKey ? "Change…" : "Add Key…") {
                             dictation.askForKey(.anthropic)
                             state.revision += 1
@@ -876,12 +879,33 @@ private struct CommandsPage: View {
                 SettingRow(title: "OpenAI", detail: keyDetail(.openai)) {
                     HStack(spacing: 8) {
                         keyPill(.openai)
+                        if RouterChoice.openai.hasKey {
+                            Button("Test") { dictation.testKey(.openai) }.buttonStyle(.murmurSecondary)
+                        }
                         Button(RouterChoice.openai.hasKey ? "Change…" : "Add Key…") {
                             dictation.askForKey(.openai)
                             state.revision += 1
                         }
                         .buttonStyle(.murmurSecondary)
                     }
+                }
+                RowDivider()
+                SettingRow(title: "Models", detail: "The model each key uses for commands. Change it if your account names it differently.") {
+                    HStack(spacing: 8) {
+                        TextField("Claude model", text: state.bind(get: { AnthropicRouter.model }, set: { value in
+                            let trimmed = value.trimmingCharacters(in: .whitespaces)
+                            UserDefaults.standard.set(trimmed.isEmpty ? nil : trimmed, forKey: "anthropicModel")
+                        }))
+                        .frame(width: 150)
+                        TextField("OpenAI model", text: state.bind(get: { OpenAIRouter.model }, set: { value in
+                            let trimmed = value.trimmingCharacters(in: .whitespaces)
+                            UserDefaults.standard.set(trimmed.isEmpty ? nil : trimmed, forKey: "openaiModel")
+                            RouterDiagnostics.lastError = nil
+                        }))
+                        .frame(width: 130)
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
                 }
                 RowDivider()
                 Text("A cloud model gets the command's words, the front app's name, any selected text and, for multi-step "

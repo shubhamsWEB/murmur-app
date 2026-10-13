@@ -615,6 +615,30 @@ extension DictationController {
         }
     }
 
+    /// Checks a saved key with a real (one-token) request to the model commands use, and says how it went.
+    public func testKey(_ choice: RouterChoice) {
+        let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
+        hud.show(.working("Checking the \(provider) key…"))
+        Task { [weak self] in
+            let result = await KeyCheck.verify(choice)
+            guard let self else { return }
+            self.hud.hide()
+            if let result {
+                self.log("command: \(provider) key check: \(result)")
+                let warning = NSAlert()
+                warning.alertStyle = .warning
+                warning.messageText = "\(provider) can't run commands with this key"
+                warning.informativeText = result
+                warning.addButton(withTitle: "OK")
+                Self.bringToFront(warning)
+                warning.runModal()
+            } else {
+                self.log("command: \(provider) key works")
+                self.hud.flash("\(provider) key works with \(choice == .anthropic ? AnthropicRouter.model : OpenAIRouter.model)", seconds: 2.5)
+            }
+        }
+    }
+
     /// Asks for the Anthropic workspace an organization-wide key should use, then checks the key again.
     public func askForWorkspaceID(reason: String? = nil) {
         let alert = NSAlert()

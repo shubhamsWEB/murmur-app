@@ -69,6 +69,7 @@ public enum RouterError: LocalizedError {
         case .http(let provider, let code, let detail):
             // Keep the provider's own words: "workspace", "model", "organization" say what's actually wrong.
             let why = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let advice = KeyCheck.advice(provider, code, why) { return advice }
             if code == 401 || code == 403 {
                 return "\(provider) rejected the API key (\(code))" + (why.isEmpty ? "." : ": \(why.prefix(160))")
             }
@@ -454,52 +455,85 @@ public enum KeyCheck {
         }
     }
 
-    /// Asks the provider whether the saved key works. Nil when it does, else what's wrong.
+    /// What to do about a provider's refusal, in plain words, when it's one of the usual ones; else nil.
+    public static func advice(_ provider: String, _ code: Int, _ detail: String) -> String? {
+        let lower = detail.lowercased()
+        if provider == "OpenAI", lower.contains("missing scopes") || lower.contains("insufficient permissions") {
+            return "OpenAI rejected the API key (\(code)): it's a restricted key that isn't allowed to make chat "
+                + "requests. At platform.openai.com → API keys, edit the key and set Permissions to All (or "
+                + "Restricted with Model capabilities → Write), then try again."
+        }
+        if code == 404 || lower.contains("does not exist") || lower.contains("model_not_found")
+            || lower.contains("not_found_error") && lower.contains("model") {
+            let model = provider == "OpenAI" ? OpenAIRouter.model : AnthropicRouter.model
+            return "\(provider) can't use the model “\(model)” with this key (\(code)). Choose another model under "
+                + "Commands & AI → API keys."
+        }
+        if code == 429, lower.contains("quota") || lower.contains("billing") || lower.contains("credit") {
+            return "\(provider) says the account has no API credit left (\(code)). API use is billed separately from "
+                + "a ChatGPT or Claude subscription: add credit in the \(provider) console."
+        }
+        return nil
+    }
+
+    /// Asks the provider whether the saved key works, with a one-token request to the same model and endpoint
+    /// commands use (listing models passes for keys that still can't chat). Nil when it works, else what's wrong.
     public static func verify(_ choice: RouterChoice) async -> String? {
         guard let account = choice.keyAccount, let key = Keychain.get(account) else { return "No key saved." }
         var request: URLRequest
+        let body: [String: Any]
         switch choice {
         case .openai:
-            request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            body = ["model": OpenAIRouter.model, "max_completion_tokens": 16,
+                    "messages": [["role": "user", "content": "Reply with OK."]]]
         case .anthropic:
-            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
             request.setValue(key, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             if let workspace = AnthropicWorkspace.id {
                 request.setValue(workspace, forHTTPHeaderField: "anthropic-workspace-id")
             }
+            body = ["model": AnthropicRouter.model, "max_tokens": 1,
+                    "messages": [["role": "user", "content": "Reply with OK."]]]
         case .local:
             return nil
         }
-        request.timeoutInterval = 10
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 20
         let provider = choice == .openai ? "OpenAI" : "Anthropic"
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let code = (response as? HTTPURLResponse)?.statusCode else {
             return "Couldn't reach \(provider) to check the key. Check your internet connection."
         }
-        switch code {
-        case 200:
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let detail = ((json?["error"] as? [String: Any])?["message"] as? String) ?? ""
+        if code == 200 {
             RouterDiagnostics.lastError = nil
             return nil
-        case 401, 403:
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            let detail = ((json?["error"] as? [String: Any])?["message"] as? String) ?? ""
-            let message = "\(provider) rejected this key (\(code))"
-                + (detail.isEmpty ? "." : ": \(detail.prefix(200))")
-                + (code == 401 ? " Copy the whole key again from your \(provider) account."
-                   : " The key works, but its workspace or organization isn't allowed this. Check its permissions in "
-                     + "your \(provider) console, or make a key in your default workspace.")
-            RouterDiagnostics.lastError = RouterError.http(provider, code, detail).localizedDescription
-            return message
+        }
+        if AnthropicWorkspace.isNeeded(detail) {
+            RouterDiagnostics.lastError = detail
+            return "This Anthropic key belongs to your whole organization, so Murmur also needs the ID of the "
+                + "workspace to use. Find it in the Anthropic Console under Settings → Workspaces."
+        }
+        RouterDiagnostics.lastError = RouterError.http(provider, code, detail).localizedDescription
+        if let advice = advice(provider, code, detail) { return advice }
+        switch code {
+        case 401:
+            return "\(provider) rejected this key (401)" + (detail.isEmpty ? "." : ": \(detail.prefix(200))")
+                + " Copy the whole key again from your \(provider) account."
+        case 403:
+            return "\(provider) refused this key (403)" + (detail.isEmpty ? "." : ": \(detail.prefix(200))")
+                + " Check the key's project or workspace permissions in your \(provider) console."
+        case 400:
+            // Signed in fine; the request itself was refused (a model's parameter rules): commands may still work.
+            RouterDiagnostics.lastError = nil
+            return nil
         default:
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            let detail = ((json?["error"] as? [String: Any])?["message"] as? String) ?? ""
-            if AnthropicWorkspace.isNeeded(detail) {
-                RouterDiagnostics.lastError = detail
-                return "This Anthropic key belongs to your whole organization, so Murmur also needs the ID of the "
-                    + "workspace to use. Find it in the Anthropic Console under Settings → Workspaces."
-            }
             return "\(provider) answered \(code) when checking the key"
                 + (detail.isEmpty ? "" : ": \(detail.prefix(200))") + ". It may still work; try a command."
         }
