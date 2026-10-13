@@ -90,9 +90,36 @@ public enum QuickCommands {
         "play", "watch", "click", "type", "write", "press", "select", "pick", "add", "send", "scroll",
     ]
 
+    /// Building software, said any way: "create a React app with a hello world page", "build me a website for my
+    /// bakery", "write a python script that renames my photos", "ask Claude Code to make a todo app". One task for
+    /// Claude Code or Codex, never split into steps or searched on the web.
+    public static func codingTask(_ utterance: String) -> Action? {
+        let text = clean(utterance)
+        guard !text.isEmpty else { return nil }
+        var helper = ""
+        if text.range(of: #"\bcodex\b"#, options: .regularExpression) != nil { helper = "codex" }
+        if text.range(of: #"\bclaude( code)?\b"#, options: .regularExpression) != nil { helper = "claude" }
+        // "open claude code and build…", "ask codex to make…", "use claude to create…"
+        let handOff = #"^(?:open|start|launch|ask|use|tell|get) (?:the )?(?:claude(?: code)?|codex)(?: to| and| session and| session to)? (.+)$"#
+        if !helper.isEmpty, let regex = try? NSRegularExpression(pattern: handOff),
+           let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
+            return Action(tool: "build_with_agent", arguments: ["task": Match(text: text, result: match)[1], "helper": helper])
+        }
+        let verbs = #"^(?:create|build|make|scaffold|set up|setup|generate|code|write|develop|bootstrap|spin up|start) (?:me |us )?(?:a |an |the |new |simple |basic |small |quick |little )*"#
+        guard text.range(of: verbs, options: .regularExpression) != nil else { return nil }
+        let tech = #"\b(react|next ?js|vue|svelte|angular|node|express|python|flask|django|fast ?api|swift ?ui|swift|rust|golang|typescript|javascript|html|css|tailwind|vite|electron|chrome extension|ios|android|flutter|java|kotlin|spring|rails|laravel|php|sql|postgres|docker)\b"#
+        // Only words that mean software even in a message ("write a script for the video" stays text).
+        let things = #"\b(app|apps|website|web ?site|web app|webpage|landing page|api|backend|cli|command line tool|microservice|repo|(?:shell|bash|python|node) script|discord bot|telegram bot|slack bot)\b"#
+        let isCode = text.range(of: tech, options: .regularExpression) != nil
+            || text.range(of: things, options: .regularExpression) != nil
+        guard isCode else { return nil }
+        return Action(tool: "build_with_agent", arguments: ["task": text, "helper": helper])
+    }
+
     /// All the actions in a chained command, in order, or nil unless every part is a known command.
     /// Splits only where the next part starts with a command verb, so "search for salt and pepper" stays whole.
     public static func parseAll(_ utterance: String) -> [Action]? {
+        if let build = codingTask(utterance) { return [build] }
         let text = clean(utterance)
         guard !text.isEmpty, text.count < 200 else { return nil }
         var parts: [String] = []

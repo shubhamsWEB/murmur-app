@@ -66,6 +66,10 @@ public enum IntentClassifier {
             return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")
         }
         // "open Notes and write a shopping list", "open TextEdit and type…": a task in an app.
+        // Building software: "create a React app with a hello world page".
+        if QuickCommands.codingTask(utterance) != nil {
+            return Decision(intent: .command, reason: "something to build (Claude Code / Codex)")
+        }
         // A chain of steps for the computer: "open Notes and write…", "search YouTube for lofi and play the first one".
         if cleaned.range(of: #"^(open|launch|start|go to|switch to|search|find|look up|play|google) .+ (and|then) (then )?(write|type|draft|jot|note|add|put|create|make|compose|list|play|watch|click|open|search|press|select|pick|scroll|sort|filter|subscribe|save|download)\b"#,
                          options: .regularExpression) != nil {

@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Claude Code and Codex, used as helpers Murmur directs. Murmur keeps the plan: it sends one focused sub-task, reads
 /// the answer, and decides what to do with it (show it, paste it, act on it). Each CLI runs with your own login
@@ -65,5 +65,101 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
             try? FileManager.default.removeItem(at: last)
             return (answer?.isEmpty == false ? answer! : printed)
         }
+    }
+
+    // MARK: Building
+
+    /// Where new projects go: the first of ~/Developer, ~/Projects, ~/IdeaProjects, ~/code that exists, else
+    /// ~/Murmur Projects.
+    public static func projectsFolder() -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        for name in ["Developer", "Projects", "IdeaProjects", "code", "Code"] {
+            var isFolder: ObjCBool = false
+            let url = home.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue { return url }
+        }
+        return home.appendingPathComponent("Murmur Projects")
+    }
+
+    /// A new, unused folder for this task: "create a react app with a hello world page" → react-app-hello-world.
+    public static func newProjectFolder(for task: String, name: String? = nil) -> URL {
+        let filler: Set<String> = ["a", "an", "the", "with", "and", "for", "me", "my", "create", "build", "make",
+                                   "new", "simple", "basic", "small", "scaffold", "set", "up", "setup", "generate",
+                                   "write", "start", "please", "page", "of", "to", "in", "that", "which", "using"]
+        let source = (name?.isEmpty == false ? name! : task).lowercased()
+        let words = source.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        let kept = (name?.isEmpty == false ? words : words.filter { !filler.contains($0) }).prefix(5)
+        let slug = kept.isEmpty ? "murmur-project" : kept.joined(separator: "-")
+        let base = projectsFolder()
+        var folder = base.appendingPathComponent(slug)
+        var number = 2
+        while FileManager.default.fileExists(atPath: folder.path) {
+            folder = base.appendingPathComponent("\(slug)-\(number)")
+            number += 1
+        }
+        return folder
+    }
+
+    /// Starts an interactive session in Terminal, in `folder` (created, with git), with the spoken request as its
+    /// first message. You watch it work and answer its questions there; file edits go ahead on their own, commands
+    /// ask first (Claude Code's acceptEdits, Codex's --full-auto).
+    @MainActor
+    public func startSession(_ task: String, in folder: URL) async -> String {
+        guard let executable = await locate() else {
+            return "\(display) isn't installed (no `\(command)` on your PATH)."
+        }
+        let files = FileManager.default
+        do {
+            try files.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            return "Couldn't make \(folder.path): \(error.localizedDescription)"
+        }
+        let prompt = """
+        You were started by Murmur, the user's voice assistant, from this spoken request:
+
+        "\(task)"
+
+        Build it in the current folder (\(folder.path)); it's new and empty. Choose sensible defaults instead of asking \
+        (for a React app: Vite + React + TypeScript). Set the project up, write the code, install what it needs, \
+        and check that it builds and runs. Finish by telling the user how to start it.
+        """
+        let stamp = Int(Date().timeIntervalSince1970)
+        let support = files.temporaryDirectory.appendingPathComponent("murmur-sessions", isDirectory: true)
+        try? files.createDirectory(at: support, withIntermediateDirectories: true)
+        let promptFile = support.appendingPathComponent("task-\(stamp).md")
+        let launcher = support.appendingPathComponent("\(folder.lastPathComponent)-\(stamp).command")
+        func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let start: String
+        switch self {
+        case .claude:
+            start = "exec \(quoted(executable.path)) --permission-mode acceptEdits \"$(cat \(quoted(promptFile.path)))\""
+        case .codex:
+            start = "exec \(quoted(executable.path)) --full-auto \"$(cat \(quoted(promptFile.path)))\""
+        }
+        let script = """
+        #!/bin/zsh -l
+        # Started by Murmur: \(display) building "\(task.replacingOccurrences(of: "\n", with: " ").prefix(80))"
+        cd \(quoted(folder.path)) || exit 1
+        git init -q 2>/dev/null
+        printf '\\e]0;%s\\a' \(quoted("Murmur · \(display) · \(folder.lastPathComponent)"))
+        \(start)
+        """
+        do {
+            try prompt.write(to: promptFile, atomically: true, encoding: .utf8)
+            try script.write(to: launcher, atomically: true, encoding: .utf8)
+            try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        } catch {
+            return "Couldn't prepare the session: \(error.localizedDescription)"
+        }
+        // A .command file opens in Terminal and runs there: no Automation permission needed.
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        do {
+            _ = try await NSWorkspace.shared.open([launcher], withApplicationAt: terminal, configuration: configuration)
+        } catch {
+            return "Couldn't open Terminal: \(error.localizedDescription)"
+        }
+        return "Started \(display) in Terminal, building in \(folder.path)."
     }
 }

@@ -113,6 +113,40 @@ public final class CommandAgent {
         return true
     }
 
+    // MARK: - Building
+
+    /// Hands a build to Claude Code (or Codex): asks you first (it writes files and uses your subscription), makes a
+    /// new project folder and opens the session in Terminal, where you watch it and answer its questions.
+    private func build(_ task: String, helper requested: String, folderName: String) async -> Outcome {
+        host.progress("Getting a coding agent ready…")
+        var candidates: [AssistantCLI] = requested == "codex" ? [.codex, .claude] : [.claude, .codex]
+        if requested == "claude" { candidates = [.claude, .codex] }
+        var chosen: AssistantCLI?
+        for helper in candidates {
+            if await helper.locate() != nil {
+                chosen = helper
+                break
+            }
+        }
+        guard let helper = chosen else {
+            host.showAnswer("To build software Murmur hands the work to Claude Code or Codex, and neither is "
+                + "installed.\n\nInstall Claude Code:  npm install -g @anthropic-ai/claude-code\nor Codex:  "
+                + "npm install -g @openai/codex\n\nThen sign in once in Terminal (run `claude` or `codex`).")
+            return Outcome(result: "No coding agent installed.", finished: true, shown: true)
+        }
+        let folder = AssistantCLI.newProjectFolder(for: task, name: folderName.isEmpty ? nil : folderName)
+        let place = folder.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+        guard await host.confirm("Build this with \(helper.display)?",
+                                 "“\(task)”\n\nIn a new folder: \(place)\n\n\(helper.display) opens in Terminal and works "
+                                 + "there with your subscription. It edits files in that folder on its own and asks "
+                                 + "you before running commands.")
+        else { return Outcome(result: "You cancelled the build.", finished: true) }
+        let result = await helper.startSession(task, in: folder)
+        host.log("command: \(result)")
+        host.progress(result.hasPrefix("Started") ? "\(helper.display) is building it in Terminal" : result)
+        return Outcome(result: result, finished: true)
+    }
+
     // MARK: - Selected text
 
     public struct SelectionTask: Sendable {
@@ -330,6 +364,8 @@ public final class CommandAgent {
             host.progress("Asking \(helper.display)…")
             let answer = await helper.run(task)
             return Outcome(result: "\(helper.display) answered:\n\(answer.prefix(6000))")
+        case "build_with_agent":
+            return await build(text("task"), helper: text("helper"), folderName: text("folder_name"))
         case "site_search":
             return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
         case "read_screen":
@@ -406,6 +442,9 @@ public final class CommandAgent {
                 + "open_url for a site.",
             "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot.",
             "- Shortcuts: list_shortcuts, run_shortcut.",
+            "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
+                + "build_with_agent with the user's full request. It starts Claude Code or Codex in Terminal to build "
+                + "it. Never web_search or open a browser for that.",
             "- You can see and use the front app like a person: read_screen lists its window's buttons, links and "
                 + "fields as [n]; click n; type_text (into field n, submit true to press Return); press_keys "
                 + "(\"return\", \"cmd+l\", \"cmd+n\", \"down\", \"pagedown\"); wait. Use them for any task the other "
@@ -466,6 +505,10 @@ public final class CommandAgent {
             tool("list_shortcuts", "List the user's Shortcuts"),
             tool("run_shortcut", "Run one of the user's Shortcuts (asks first)",
                  ["name": ("string", "shortcut name"), "input": ("string", "optional text input")], required: ["name"]),
+            tool("build_with_agent", "Start a Claude Code (or Codex) session in Terminal that builds software in a new "
+                 + "project folder", ["task": ("string", "the user's full request"),
+                                      "helper": ("string", "claude or codex; empty for the default"),
+                                      "folder_name": ("string", "short folder name, optional")], required: ["task"]),
             tool("site_search", "Search a website in the browser (youtube, google, amazon, github, maps, wikipedia, "
                  + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
             tool("read_screen", "See the front app's window: its buttons, links and fields, numbered"),
