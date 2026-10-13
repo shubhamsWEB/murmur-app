@@ -20,6 +20,12 @@ APP="build.noindex/$APP_NAME.app"
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
+# Murmur: compile against the SDK of the toolchain in use. Without this, CMake can pair Xcode's linker with a newer
+# Command Line Tools SDK, and linking fails with "tapi error: malformed file … unknown architecture".
+if [[ $(uname -s) == Darwin && -z "${SDKROOT:-}" ]]; then
+  SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+  export SDKROOT
+fi
 
 # llama.cpp, the embedding runtime, linked into the helper (only rebuilt when its tag or patch changes).
 scripts/build-llama.sh

@@ -37,6 +37,12 @@ fi
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
+# Murmur: compile against the SDK of the toolchain in use. Without this, CMake can pair Xcode's linker with a newer
+# Command Line Tools SDK, and linking fails with "tapi error: malformed file … unknown architecture".
+if [[ $(uname -s) == Darwin && -z "${SDKROOT:-}" ]]; then
+  SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+  export SDKROOT
+fi
 
 if [[ ! -d "$SOURCE" ]]; then
   # Line endings as they are (Git for Windows would turn them into CRLF, and the patch wouldn't apply).
@@ -65,7 +71,7 @@ fi
 if [[ $OS == Darwin ]]; then
   GENERATOR=$(command -v ninja > /dev/null && echo Ninja || echo "Unix Makefiles")
   # Only the libraries: no tools, no server, nothing downloaded at build time.
-  cmake -S "$SOURCE" -B "$BUILD" -G "$GENERATOR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+  cmake -S "$SOURCE" -B "$BUILD" -G "$GENERATOR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_SYSROOT="$SDKROOT" \
     -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_NATIVE=OFF -DLLAMA_BUILD_MTMD=ON \
     -DLLAMA_BUILD_COMMON=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
     -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_OPENSSL=OFF > /dev/null
