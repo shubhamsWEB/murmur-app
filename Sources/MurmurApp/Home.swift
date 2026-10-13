@@ -310,11 +310,20 @@ private struct SearchPage: View {
                     .foregroundStyle(Brand.clay)
             }
             .padding(.bottom, 24)
-            Card("Try") {
-                ForEach(["the clause about pets in the lease", "a dog on the beach", "where they talk about sleep",
+            Card("Try one") {
+                ForEach(["photos on the beach", "the clause about pets in the lease", "where they talk about sleep",
                          "that payment declined screenshot", "code: retry a failed call with backoff"], id: \.self) {
                     example in
-                    Text("“\(example)”").font(.system(size: 14))
+                    Button {
+                        app.panel.show()
+                        app.panel.query = example
+                    } label: {
+                        Label("“\(example)”", systemImage: "magnifyingglass")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search for this")
                 }
             }
             Card("By voice") {

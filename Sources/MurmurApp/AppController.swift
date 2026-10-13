@@ -320,6 +320,8 @@ final class AppController {
     /// Brings a window forward, with the Dock icon showing while any window is open. Offscreen test runs only build it.
     func present(_ window: NSWindow) {
         guard !Self.offscreen else { return }
+        // Come to the desktop you're on, not the Space the window was last open on (it looked like nothing happened).
+        window.collectionBehavior.insert(.moveToActiveSpace)
         NSApp.setActivationPolicy(.regular)
         bringAppToFront()
         window.makeKeyAndOrderFront(nil)
