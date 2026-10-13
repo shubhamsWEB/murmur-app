@@ -1,8 +1,8 @@
 import AppKit
 import Carbon.HIToolbox
 
-/// Watches the dictation key (Fn/🌐, or Right ⌥ on keyboards without Fn) with a listen-only event tap, so Murmur sees
-/// the key go down and up anywhere in macOS without taking it away from other apps.
+/// Watches the dictation key (Fn/🌐, or Right ⌥ on keyboards without Fn) with an event tap, so Murmur sees the key go
+/// down and up anywhere in macOS. Events are passed on unchanged: other apps still get every key.
 /// Needs Accessibility permission; `start()` returns false until it's granted.
 public final class DictationKeyMonitor {
     public enum Key: String, CaseIterable {
@@ -43,7 +43,10 @@ public final class DictationKeyMonitor {
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            // A listen-only tap only sees keys meant for Murmur unless the app also has Input Monitoring. A default
+            // tap is covered by Accessibility (which pasting needs anyway) and sees keys in every app. It passes
+            // every event on unchanged.
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(mask),
             callback: { _, type, event, refcon in
                 if let refcon {

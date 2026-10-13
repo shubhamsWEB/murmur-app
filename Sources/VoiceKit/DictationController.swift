@@ -20,7 +20,8 @@ public final class DictationController {
     public var log: (String) -> Void = { print($0) }
 
     private let recorder = MicRecorder()
-    private let transcriber = ParakeetTranscriber()
+    private var transcriber: ParakeetTranscriber
+    private var lastSamples: [Float] = []
     private let hud = DictationHUD()
     private let monitor: DictationKeyMonitor
     private var pressedAt = Date.distantPast
@@ -36,8 +37,11 @@ public final class DictationController {
     private let minimumSamples = 16_000 / 4
 
     private static let keyDefault = "dictationKey"
+    private static let modelDefault = "speechModel"
 
     public init() {
+        let model = UserDefaults.standard.string(forKey: Self.modelDefault).flatMap(ParakeetTranscriber.Model.init)
+        transcriber = ParakeetTranscriber(model: model ?? .english)
         let saved = UserDefaults.standard.string(forKey: Self.keyDefault).flatMap(DictationKeyMonitor.Key.init)
         monitor = DictationKeyMonitor(key: saved ?? .fn)
         monitor.onDown = { [weak self] in self?.keyDown() }
@@ -65,6 +69,26 @@ public final class DictationController {
         monitor.key = key
         startMonitor(prompt: false)
         log("dictation: key is now \(key.display)")
+    }
+
+    public func setModel(_ model: ParakeetTranscriber.Model) {
+        guard model != transcriber.model else { return }
+        UserDefaults.standard.set(model.rawValue, forKey: Self.modelDefault)
+        transcriber = ParakeetTranscriber(model: model)
+        log("dictation: speech model is now \(model.rawValue)")
+        Task { await prepareModel() }
+    }
+
+    /// Writes the last recording (16 kHz mono, exactly what the model heard) to a WAV file and shows it in Finder.
+    public func saveLastRecording() {
+        guard !lastSamples.isEmpty else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Murmur last recording.wav")
+        do {
+            try WAV.write(lastSamples, sampleRate: 16_000, to: url)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            log("dictation: can't save the recording: \(error.localizedDescription)")
+        }
     }
 
     /// Pastes the last dictation again (when it couldn't be inserted the first time).
@@ -103,9 +127,21 @@ public final class DictationController {
         let keyItem = NSMenuItem(title: "Dictation Key", action: nil, keyEquivalent: "")
         keyItem.submenu = keyMenu
         items.append(keyItem)
+        let modelMenu = NSMenu()
+        for model in ParakeetTranscriber.Model.allCases {
+            modelMenu.addItem(ClosureMenuItem(model.display, checked: model == transcriber.model) { [weak self] in
+                self?.setModel(model)
+            })
+        }
+        let modelItem = NSMenuItem(title: "Speech Model", action: nil, keyEquivalent: "")
+        modelItem.submenu = modelMenu
+        items.append(modelItem)
         if let lastText {
             items.append(ClosureMenuItem("Paste Last Dictation") { [weak self] in self?.pasteLast() })
             items.append(ClosureMenuItem("Copy Last Dictation") { TextInserter.copy(lastText) })
+        }
+        if !lastSamples.isEmpty {
+            items.append(ClosureMenuItem("Save Last Recording…") { [weak self] in self?.saveLastRecording() })
         }
         return items
     }
@@ -181,6 +217,8 @@ public final class DictationController {
             return
         }
         phase = .transcribing
+        lastSamples = samples
+        let transcriber = transcriber
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
@@ -230,11 +268,11 @@ public final class DictationController {
 
     private func prepareModel() async {
         modelStatus = "Speech model: downloading or loading…"
-        log("dictation: preparing Parakeet")
+        log("dictation: preparing Parakeet (\(transcriber.model.rawValue))")
         let started = Date()
         do {
-            try await transcriber.prepare()
-            modelStatus = "Speech model ready (Parakeet v3, on device)"
+            try await transcriber.prepare()   // the current model
+            modelStatus = "Speech model ready (\(transcriber.model == .english ? "English" : "multilingual"), on device)"
             log(String(format: "dictation: Parakeet ready in %.1f s", Date().timeIntervalSince(started)))
         } catch {
             modelStatus = "Speech model failed to load"
