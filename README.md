@@ -1,111 +1,154 @@
-<p align="center"><img src="Resources/AppIcon/preview-1024.png" width="112" alt=""></p>
+<p align="center"><img src="Resources/AppIcon/preview-1024.png" width="112" alt="Murmur's Starling icon"></p>
 
 <h1 align="center">Murmur</h1>
 
-<p align="center"><b>Talk anywhere. Find anything.</b><br>
-A free voice assistant for your Mac. Dictation, commands and search, with speech recognised on your Mac.</p>
+<p align="center"><b>Talk to your Mac.</b> A free voice assistant that types what you say in any app, finds your
+files from a description, and does small jobs for you. Speech is recognised on your Mac and never leaves it.</p>
+
+<p align="center">
+  <a href="https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur.dmg"><b>Download Murmur for Mac</b></a>
+  ·
+  <a href="https://github.com/shubhamsWEB/murmur-app/releases">All releases</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/shubhamsWEB/murmur-app/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/shubhamsWEB/murmur-app?label=release"></a>
+  <img alt="macOS 14 or later, Apple silicon" src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20silicon-lightgrey">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
+
+---
 
 ## What it does
 
-- **Dictation in any app.** Hold **Fn**, speak, let go: the text appears where you're typing. Double-tap Fn for
-  hands-free; tap again to finish, Esc to cancel. Whisper Mode boosts quiet speech.
-- **Commands.** "Open Chrome and search Facebook", "quit Spotify", "volume 30", "summarise this" (with text
-  selected). Murmur tells commands from dictation by itself; Fn+⌃ always means a command.
-- **Search your files by meaning.** "The clause about pets in the lease", "a dog on the beach", "where they talk
-  about sleep": photos, PDFs, documents, audio and video, searched on your Mac (⇧⌘Space, or by voice).
+| | You say | What happens |
+|---|---|---|
+| **Dictate** | “Running late, start without me.” | Typed where your cursor is, in any app. |
+| **Rewrite** | “Make this shorter.” *(with text selected)* | The selection is rewritten in place. Also “translate this”, “reply to this”. |
+| **Find files** | “The clause about pets in the lease.” | Searches photos, PDFs, documents, audio and video by what’s inside them. |
+| **Get things done** | “Open YouTube in Chrome.” | Opens apps and sites, changes settings, runs multi-step tasks, starts Claude Code or Codex. |
 
-Speech recognition: NVIDIA Parakeet on the Neural Engine. File search: Google DeepMind's EmbeddingGemma 2. Commands:
-a local model in Ollama, or optionally Claude Haiku or GPT-6 Luna with your own API key.
+Everything starts with one key: hold **fn** and speak. Murmur works out whether you’re writing or asking it to do
+something.
 
-## Commands
+## Install
 
-Just hold **Fn** and speak: Murmur decides whether it's a command or text to type (Commands & Assistants →
-Detect Commands Automatically, on by default). **Fn+⌃** always means a command.
+1. [Download **Murmur.dmg**](https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur.dmg), open it,
+   and drag Murmur to Applications.
+2. Open Murmur. If macOS says it can’t verify the developer, go to **System Settings → Privacy & Security** and click
+   **Open Anyway**. You only do this once.
+3. Allow the **microphone**, and turn on Murmur under **Privacy & Security → Accessibility**. Accessibility is what lets
+   it see the fn key and type into other apps.
+4. Set **System Settings → Keyboard → “Press 🌐 key to”** to **Do Nothing**, so fn doesn’t also open the emoji picker.
+5. Choose the folders Murmur may search. The first index takes a while; you can search while it runs.
 
-How it decides (typing is the default): ⌃ held → command; a known command like "open Slack" or "open chrome and
-search facebook" → command; starts with "Murmur…" → command; doesn't open like an instruction to the computer → typed (messages and questions like "send…" or "what's…" are
-typed unless you say "Murmur" first or hold ⌃); opens like one ("open…", "summarise…", "translate…") → command if you're somewhere you can't type (Finder, desktop),
-otherwise the router decides (typed if it can't answer in 2.5 s). Chrome and Electron apps often hide their text
-fields from Accessibility; that counts as "might be a text field", never as "nowhere to type".
-If a guessed command only produces an answer, the words are typed instead. Murmur's menu → Open Log shows each
-decision as `intent: … (reason)`.
+Murmur needs a Mac with Apple silicon on macOS 14 or later. The speech and search models download on first launch.
 
-- **Instant, no model:** "open Slack", "quit Spotify", "hide Xcode", "volume 30", "volume up", "mute", "brightness
-  down", "lock the screen", "take a screenshot", "search the web for …", "find my files about …", "open downloads",
-  "open github.com", "run shortcut Morning".
-- **Everything else** goes to a small local model in Ollama (default `qwen3:4b`) that picks tools: apps, files, web,
-  system, Shortcuts, writing text into the app you're in ("make this shorter" works on the selected text), or
-  answering in a small panel.
-- **Claude Code and Codex as helpers:** off until you allow them in the menu (Commands & Assistants). The router
-  sends them a focused sub-task, reads the answer, and decides what to do with it. Each run asks first. They run with
-  your own login: Claude Code with `--permission-mode dontAsk`, Codex with `--sandbox read-only`, so they can't change
-  files on their own.
-- **Asks first:** quitting an app, running a Shortcut, and every Claude Code or Codex run.
+## Using it
 
-**Router choice** (Commands & Assistants → Router): Local (Ollama, free, offline), Claude (`claude-haiku-5-5`,
-fastest, thinking off and low effort) or OpenAI (`gpt-6-luna`). Cloud routers need an API key, added from the same
-menu and kept in the macOS Keychain. Only command text goes to the cloud (your words, the front app's name and any
-selected text), never audio. If the cloud call fails, Murmur falls back to the local model. Other model ids:
-`defaults write com.copico.Murmur anthropicModel <id>` / `openaiModel <id>`.
+| Keys | Does |
+|---|---|
+| Hold **fn** | Talk. Let go, and it’s typed or done. |
+| Double-tap **fn** | Hands-free: talk as long as you like, tap fn again to finish. **Esc** cancels. |
+| Hold **fn + ⌃** | Always a command, never typed. |
+| **⇧⌘Space** | Search your files by describing them. Return opens the best match. |
 
-Setup: install [Ollama](https://ollama.com) (you have it), then `ollama pull qwen3:4b`. Pick another router model
-under Commands & Assistants (`qwen3:1.7b` is faster, `qwen3:8b` is smarter).
+A small capsule at the bottom of the screen shows when Murmur is listening and what it did. Whisper Mode (in the
+menu bar menu) boosts quiet speech.
 
-## Download
+### Commands
 
-Get the latest **Murmur.dmg** from [Releases](https://github.com/shubhamsWEB/murmur-app/releases/latest), open it and
-drag Murmur to Applications. The website lives in its own repo:
-[murmur-web](https://github.com/shubhamsWEB/murmur-web).
+Typing is the default, so Murmur only treats your words as a command when it’s clearly one:
 
-## Releasing
+- **Instant, no model needed:** “open Slack”, “quit Spotify”, “volume 30”, “mute”, “brightness down”, “lock the
+  screen”, “take a screenshot”, “open YouTube in Chrome”, “search the web for …”, “open my resume PDF”,
+  “run shortcut Morning”, “check for updates”.
+- **Everything else** goes to a model that plans the steps: multi-step tasks across apps (“open Notes and write a
+  packing list for Goa”), work on selected text, or a quick answer in a small panel.
+- **Coding:** “build a React app with a hello world page” starts Claude Code or Codex in Terminal, in a new project
+  folder, with your own login.
+- **Asks before:** quitting an app, running a Shortcut, clicking anything risky, and starting Claude Code or Codex
+  (unless you turn on *Start without asking*).
 
-1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
-2. Run `./scripts/release.sh`. It builds the DMG (`scripts/make-dmg.sh`) and publishes it as GitHub release
-   `v<version>` with two files: `Murmur-<version>.dmg` and `Murmur.dmg`. The website's Download buttons point at
-   `releases/latest/download/Murmur.dmg`, so they pick up the new version on their own.
+Say “Murmur, …” first or hold ⌃ to make sure something is treated as a command. **Open Log** in the menu bar menu
+shows every decision and why.
 
-Needs the GitHub CLI, signed in once: `brew install gh && gh auth login`.
+<details>
+<summary><b>Choosing the model for commands</b></summary>
 
-## Build and run
+Pick it under **Commands & AI** in the app:
 
-Needs an Apple Silicon Mac, macOS 14+, and Xcode 26 (Swift 6.2).
+- **Local (default):** a model in [Ollama](https://ollama.com), free and offline. Install Ollama, then
+  `ollama pull qwen3:4b` (`qwen3:1.7b` is faster, `qwen3:8b` is smarter).
+- **Claude** or **OpenAI:** faster and better at long tasks, with your own API key, stored in the macOS Keychain.
+  If a cloud call fails, Murmur falls back to the local model.
+
+Other model ids: `defaults write com.copico.Murmur anthropicModel <id>` (or `openaiModel`).
+
+Claude Code and Codex can also help with commands. They are off until you allow them, and run with your own login:
+as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, Codex `--sandbox read-only`); for
+“build …” requests they work in their new project folder (`acceptEdits` / `--full-auto`).
+</details>
+
+## Privacy
+
+- **Your voice** is transcribed on your Mac by NVIDIA Parakeet on the Neural Engine. Audio is held in memory only
+  while it’s transcribed, and never saved or sent anywhere.
+- **Your files** are indexed on your Mac, only in the folders you choose, with Google’s EmbeddingGemma.
+- **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, only the command’s words, the
+  front app’s name and any selected text are sent to that provider. Never audio, never files.
+- **Network use** is otherwise limited to the one-time model downloads from Hugging Face.
+
+Settings, the index and models live in `~/Library/Application Support/Murmur`.
+
+## Build from source
+
+You need an Apple silicon Mac on macOS 14 or later, and Xcode 26 (Swift 6.2).
 
 ```bash
-cd ~/IdeaProjects/murmur
-./build.sh                         # first build fetches packages and compiles llama.cpp: 10+ minutes
+git clone https://github.com/shubhamsWEB/murmur-app.git murmur
+cd murmur
+./build.sh                          # the first build fetches packages and compiles llama.cpp: 10+ minutes
 open build.noindex/Murmur.app
 ```
 
-To work in Xcode instead: `open Package.swift`, pick the **MurmurApp** scheme, and run. Use `./build.sh` to test
-permissions, because only a signed .app bundle keeps them.
+To work in Xcode, `open Package.swift`, pick the **MurmurApp** scheme and run. Test permissions with `./build.sh`,
+because only a signed .app keeps them.
 
-### Signing (so permissions stick between builds)
+<details>
+<summary><b>Signing, so permissions survive rebuilds</b></summary>
 
-With no identity, `build.sh` signs ad hoc, and macOS forgets the Accessibility permission after every rebuild.
-Use your free Apple Development certificate instead (Xcode → Settings → Accounts → add your Apple ID):
+Without an identity, `build.sh` signs ad hoc and macOS forgets the Accessibility permission after every rebuild.
+Use your free Apple Development certificate (Xcode → Settings → Accounts → add your Apple ID):
 
 ```bash
-security find-identity -v -p codesigning     # copy the "Apple Development: …" name
+security find-identity -v -p codesigning           # copy the "Apple Development: …" name
 echo "Apple Development: Your Name (TEAMID)" > .sign-id
 ```
 
-## First launch checklist
+`scripts/reset-to-new-user.sh` clears permissions and settings, to test the first-launch experience again.
+</details>
 
-1. **Microphone:** allow when asked.
-2. **Accessibility:** System Settings → Privacy & Security → Accessibility → turn on Murmur. Murmur needs this to
-   see the Fn key and to paste. It starts working within 2 seconds of being allowed.
-3. **Fn key:** System Settings → Keyboard → "Press 🌐 key to" → **Do Nothing**. Otherwise Fn also opens the
-   emoji picker or Apple's dictation.
-4. Wait for the menu bar menu to say "Speech model ready", then hold Fn in Notes and talk.
+<details>
+<summary><b>Publishing a release</b></summary>
 
-## Data and privacy
+1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
+2. Run `./scripts/release.sh`. It builds the DMG and publishes GitHub release `v<version>` with `Murmur-<version>.dmg`
+   and `Murmur.dmg`.
 
-Murmur's settings, index and models live in `~/Library/Application Support/Murmur`.
-Audio is held in memory only for transcription and is never saved. The only network use is the one-time model
-downloads from Hugging Face, and (only if you choose a cloud router) command text sent to that provider.
+The download link above and the website both point at `releases/latest/download/Murmur.dmg`, so they serve the new
+version straight away. With a Developer ID certificate and stored notary credentials, `scripts/make-dmg.sh` also
+notarizes the app so it opens without the security prompt. Needs the GitHub CLI: `brew install gh && gh auth login`.
+</details>
 
-## Credits
+## Related
 
-Murmur is built on [DigUp](https://github.com/ARahim3/DigUp) by Abdur Rahim (MIT), which provides its file index and
-search. Speech recognition runs on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Apache 2.0). Full
-notices: `Resources/Acknowledgements.txt` and `LICENSE`.
+- **Website:** [murmur-web](https://github.com/shubhamsWEB/murmur-web)
+
+## Credits and license
+
+Murmur is built on [DigUp](https://github.com/ARahim3/DigUp) by Abdur Rahim, which provides its file index and search.
+Speech recognition runs on [FluidAudio](https://github.com/FluidInference/FluidAudio). Full notices are in
+[`Resources/Acknowledgements.txt`](Resources/Acknowledgements.txt).
+
+Released under the [MIT License](LICENSE).
