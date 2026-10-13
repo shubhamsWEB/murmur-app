@@ -1159,9 +1159,8 @@ private struct AboutPage: View {
             }
             SettingsSection("Made with") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("File index and search from DigUp by Abdur Rahim (MIT). Speech recognition with NVIDIA Parakeet "
-                         + "through FluidAudio (Apache 2.0). Search embeddings with Google DeepMind's EmbeddingGemma 2 on "
-                         + "llama.cpp (MIT).")
+                    Text("Speech recognition with NVIDIA Parakeet through FluidAudio (Apache 2.0). Search embeddings with "
+                         + "Google DeepMind's EmbeddingGemma 2 on llama.cpp (MIT).")
                         .font(.system(size: 13))
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
