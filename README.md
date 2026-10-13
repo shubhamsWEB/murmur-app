@@ -8,7 +8,7 @@ files from a description, and does small jobs for you. Speech is recognised on y
 <p align="center">
   <a href="https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur.dmg"><b>Download Murmur for Mac</b></a>
   ·
-  <a href="https://shubhamsweb.github.io/murmur-web/">Website</a>
+  <a href="https://shubhamsweb.github.io/murmur/">Website</a>
   ·
   <a href="https://github.com/shubhamsWEB/murmur-app/releases">All releases</a>
 </p>
@@ -145,8 +145,8 @@ notarizes the app so it opens without the security prompt. Needs the GitHub CLI:
 
 ## Related
 
-- **Website:** [shubhamsweb.github.io/murmur-web](https://shubhamsweb.github.io/murmur-web/), source in
-  [murmur-web](https://github.com/shubhamsWEB/murmur-web)
+- **Website:** [shubhamsweb.github.io/murmur](https://shubhamsweb.github.io/murmur/), source in
+  [shubhamsWEB/murmur](https://github.com/shubhamsWEB/murmur)
 
 ## Credits and license
 
