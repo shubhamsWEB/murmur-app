@@ -570,6 +570,20 @@ extension DictationController {
         }
     }
 
+    /// A Murmur dialog for actions that change something. It floats above every window.
+    private func confirm(_ title: String, _ detail: String) -> Bool {
+        hud.hide()
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Go Ahead")
+        alert.addButton(withTitle: "Cancel")
+        Self.bringToFront(alert)
+        let answer = alert.runModal() == .alertFirstButtonReturn
+        log("command: \(title) → \(answer ? "yes" : "no")")
+        return answer
+    }
+
     /// Murmur lives in the menu bar, and macOS may ignore a background app asking to come forward: float the dialog
     /// above every window and take the keyboard for it.
     static func bringToFront(_ alert: NSAlert) {
