@@ -23,9 +23,13 @@ final class DictationHUD {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.level = .statusBar
+        // Above full-screen apps too: a panel high enough to sit over them, on every Space, that never hides
+        // because Murmur isn't the active app (NSPanel hides on deactivate by default).
+        panel.level = .screenSaver
+        panel.hidesOnDeactivate = false
+        panel.canHide = false
         panel.ignoresMouseEvents = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: HUDView(state: state))
         host.frame = panel.contentRect(forFrameRect: panel.frame)

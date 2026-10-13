@@ -27,6 +27,25 @@ public enum QuickCommands {
         return s.trimmingCharacters(in: .whitespaces)
     }
 
+    /// Sites people open by name, and their home pages.
+    static let sites: [String: String] = [
+        "youtube": "https://www.youtube.com", "you tube": "https://www.youtube.com", "gmail": "https://mail.google.com",
+        "google": "https://www.google.com", "github": "https://github.com", "linkedin": "https://www.linkedin.com",
+        "twitter": "https://x.com", "reddit": "https://www.reddit.com", "amazon": "https://www.amazon.in",
+        "flipkart": "https://www.flipkart.com", "netflix": "https://www.netflix.com", "wikipedia": "https://en.wikipedia.org",
+        "instagram": "https://www.instagram.com", "facebook": "https://www.facebook.com",
+        "whatsapp web": "https://web.whatsapp.com", "chatgpt": "https://chatgpt.com", "claude": "https://claude.ai",
+        "perplexity": "https://www.perplexity.ai", "google maps": "https://www.google.com/maps",
+        "google drive": "https://drive.google.com", "drive": "https://drive.google.com",
+        "google docs": "https://docs.google.com", "google sheets": "https://sheets.google.com",
+        "google calendar": "https://calendar.google.com", "stack overflow": "https://stackoverflow.com",
+        "stackoverflow": "https://stackoverflow.com", "hacker news": "https://news.ycombinator.com",
+        "spotify": "https://open.spotify.com", "notion": "https://www.notion.so", "figma": "https://www.figma.com",
+        "outlook": "https://outlook.live.com", "youtube music": "https://music.youtube.com",
+    ]
+    static let sitePattern = sites.keys.sorted { $0.count > $1.count }
+        .map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+
     private static let rules: [(String, (Match) -> Action?)] = [
         // "check for updates on my macbook", "update my mac", "is there a macos update"
         (#"^(?:check|look|search)(?: for)? (?:any |new |the )?(?:software |system |macos |mac ?os |mac )?updates?(?: (?:on|for) (?:my |the |this )?(?:mac|macbook|laptop|computer|system))?$|^(?:update|upgrade) (?:my |the |this )?(?:mac|macbook|macos|mac os|laptop|computer|system)$|^(?:is there|are there) (?:a |an |any )?(?:software |system |macos |mac )?updates?.*$"#, { _ in
@@ -70,6 +89,10 @@ public enum QuickCommands {
             Action(tool: "open_folder", arguments: ["name": m[1]]) }),
         (#"^(?:open|go to|visit) ((?:https?://)?[a-z0-9-]+(?:\.| dot )[a-z.]{2,}(?:/\S*)?)$"#, { m in
             Action(tool: "open_url", arguments: ["url": m[1]]) }),
+        // A well-known site by name: "open youtube", "go to gmail" (any "on chrome" was taken off first).
+        (#"^(?:open|go to|visit|launch|pull up|bring up) (?:the )?("#
+            + sitePattern + #")(?: website| site| page)?$"#, { m in
+            Action(tool: "open_url", arguments: ["url": sites[m[1]] ?? m[1], "site": m[1]]) }),
         (#"^(?:open|launch|start|switch to|go to|show) (?:the )?(.+?)(?: app)?$"#, { m in
             Action(tool: "open_app", arguments: ["name": m[1]]) }),
         (#"^(?:quit|close|exit|kill) (?:the )?(.+?)(?: app)?$"#, { m in
@@ -162,12 +185,53 @@ public enum QuickCommands {
 
     /// The action for a common command, or nil to let the router model decide.
     public static func parse(_ utterance: String) -> Action? {
-        let text = clean(utterance)
+        var text = clean(utterance)
         guard !text.isEmpty, text.count < 120 else { return nil }
+        // "… on chrome", "… in safari", "… using firefox": which browser, said at the end ("" = the default one).
+        var browser: String?
+        let suffix = #" (?:on|in|using|with|from) (?:the |my )?(google chrome|chrome|safari|firefox|arc|brave|microsoft edge|edge|opera|vivaldi|orion|browser|web browser)$"#
+        if let regex = try? NSRegularExpression(pattern: suffix),
+           let found = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+           let whole = Range(found.range, in: text), let name = Range(found.range(at: 1), in: text) {
+            browser = text[name].hasSuffix("browser") ? "" : String(text[name])
+            text = String(text[..<whole.lowerBound])
+        }
+        if let browser {
+            // "open chrome" and nothing else is just the app.
+            guard !text.isEmpty else { return nil }
+            let web: Set<String> = ["open_url", "web_search", "site_search"]
+            for (pattern, make) in rules {
+                guard let regex = try? NSRegularExpression(pattern: pattern),
+                      let result = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                      let action = make(Match(text: text, result: result)) else { continue }
+                // "search flights on chrome": with a browser named, a search means the web.
+                if action.tool == "search_files", let query = action.arguments["query"] {
+                    var arguments = ["query": query]
+                    if !browser.isEmpty { arguments["browser"] = browser }
+                    return Action(tool: "web_search", arguments: arguments)
+                }
+                if web.contains(action.tool) {
+                    var arguments = action.arguments
+                    if !browser.isEmpty { arguments["browser"] = browser }
+                    return Action(tool: action.tool, arguments: arguments)
+                }
+                // "open notion on chrome": a site we don't know by name; open it as an address.
+                if action.tool == "open_app", let name = action.arguments["name"], !name.contains(" ") || name.count < 20 {
+                    var arguments = ["url": name.replacingOccurrences(of: " ", with: "") + ".com"]
+                    if !browser.isEmpty { arguments["browser"] = browser }
+                    return Action(tool: "open_url", arguments: arguments)
+                }
+                return nil
+            }
+            return nil
+        }
         for (pattern, make) in rules {
             guard let regex = try? NSRegularExpression(pattern: pattern),
                   let result = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { continue }
             if let action = make(Match(text: text, result: result)) {
+                // "open spotify" with the Spotify app installed: the app, not the website.
+                if action.tool == "open_url", let site = action.arguments["site"],
+                   AppCatalog.shared.resolve(site)?.name.lowercased() == site { continue }
                 // "open X" only takes the fast path when X is a real app; otherwise the router decides.
                 if action.tool == "open_app" || action.tool == "quit_app" || action.tool == "hide_app" {
                     let name = action.arguments["name"] ?? ""

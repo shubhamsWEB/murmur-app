@@ -305,6 +305,13 @@ public final class CommandAgent {
         var shown = false
     }
 
+    /// "… on chrome": use that browser for this and the next web steps.
+    private func useBrowser(_ value: JSONValue?) {
+        guard let name = value?.description.trimmingCharacters(in: .whitespaces), !name.isEmpty,
+              let app = AppCatalog.shared.resolve(name), MacActions.isBrowser(app) else { return }
+        lastBrowser = app
+    }
+
     private func execute(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
         func text(_ key: String) -> String { args[key]?.description.trimmingCharacters(in: .whitespaces) ?? "" }
         switch tool {
@@ -339,8 +346,12 @@ public final class CommandAgent {
             }
             host.searchFiles(query)
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
-        case "open_url": return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))
-        case "web_search": return Outcome(result: MacActions.webSearch(text("query"), in: lastBrowser))
+        case "open_url":
+            useBrowser(args["browser"])
+            return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))
+        case "web_search":
+            useBrowser(args["browser"])
+            return Outcome(result: MacActions.webSearch(text("query"), in: lastBrowser))
         case "set_volume": return Outcome(result: MacActions.setVolume(Int(args["percent"]?.number ?? 50)))
         case "change_volume": return Outcome(result: MacActions.changeVolume(by: text("direction") == "down" ? -15 : 15))
         case "mute":
@@ -372,6 +383,7 @@ public final class CommandAgent {
             return await build(text("task"), helper: text("helper"), folderName: text("folder_name"))
         case "open_settings": return Outcome(result: MacActions.openSettings(text("pane")))
         case "site_search":
+            useBrowser(args["browser"])
             return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
         case "read_screen":
             host.progress("Looking at the screen…")
@@ -501,7 +513,9 @@ public final class CommandAgent {
                  ["query": ("string", "the file as described")]),
             tool("search_files", "Search the user's files by meaning and show the results",
                  ["query": ("string", "what to look for")]),
-            tool("open_url", "Open a website", ["url": ("string", "address, e.g. github.com")]),
+            tool("open_url", "Open a website, in a named browser if the user said one (\"open youtube on chrome\")",
+                 ["url": ("string", "address, e.g. github.com or youtube.com"),
+                  "browser": ("string", "browser to use, e.g. Chrome; empty for the default")], required: ["url"]),
             tool("web_search", "Search the web in the browser", ["query": ("string", "search terms")]),
             tool("set_volume", "Set output volume", ["percent": ("number", "0 to 100")]),
             tool("change_volume", "Turn the volume up or down", ["direction": ("string", "up or down")]),

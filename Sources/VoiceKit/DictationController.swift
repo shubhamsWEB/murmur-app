@@ -422,8 +422,15 @@ public final class DictationController: ObservableObject {
                     return
                 }
                 lastText = text
-                hud.hide()
                 DictationHistory.shared.add(text, app: frontApp, kind: .dictation)
+                if focus == .notText {
+                    // Pasting into Finder or the desktop makes a text clipping file: copy it instead.
+                    TextInserter.copy(text)
+                    log("dictation: nowhere to type, copied instead")
+                    hud.flash("Nowhere to type here · copied to clipboard", seconds: 3)
+                    return
+                }
+                hud.hide()
                 report(TextInserter.insert(text))
             } catch {
                 phase = .idle
@@ -733,6 +740,8 @@ extension DictationController {
         let role_ = role as? String ?? ""
         let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
         if textRoles.contains(role_) { return .textField }
+        // Finder (the desktop, a folder window): there's nowhere to type unless it's a rename field.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" { return .notText }
         var settable: DarwinBoolean = false
         if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
            settable.boolValue { return .textField }
