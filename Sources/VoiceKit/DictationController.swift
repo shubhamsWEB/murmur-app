@@ -712,6 +712,7 @@ extension DictationController {
     /// above every window and take the keyboard for it.
     static func bringToFront(_ alert: NSAlert) {
         alert.window.level = .floating
+        alert.window.collectionBehavior.remove(.moveToActiveSpace)   // can't be combined with .canJoinAllSpaces
         alert.window.collectionBehavior.insert(.canJoinAllSpaces)
         alert.window.collectionBehavior.insert(.fullScreenAuxiliary)
         NSRunningApplication.current.activate(options: [.activateAllWindows])

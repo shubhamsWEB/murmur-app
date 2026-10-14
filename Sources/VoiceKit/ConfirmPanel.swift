@@ -15,7 +15,9 @@ enum ConfirmPanel {
         }
         panel.level = .modalPanel
         panel.isMovableByWindowBackground = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+        // On every Space, over full-screen apps. (.moveToActiveSpace can't be combined with .canJoinAllSpaces:
+        // AppKit throws, and every confirmation crashed Murmur.)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 ? NSColor(srgbRed: 0.118, green: 0.106, blue: 0.102, alpha: 1)

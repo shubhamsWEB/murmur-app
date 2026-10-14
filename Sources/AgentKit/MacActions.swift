@@ -254,6 +254,21 @@ public enum MacActions {
         return up ? "Brighter." : "Dimmer."
     }
 
+    /// The built-in display's brightness, 0–100 (DisplayServices, what the brightness keys use). Where that isn't
+    /// available (an external display), the brightness keys step it there: all the way down, then up.
+    public static func setBrightness(_ percent: Int) async -> String {
+        let level = Float(min(100, max(0, percent))) / 100
+        typealias SetLevel = @convention(c) (UInt32, Float) -> Int32
+        if let handle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY),
+           let symbol = dlsym(handle, "DisplayServicesSetBrightness") {
+            let set = unsafeBitCast(symbol, to: SetLevel.self)
+            if set(CGMainDisplayID(), level) == 0 { return "Set the brightness to \(Int(level * 100))%." }
+        }
+        for _ in 0..<16 { postMediaKey(3); try? await Task.sleep(nanoseconds: 15_000_000) }   // 16 steps to dark
+        for _ in 0..<Int((level * 16).rounded()) { postMediaKey(2); try? await Task.sleep(nanoseconds: 15_000_000) }
+        return "Set the brightness to about \(Int(level * 100))%."
+    }
+
     public static func lockScreen() -> String {
         postKey(CGKeyCode(kVK_ANSI_Q), flags: [.maskCommand, .maskControl])
         return "Locked the screen."

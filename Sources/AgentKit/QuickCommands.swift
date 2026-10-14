@@ -103,6 +103,9 @@ public enum QuickCommands {
         (#"^(?:turn )?(?:the )?volume (up|down)$|^turn (up|down) (?:the )?volume$|^(louder|quieter|softer)$"#, { m in
             let word = [m[1], m[2], m[3]].first { !$0.isEmpty } ?? "up"
             return Action(tool: "change_volume", arguments: ["direction": word == "louder" || word == "up" ? "up" : "down"]) }),
+        // "set brightness to 20%", "make the brightness 20 percent", "brightness 50"
+        (#"^(?:(?:set|make|change|put|turn|bring) )?(?:the )?(?:screen |display )?brightness (?:to |at |up to |down to )?(\d{1,3})(?: ?percent| ?%)?$"#, { m in
+            Action(tool: "set_brightness", arguments: ["percent": m[1]]) }),
         // "turn off bluetooth", "switch wifi on", "disable wi-fi"
         (#"^(?:turn|switch|put) (on|off) (?:the |my )?(bluetooth|wi-?fi|wifi|wireless)$|^(?:turn|switch|put) (?:the |my )?(bluetooth|wi-?fi|wifi|wireless) (on|off)$|^(enable|disable) (?:the |my )?(bluetooth|wi-?fi|wifi|wireless)$"#, { m in
             let state = [m[1], m[4], m[5]].first { !$0.isEmpty } ?? "on"

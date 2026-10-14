@@ -442,6 +442,8 @@ public final class CommandAgent {
             return Outcome(result: MacActions.mute(on))
         case "brightness": return Outcome(result: MacActions.brightness(up: text("direction") != "down"))
         case "lock_screen": return Outcome(result: MacActions.lockScreen())
+        case "set_brightness":
+            return Outcome(result: await MacActions.setBrightness(Int(args["percent"]?.number ?? 50)))
         case "set_bluetooth":
             host.progress("Switching Bluetooth…")
             return Outcome(result: await MacActions.setBluetooth(text("on") != "false"))
@@ -590,7 +592,7 @@ public final class CommandAgent {
                 + "open_url for a site.",
             "- Mac settings and updates: open_settings (\"check for updates\" → software update); then read_screen "
                 + "and click if the user asked for a specific switch.",
-            "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot, set_bluetooth, set_wifi "
+            "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot, set_brightness, set_bluetooth, set_wifi "
                 + "(switch these directly; don't open Settings for them).",
             "- Shortcuts: list_shortcuts, run_shortcut.",
             "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
@@ -671,6 +673,7 @@ public final class CommandAgent {
             tool("mute", "Mute or unmute the sound", ["on": ("boolean", "true to mute")]),
             tool("brightness", "Make the screen brighter or dimmer", ["direction": ("string", "up or down")]),
             tool("lock_screen", "Lock the screen"),
+            tool("set_brightness", "Set the screen brightness to a percentage", ["percent": ("number", "0 to 100")]),
             tool("set_bluetooth", "Turn Bluetooth on or off", ["on": ("boolean", "true for on, false for off")]),
             tool("set_wifi", "Turn Wi-Fi on or off", ["on": ("boolean", "true for on, false for off")]),
             tool("screenshot", "Open the screenshot toolbar"),

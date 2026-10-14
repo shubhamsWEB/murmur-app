@@ -342,7 +342,7 @@ final class AppController {
     func present(_ window: NSWindow) {
         guard !Self.offscreen else { return }
         // Come to the desktop you're on, not the Space the window was last open on (it looked like nothing happened).
-        window.collectionBehavior.insert(.moveToActiveSpace)
+        if !window.collectionBehavior.contains(.canJoinAllSpaces) { window.collectionBehavior.insert(.moveToActiveSpace) }
         if window.isMiniaturized { window.deminiaturize(nil) }
         NSApp.setActivationPolicy(.regular)
         // macOS can decline a menu bar app's request to come forward; ask both ways, and put the window in front
