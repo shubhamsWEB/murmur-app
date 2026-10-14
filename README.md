@@ -55,8 +55,8 @@ Murmur needs a Mac with Apple silicon on macOS 14 or later. The speech and searc
 | Hold **fn + ⌃** | Always a command, never typed. |
 | **⇧⌘Space** | Search your files by describing them. Return opens the best match. |
 
-A small capsule at the bottom of the screen shows when Murmur is listening and what it did. Whisper Mode (in the
-menu bar menu) boosts quiet speech.
+A small capsule at the bottom of the screen shows when Murmur is listening and what it did. Quiet Voice (in the
+menu bar menu and on the Dictation page) boosts soft speech; like all dictation, it runs on this Mac.
 
 ### Commands
 

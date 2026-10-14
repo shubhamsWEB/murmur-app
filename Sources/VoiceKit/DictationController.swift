@@ -75,7 +75,8 @@ public final class DictationController: ObservableObject {
     private static let modelDefault = "speechModel"
     private static let whisperDefault = "whisperMode"
 
-    /// Whisper Mode: boost quiet speech up to 32 dB instead of 20 dB, for whispering or speaking softly.
+    /// Quiet Voice: boost soft speech up to 40 dB instead of 30 dB, for whispering or speaking softly. (Named for
+    /// your voice, not OpenAI's Whisper: speech is always recognised on this Mac. The setting keeps its old key.)
     public var whisperMode: Bool {
         get { UserDefaults.standard.bool(forKey: Self.whisperDefault) }
         set { UserDefaults.standard.set(newValue, forKey: Self.whisperDefault) }
@@ -164,7 +165,7 @@ public final class DictationController: ObservableObject {
 
     /// Items for the menu bar menu.
     /// The few dictation items the menu bar menu keeps (everything else is in Murmur's window): fixing
-    /// Accessibility, Whisper Mode, and the last dictation again.
+    /// Accessibility, Quiet Voice, and the last dictation again.
     public func compactMenuItems() -> [NSMenuItem] {
         var items: [NSMenuItem] = []
         if !monitor.isRunning || !AXIsProcessTrusted() {
@@ -174,10 +175,10 @@ public final class DictationController: ObservableObject {
             items.append(ClosureMenuItem("Paste Last Dictation Again") { [weak self] in self?.pasteLast() })
             items.append(ClosureMenuItem("Copy Last Dictation") { TextInserter.copy(lastText) })
         }
-        items.append(ClosureMenuItem("Whisper Mode", checked: whisperMode) { [weak self] in
+        items.append(ClosureMenuItem("Quiet Voice", checked: whisperMode) { [weak self] in
             guard let self else { return }
             whisperMode.toggle()
-            log("dictation: whisper mode \(whisperMode ? "on" : "off")")
+            log("dictation: quiet voice \(whisperMode ? "on" : "off")")
         })
         return items
     }
@@ -268,10 +269,10 @@ public final class DictationController: ObservableObject {
         let assistantsItem = NSMenuItem(title: "Commands & Assistants", action: nil, keyEquivalent: "")
         assistantsItem.submenu = assistants
         items.append(assistantsItem)
-        items.append(ClosureMenuItem("Whisper Mode", checked: whisperMode) { [weak self] in
+        items.append(ClosureMenuItem("Quiet Voice", checked: whisperMode) { [weak self] in
             guard let self else { return }
             whisperMode.toggle()
-            log("dictation: whisper mode \(whisperMode ? "on" : "off")")
+            log("dictation: quiet voice \(whisperMode ? "on" : "off")")
         })
         if let lastText {
             items.append(ClosureMenuItem("Paste Last Dictation") { [weak self] in self?.pasteLast() })
@@ -386,7 +387,7 @@ public final class DictationController: ObservableObject {
         phase = .transcribing
         let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 40 : 30)
         log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, gain +%.0f dB%@",
-                   leveled.speechDB, leveled.noiseDB, leveled.gainDB, whisperMode ? " (whisper mode)" : ""))
+                   leveled.speechDB, leveled.noiseDB, leveled.gainDB, whisperMode ? " (quiet voice)" : ""))
         let samples = leveled.samples
         lastSamples = samples
         let transcriber = transcriber

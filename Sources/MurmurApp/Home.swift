@@ -788,8 +788,8 @@ private struct DictationPage: View {
                     .frame(width: 220)
                 }
                 RowDivider()
-                SettingRow(title: "Whisper mode", detail: "Boosts quiet speech, for open offices and late nights.") {
-                    MurmurSwitch(label: "Whisper mode",
+                SettingRow(title: "Quiet voice", detail: "Boosts soft speech, for open offices and late nights. Still on this Mac.") {
+                    MurmurSwitch(label: "Quiet voice",
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
                 RowDivider()
