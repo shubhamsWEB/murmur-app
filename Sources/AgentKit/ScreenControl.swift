@@ -56,6 +56,18 @@ public enum ScreenControl {
         return lastOtherApp.flatMap { $0.isTerminated ? nil : $0 }
     }
 
+    /// The title of the working app's front window ("Movies", "interview.mp4", "Inbox – Gmail").
+    public static func frontWindowTitle() -> String? {
+        guard AXIsProcessTrusted(), let app = workingApp() else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(root, kAXFocusedWindowAttribute as CFString, &window) == .success,
+              let window else { return nil }
+        var title: CFTypeRef?
+        AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &title)
+        return title as? String
+    }
+
     /// The app whose screen to read: the front one, or the one you were in when Murmur is in front.
     private static func targetApp() async -> NSRunningApplication? {
         watchFrontApp()

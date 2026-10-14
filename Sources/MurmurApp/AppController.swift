@@ -411,16 +411,33 @@ struct SpokenFile {
         self.kinds = kinds.isEmpty ? nil : kinds
     }
 
-    /// The one to open: the best-ranked file whose name has every word, else the only strong match.
+    /// The one to open: the best-ranked file whose name (or folder) has every word you said, else most of them.
+    /// A file with none of your words in its name opens only when it's the one file that matched and has the words
+    /// inside it. Otherwise nil, and the results are shown to choose from. (It used to open the only strong match
+    /// whatever its name, so one big document that loosely matches everything opened for every request.)
     func best(of rows: [ResultRow]) -> ResultRow? {
         let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
-        let words = fold(text).split(separator: " ").map(String.init)
-        if let named = rows.first(where: { row in
-            let name = fold(row.name)
-            return words.allSatisfy { word in
+        let minor: Set<String> = ["for", "about", "with", "from", "and", "in", "on", "to", "at", "my", "of", "the",
+                                  "latest", "last", "new", "old", "one"]
+        let words = fold(text).split(separator: " ").map(String.init).filter { $0.count > 1 && !minor.contains($0) }
+        var files: [ResultRow] = []
+        var seen = Set<String>()
+        for row in rows where seen.insert(row.id).inserted { files.append(row) }
+        guard !words.isEmpty else { return files.count == 1 ? files[0] : nil }
+        func found(_ row: ResultRow) -> Int {
+            let name = fold(row.name + " " + row.folder)
+            return words.filter { word in
                 ["resume", "cv"].contains(word) ? (name.contains("resume") || name.contains("cv")) : name.contains(word)
-            }
-        }) { return named }
-        return rows.count == 1 ? rows[0] : nil
+            }.count
+        }
+        if let named = files.first(where: { found($0) == words.count }) { return named }
+        let enough = max(1, (words.count + 1) / 2)
+        var best: (row: ResultRow, count: Int)?
+        for file in files {
+            let count = found(file)
+            if count >= enough, count > (best?.count ?? 0) { best = (file, count) }
+        }
+        if let best { return best.row }
+        return files.count == 1 && files[0].matchedWords ? files[0] : nil
     }
 }

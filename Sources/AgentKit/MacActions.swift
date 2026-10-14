@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import UniformTypeIdentifiers
 
 /// The things Murmur can do on this Mac. Each returns a short result the router (or you) can read.
 @MainActor
@@ -407,6 +408,55 @@ public enum MacActions {
     // MARK: Helpers
 
     @discardableResult
+    /// A video or a song (by its extension).
+    static func isPlayable(_ path: String) -> Bool {
+        UTType(filenameExtension: (path as NSString).pathExtension)?.conforms(to: .audiovisualContent) ?? false
+    }
+
+    static let quickTime = "com.apple.QuickTimePlayerX"
+
+    /// Opens a video or song in the app that plays it, and starts it (QuickTime opens paused; other players start on
+    /// their own).
+    static func play(file path: String) async -> String {
+        let url = URL(fileURLWithPath: path)
+        let opener = NSWorkspace.shared.urlForApplication(toOpen: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
+        NSWorkspace.shared.open(url)
+        if opener == quickTime {
+            for _ in 0..<4 {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                if appleScript("tell application id \"\(quickTime)\" to play front document") != nil { break }
+            }
+        }
+        return "Playing \(url.lastPathComponent)."
+    }
+
+    /// Play or pause in the player you're in (QuickTime, IINA, VLC, Music, Spotify, TV), if it's one.
+    static func controlPlayer(_ app: NSRunningApplication, _ action: String) async -> String? {
+        guard let id = app.bundleIdentifier, action == "play" || action == "pause" else { return nil }
+        let name = app.localizedName ?? "the player"
+        switch id {
+        case quickTime:
+            guard appleScript("tell application id \"\(quickTime)\" to \(action) front document") != nil else { return nil }
+        case "com.apple.Music", "com.spotify.client", "com.apple.TV":
+            guard appleScript("tell application id \"\(id)\" to \(action)") != nil else { return nil }
+        case "com.colliderli.iina", "org.videolan.vlc", "io.mpv":
+            app.activate()
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            _ = ScreenControl.press("space")
+        default:
+            return nil
+        }
+        return action == "play" ? "Playing in \(name)." : "Paused \(name)."
+    }
+
+    /// A file with exactly this name ("interview.mp4") in your home folder, through Spotlight.
+    static func findByName(_ name: String) async -> String? {
+        guard !name.contains("/"), !(name as NSString).pathExtension.isEmpty else { return nil }
+        let output = await run("/usr/bin/mdfind", ["-onlyin", NSHomeDirectory(), "-name", name], timeout: 8)
+        return output.split(separator: "\n").map(String.init)
+            .first { ($0 as NSString).lastPathComponent.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
     /// The files selected in Finder, one path a line, when Finder is the app you're in.
     static func finderSelection() -> String? {
         guard ScreenControl.workingApp()?.bundleIdentifier == "com.apple.finder" else { return nil }

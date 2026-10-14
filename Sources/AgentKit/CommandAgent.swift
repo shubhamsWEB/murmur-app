@@ -92,7 +92,7 @@ public final class CommandAgent {
     /// at something on the screen, so the model gets a look at it before it does anything.
     nonisolated static func pointsAtScreen(_ utterance: String) -> Bool {
         let text = QuickCommands.clean(utterance)
-        return text.range(of: #"\b(this|that|these|those)\b(?! (morning|afternoon|evening|night|week|weekend|month|year|time|way)\b)|\bhere\b|\bon (my |the )?screen\b|\b(i'?m|i am) (watching|looking at|reading|seeing|on|playing|listening to)\b|\bthe one\b|\bcurrent (video|page|tab|song|file|window)\b"#,
+        return text.range(of: #"\b(this|that|these|those)\b(?! (morning|afternoon|evening|night|week|weekend|month|year|time|way)\b)|\b(first|second|third|fourth|fifth|last|top|next) (one|video|file|result|item|song|link|clip|movie|photo|picture|document|pdf)\b|\bhere\b|\bon (my |the )?screen\b|\b(i'?m|i am) (watching|looking at|reading|seeing|on|playing|listening to)\b|\bthe one\b|\bcurrent (video|page|tab|song|file|window)\b"#,
                           options: .regularExpression) != nil
     }
 
@@ -128,6 +128,9 @@ public final class CommandAgent {
     public func run(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool = true,
                     editable: Bool = false) async {
         let started = Date()
+        // In Finder what's selected is files (⌘C copies their names, which looked like selected text): they reach
+        // the model as Finder's selection instead.
+        let selection = ScreenControl.workingApp()?.bundleIdentifier == "com.apple.finder" ? nil : selection
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -315,16 +318,22 @@ public final class CommandAgent {
     }
 
     private func route(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool) async {
-        var context = "Front app: \(frontApp ?? "unknown")."
+        var context = "Front app (where the user is): \(frontApp ?? "unknown")."
+        if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
+        if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
         if let session = CodingSession.current {
             context += "\nCoding session: \(session.summary) Requests about that project (\"add a login page\", "
                 + "\"make it dark\", \"fix the error\", \"run it\", \"ask Claude to add tests\") go to it with "
                 + "coding_followup, not build_with_agent. A new, different project is build_with_agent."
         }
-        if let browser = BrowserControl.target(), let tab = await BrowserControl.currentTab(in: browser) {
-            context += "\nBrowser: \(browser.name), current tab: \(tab.title.prefix(120)) — \(tab.url.prefix(300))"
+        if let browser = BrowserControl.inFront(), let tab = await BrowserControl.currentTab(in: browser) {
+            context += "\nBrowser tab in front: \(tab.title.prefix(120)) — \(tab.url.prefix(300))"
         }
-        if selection?.isEmpty ?? true, Self.pointsAtScreen(utterance) {
+        // "this video", "the first one", or anything said in Finder or a player: look at the screen before acting.
+        let working = ScreenControl.workingApp()?.bundleIdentifier ?? ""
+        let screenApps: Set<String> = ["com.apple.finder", MacActions.quickTime, "com.colliderli.iina", "org.videolan.vlc",
+                                       "com.apple.Music", "com.apple.TV", "com.apple.Preview"]
+        if selection?.isEmpty ?? true, Self.pointsAtScreen(utterance) || screenApps.contains(working) {
             context += "\n" + (await lookAtScreen())
         }
         if let selection, !selection.isEmpty {
@@ -535,9 +544,14 @@ public final class CommandAgent {
         case "list_running_apps": return Outcome(result: MacActions.runningApps())
         case "open_folder": return Outcome(result: MacActions.openFolder(text("name")))
         case "open_file":
-            // A file seen on the screen or selected in Finder: open that one, not a search's best guess.
-            let path = (text("query") as NSString).expandingTildeInPath
+            // A file seen on the screen or selected in Finder: open that one (by its path, or its exact name), not a
+            // search's best guess. play: start a video or song.
+            var path = (text("query") as NSString).expandingTildeInPath
+            if !path.hasPrefix("/"), let exact = await MacActions.findByName(text("query")) { path = exact }
             if path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) {
+                if text("play") == "true", MacActions.isPlayable(path) {
+                    return Outcome(result: await MacActions.play(file: path))
+                }
                 NSWorkspace.shared.open(URL(fileURLWithPath: path))
                 return Outcome(result: "Opened \(URL(fileURLWithPath: path).lastPathComponent).")
             }
@@ -574,10 +588,9 @@ public final class CommandAgent {
         case "lock_screen": return Outcome(result: MacActions.lockScreen())
         case "media_control":
             let action = text("action")
-            // A video in the browser: pause or play it in the page (the media key only toggles, and may pick another
-            // player). Anything else, or no page access: the media keys.
-            if action == "pause" || action == "play", let browser = BrowserControl.target(preferred: browserInUse),
-               await canScript(browser), let done = await BrowserControl.media(action, in: browser) {
+            // Where you are first: Finder's selected video, the player in front, the page in front. Then a page this
+            // command opened, or the browser you used last. Anything else: the media keys (they only toggle).
+            if action == "pause" || action == "play", let done = await mediaWhereYouAre(action) {
                 return Outcome(result: done)
             }
             return Outcome(result: MacActions.media(action))
@@ -787,11 +800,30 @@ public final class CommandAgent {
         }
     }
 
+    /// Play or pause what the user means, where they are: Finder's selected video or song, the player in front, the
+    /// page in front; then a page this command opened or the browser used last (for "pause the video" said from
+    /// another app). Nil: nothing there, so the media keys.
+    private func mediaWhereYouAre(_ action: String) async -> String? {
+        let working = ScreenControl.workingApp()
+        if working?.bundleIdentifier == "com.apple.finder" {
+            if action == "play", let first = MacActions.finderSelection()?.split(separator: "\n").first.map({ String($0) }),
+               MacActions.isPlayable(first) {
+                return await MacActions.play(file: first)
+            }
+            return nil
+        }
+        if let working, let done = await MacActions.controlPlayer(working, action) { return done }
+        if let browser = BrowserControl.inFront() ?? BrowserControl.target(preferred: browserInUse),
+           await canScript(browser), let done = await BrowserControl.media(action, in: browser) {
+            return done
+        }
+        return nil
+    }
+
     /// What "this" points at, for a request that points at the screen: Finder's selection, and the front app's screen
     /// (the page itself, in a browser), with its buttons and links to act on.
     private func lookAtScreen() async -> String {
         var parts: [String] = []
-        if let picked = MacActions.finderSelection() { parts.append("Selected in Finder:\n" + picked) }
         if let browser = BrowserControl.inFront(), await canScript(browser),
            case .success(let page) = await BrowserControl.read(in: browser, limit: 3500) {
             parts.append("The page in front:\n" + page)
@@ -959,11 +991,17 @@ public final class CommandAgent {
                 + "on my latest LinkedIn post\", \"how many…\", \"what's…\") is only done when you call reply with the "
                 + "actual answer: the numbers, names or text. reply ends the command: use it once, for the final "
                 + "answer, never to describe a step.",
-            "- \"This\", \"that\", \"here\", \"the one I'm watching\" (with no selected text) mean what's on the screen "
-                + "now, shown below: act on that very thing. A video on the page: media_control play/pause, or "
-                + "browser_click its title to open it. A video or file selected in Finder or open in a player: "
-                + "open_file with its path, then media_control play (or press_keys \"space\"). Never web_search or "
-                + "search_files for something that's already on the screen.",
+            "- Work where the user is. The front app below (its window, Finder's selection, the browser tab when a "
+                + "browser is in front, and the screen when the request points at it) is where \"this\", \"that\", "
+                + "\"the first one\", \"play\" and \"open\" happen, unless the user names another app or a website. "
+                + "Finder: videos, songs and documents are the user's own files: open_file with the file's path or "
+                + "its exact name from the screen (play true to play a video or song); \"play this\" with a video "
+                + "selected: media_control play. A player (QuickTime, Music, Spotify, IINA, VLC): media_control. A "
+                + "browser: the page tools. Go to YouTube or the web only when the user names a site or asks to search "
+                + "online; never web_search or search_files for something already on the screen.",
+            "- Documents: open_file with the user's own distinctive words (\"Q3 sales report\", \"lease 2025\"), never "
+                + "a generic word like \"document\". If it says it's showing matches, the user picks; don't open "
+                + "something else instead.",
             "- Long pages: browser_read gives the text from where the page is scrolled to. To understand a whole page "
                 + "(a long post, its comments, a feed, an article), browser_scroll down and read on until the page says "
                 + "it's the end or you have what's needed; click \"see more\", \"load more comments\" and similar to "
@@ -1001,9 +1039,11 @@ public final class CommandAgent {
             tool("list_running_apps", "List the apps that are running"),
             tool("open_folder", "Open a standard folder in Finder",
                  ["name": ("string", "downloads, documents, desktop, pictures, music, movies or home")]),
-            tool("open_file", "Open the user's own file: by its full path when you know it (Finder's selection, the "
-                 + "screen), else the best match for a description, e.g. \"my resume pdf\"",
-                 ["query": ("string", "the file's full path, or the file as described")]),
+            tool("open_file", "Open the user's own file: by its full path or exact name when you know it (Finder's "
+                 + "selection, a name on the screen), else the best match for a description with the user's own words, "
+                 + "e.g. \"lease 2025 pdf\"",
+                 ["query": ("string", "the file's full path, its exact name, or the user's description"),
+                  "play": ("string", "true to start playing a video or song")], required: ["query"]),
             tool("search_files", "Search the user's files by meaning and show the results",
                  ["query": ("string", "what to look for")]),
             tool("open_url", "Open a website, in a named browser if the user said one (\"open youtube on chrome\")",
@@ -1015,7 +1055,8 @@ public final class CommandAgent {
             tool("mute", "Mute or unmute the sound", ["on": ("boolean", "true to mute")]),
             tool("brightness", "Make the screen brighter or dimmer", ["direction": ("string", "up or down")]),
             tool("lock_screen", "Lock the screen"),
-            tool("media_control", "Pause, resume, or skip what's playing (a YouTube video, Spotify, Music): the media keys",
+            tool("media_control", "Play or pause what's where the user is (the video selected in Finder, the player in "
+                 + "front, the page's video), or skip what's playing",
                  ["action": ("string", "pause, play, next or previous")]),
             tool("set_brightness", "Set the screen brightness to a percentage", ["percent": ("number", "0 to 100")]),
             tool("set_bluetooth", "Turn Bluetooth on or off", ["on": ("boolean", "true for on, false for off")]),
