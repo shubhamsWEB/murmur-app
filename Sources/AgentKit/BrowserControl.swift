@@ -49,7 +49,7 @@ public enum BrowserControl {
 
     // MARK: Running
 
-    enum Failure: Error {
+    public enum Failure: Error {
         case message(String)
     }
 
@@ -112,7 +112,7 @@ public enum BrowserControl {
         onNeedsPermission?(message)
     }
 
-    static func describe(_ failure: Failure, _ browser: Browser) -> String {
+    public static func describe(_ failure: Failure, _ browser: Browser) -> String {
         switch failure {
         case .message("switch off"):
             return "Can't work inside \(browser.name) pages: its \"Allow JavaScript from Apple Events\" switch is off "
