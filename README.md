@@ -33,6 +33,10 @@ files from a description, and does small jobs for you. Speech is recognised on y
 Everything starts with one key: hold **fn** and speak. Murmur works out whether you’re writing or asking it to do
 something.
 
+
+https://github.com/user-attachments/assets/f2899c74-865d-43b0-b801-a354198d21c6
+
+
 ## Install
 
 1. [Download **Murmur.dmg**](https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur.dmg), open it,
