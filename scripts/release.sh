@@ -30,7 +30,12 @@ fi
 cp "$DMG" "$LATEST"
 
 NOTES="$(mktemp)"
-cat > "$NOTES" <<TXT
+# What's new in this version, when scripts/release-notes/<version>.md exists.
+if [[ -f "scripts/release-notes/$VERSION.md" ]]; then
+  cat "scripts/release-notes/$VERSION.md" > "$NOTES"
+  printf '\n' >> "$NOTES"
+fi
+cat >> "$NOTES" <<TXT
 Download **Murmur.dmg** below, open it, and drag Murmur to Applications.
 
 Needs a Mac with Apple silicon on macOS 14 or later. On first launch Murmur asks for the microphone and
