@@ -88,6 +88,14 @@ public final class CommandAgent {
                           options: .regularExpression) != nil
     }
 
+    /// "open this video", "play that", "what's this error", "click here", "the one I'm watching": the request points
+    /// at something on the screen, so the model gets a look at it before it does anything.
+    nonisolated static func pointsAtScreen(_ utterance: String) -> Bool {
+        let text = QuickCommands.clean(utterance)
+        return text.range(of: #"\b(this|that|these|those)\b(?! (morning|afternoon|evening|night|week|weekend|month|year|time|way)\b)|\bhere\b|\bon (my |the )?screen\b|\b(i'?m|i am) (watching|looking at|reading|seeing|on|playing|listening to)\b|\bthe one\b|\bcurrent (video|page|tab|song|file|window)\b"#,
+                          options: .regularExpression) != nil
+    }
+
     /// Page and screen dumps are thousands of characters each and slow every later step (a slow step is a timed-out
     /// one): keep the latest two in full and cut older ones down.
     nonisolated static func compacted(_ turns: [RouterTurn]) -> [RouterTurn] {
@@ -316,6 +324,9 @@ public final class CommandAgent {
         if let browser = BrowserControl.target(), let tab = await BrowserControl.currentTab(in: browser) {
             context += "\nBrowser: \(browser.name), current tab: \(tab.title.prefix(120)) — \(tab.url.prefix(300))"
         }
+        if selection?.isEmpty ?? true, Self.pointsAtScreen(utterance) {
+            context += "\n" + (await lookAtScreen())
+        }
         if let selection, !selection.isEmpty {
             context += "\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n\(selection.prefix(8000))\n\"\"\""
         }
@@ -524,6 +535,12 @@ public final class CommandAgent {
         case "list_running_apps": return Outcome(result: MacActions.runningApps())
         case "open_folder": return Outcome(result: MacActions.openFolder(text("name")))
         case "open_file":
+            // A file seen on the screen or selected in Finder: open that one, not a search's best guess.
+            let path = (text("query") as NSString).expandingTildeInPath
+            if path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                return Outcome(result: "Opened \(URL(fileURLWithPath: path).lastPathComponent).")
+            }
             host.progress("Finding “\(text("query"))”…")
             return Outcome(result: await host.openFile(text("query")), finished: true)
         case "search_files":
@@ -770,6 +787,22 @@ public final class CommandAgent {
         }
     }
 
+    /// What "this" points at, for a request that points at the screen: Finder's selection, and the front app's screen
+    /// (the page itself, in a browser), with its buttons and links to act on.
+    private func lookAtScreen() async -> String {
+        var parts: [String] = []
+        if let picked = MacActions.finderSelection() { parts.append("Selected in Finder:\n" + picked) }
+        if let browser = BrowserControl.inFront(), await canScript(browser),
+           case .success(let page) = await BrowserControl.read(in: browser, limit: 3500) {
+            parts.append("The page in front:\n" + page)
+        } else {
+            parts.append("The screen in front:\n" + (await ScreenControl.read()))
+        }
+        host.log("command: the request points at the screen; looked first")
+        return "The request points at something on the screen (\"this\", \"that\", \"here\"). What's there now:\n"
+            + parts.joined(separator: "\n\n")
+    }
+
     /// Puts a page up for this command without piling up tabs: a tab that already has it comes to the front, and once
     /// this command has opened a page, the next ones load in that same tab. Otherwise a new tab, as before.
     private func showPage(_ url: URL, opened: String) async -> String {
@@ -926,6 +959,15 @@ public final class CommandAgent {
                 + "on my latest LinkedIn post\", \"how many…\", \"what's…\") is only done when you call reply with the "
                 + "actual answer: the numbers, names or text. reply ends the command: use it once, for the final "
                 + "answer, never to describe a step.",
+            "- \"This\", \"that\", \"here\", \"the one I'm watching\" (with no selected text) mean what's on the screen "
+                + "now, shown below: act on that very thing. A video on the page: media_control play/pause, or "
+                + "browser_click its title to open it. A video or file selected in Finder or open in a player: "
+                + "open_file with its path, then media_control play (or press_keys \"space\"). Never web_search or "
+                + "search_files for something that's already on the screen.",
+            "- Long pages: browser_read gives the text from where the page is scrolled to. To understand a whole page "
+                + "(a long post, its comments, a feed, an article), browser_scroll down and read on until the page says "
+                + "it's the end or you have what's needed; click \"see more\", \"load more comments\" and similar to "
+                + "open hidden text. Don't answer from the first screen alone when the answer is further down.",
             "- Tabs: the browser's current tab is given below when there is one. If it already shows what's needed, "
                 + "work there (browser_read) rather than opening it again. open_url, web_search and site_search come to "
                 + "a tab that already has the page, and after your first page they load in that same tab, so never "
@@ -959,8 +1001,9 @@ public final class CommandAgent {
             tool("list_running_apps", "List the apps that are running"),
             tool("open_folder", "Open a standard folder in Finder",
                  ["name": ("string", "downloads, documents, desktop, pictures, music, movies or home")]),
-            tool("open_file", "Open the user's own file that best matches a description, e.g. \"my resume pdf\"",
-                 ["query": ("string", "the file as described")]),
+            tool("open_file", "Open the user's own file: by its full path when you know it (Finder's selection, the "
+                 + "screen), else the best match for a description, e.g. \"my resume pdf\"",
+                 ["query": ("string", "the file's full path, or the file as described")]),
             tool("search_files", "Search the user's files by meaning and show the results",
                  ["query": ("string", "what to look for")]),
             tool("open_url", "Open a website, in a named browser if the user said one (\"open youtube on chrome\")",

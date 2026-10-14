@@ -178,17 +178,45 @@ public enum BrowserControl {
     /// The page: address, title, its text, the links and buttons on it, its fields and any video playing.
     public static func read(in browser: Browser, limit: Int = 7000) async -> Result<String, Failure> {
         let code = "(() => {" + visible + labelOf + #"""
-          const text = (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, LIMIT);
-          const seen = new Set(), items = [];
+          // The part that scrolls: the page, or a panel inside it that Murmur scrolled (feeds, inboxes, chats).
+          const box = (window.__murmurBox && window.__murmurBox.isConnected) ? window.__murmurBox : null;
+          const root = box || document.body || document.documentElement;
+          const full = (root.innerText || '').replace(/\n{3,}/g, '\n\n');
+          const viewTop = box ? box.getBoundingClientRect().top : 0;
+          const viewBottom = box ? box.getBoundingClientRect().bottom : innerHeight;
+          const scrolledBy = box ? box.scrollTop : scrollY;
+          // Text from where the user is on the page, not from its top: find the first words in view in the page text.
+          let start = 0;
+          if (scrolledBy > 40) {
+            const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            const ratio = scrolledBy / Math.max(1, box ? box.scrollHeight : document.documentElement.scrollHeight);
+            let tries = 0;
+            while (w.nextNode() && tries < 600) {
+              const t = w.currentNode, el = t.parentElement, s = t.nodeValue.replace(/\s+/g, ' ').trim();
+              if (s.length < 15 || !el || el.closest('header,nav,aside,[role=navigation],[role=banner]')) continue;
+              const r = el.getBoundingClientRect();
+              if (r.height === 0 || r.bottom <= viewTop || r.top >= viewBottom) continue;
+              tries++;
+              const key = s.slice(0, 40);
+              let i = full.indexOf(key, Math.max(0, Math.floor(full.length * ratio) - 4000));
+              if (i < 0) i = full.indexOf(key);
+              if (i >= 0) { start = i; break; }
+            }
+          }
+          const text = (start > 0 ? '(… text above this point: scroll up or "top" for it)\n' : '') + full.slice(start, start + LIMIT);
+          // Links and buttons where the user is first, then further down, then above.
+          const seen = new Set(), found = [];
           for (const e of document.querySelectorAll('a[href],button,[role=button],[role=link],[role=tab],[role=menuitem],[role=option],input[type=submit],input[type=button],summary')) {
-            if (items.length >= 60) break;
+            if (found.length >= 500) break;
             if (!vis(e)) continue;
             const l = label(e).slice(0, 80);
             if (!l || seen.has(l)) continue;
             seen.add(l);
             const r = e.getBoundingClientRect();
-            items.push((e.tagName === 'A' ? 'link' : 'button') + ' "' + l + '"' + (r.top > innerHeight ? ' (further down)' : ''));
+            const where = r.bottom < 0 ? 2 : r.top > innerHeight ? 1 : 0;
+            found.push({ where, line: (e.tagName === 'A' ? 'link' : 'button') + ' "' + l + '"' + (where === 1 ? ' (further down)' : where === 2 ? ' (above)' : '') });
           }
+          const items = found.filter(f => f.where === 0).concat(found.filter(f => f.where === 1), found.filter(f => f.where === 2)).slice(0, 70).map(f => f.line);
           const fields = [];
           for (const e of document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,select,[contenteditable=true]')) {
             if (fields.length >= 15) break;
@@ -198,7 +226,8 @@ public enum BrowserControl {
           }
           const media = [...document.querySelectorAll('video,audio')].slice(0, 3).map(m => m.tagName.toLowerCase() + (m.paused ? ' (paused)' : ' (playing)'));
           return JSON.stringify({ url: location.href, title: document.title, text, items, fields, media,
-            at: Math.round(scrollY), height: document.documentElement.scrollHeight, view: innerHeight });
+            at: Math.round(scrolledBy), height: box ? box.scrollHeight : document.documentElement.scrollHeight,
+            view: box ? box.clientHeight : innerHeight });
         })()
         """#.replacingOccurrences(of: "LIMIT", with: String(limit))
         switch await evaluate(code, in: browser) {
@@ -304,18 +333,42 @@ public enum BrowserControl {
 
     /// "down", "up", "top", "bottom".
     public static func scroll(_ direction: String, in browser: Browser) async -> String {
-        let move: String
-        switch direction.lowercased() {
-        case "up": move = "scrollBy(0, -innerHeight * 0.85)"
-        case "top": move = "scrollTo(0, 0)"
-        case "bottom": move = "scrollTo(0, document.documentElement.scrollHeight)"
-        default: move = "scrollBy(0, innerHeight * 0.85)"
-        }
-        switch await evaluate("(() => { " + move + "; return 'ok'; })()", in: browser) {
+        // Scroll what actually scrolls: the page, or, when the page itself doesn't move (web apps like LinkedIn
+        // messaging, Gmail, Slack), the biggest scrolling panel on it. Remembered, so browser_read reads from there.
+        let code = #"""
+        ((dir) => {
+          const page = document.scrollingElement || document.documentElement;
+          let box = (window.__murmurBox && window.__murmurBox.isConnected) ? window.__murmurBox : page;
+          if (box === page && page.scrollHeight <= innerHeight + 5) {
+            let area = 0;
+            for (const e of document.querySelectorAll('div,main,section,ul,article')) {
+              if (e.scrollHeight <= e.clientHeight + 20) continue;
+              if (!/(auto|scroll)/.test(getComputedStyle(e).overflowY)) continue;
+              const r = e.getBoundingClientRect(), a = r.width * r.height;
+              if (a > area) { area = a; box = e; }
+            }
+          }
+          window.__murmurBox = box === page ? null : box;
+          const before = box === page ? scrollY : box.scrollTop;
+          const step = (box === page ? innerHeight : box.clientHeight) * 0.85;
+          const to = dir === 'up' ? before - step : dir === 'top' ? 0 : dir === 'bottom' ? box.scrollHeight : before + step;
+          if (box === page) scrollTo(0, to); else box.scrollTop = to;
+          const after = box === page ? scrollY : box.scrollTop;
+          const end = after + (box === page ? innerHeight : box.clientHeight) >= box.scrollHeight - 4;
+          return after === before ? (dir === 'up' || dir === 'top' ? 'at top' : 'at end') : (end ? 'end' : 'ok');
+        })(DIR)
+        """#.replacingOccurrences(of: "DIR", with: literal(direction.lowercased()))
+        switch await evaluate(code, in: browser) {
         case .failure(let failure): return describe(failure, browser)
-        case .success:
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            return "Scrolled \(direction)."
+        case .success(let result):
+            // Feeds load more as you scroll: give them a moment.
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            switch result {
+            case "at top": return "Already at the top of the page."
+            case "at end": return "Already at the end of the page (nothing more loaded)."
+            case "end": return "Scrolled \(direction): this is the end of the page."
+            default: return "Scrolled \(direction)."
+            }
         }
     }
 

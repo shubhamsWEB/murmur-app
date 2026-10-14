@@ -407,6 +407,21 @@ public enum MacActions {
     // MARK: Helpers
 
     @discardableResult
+    /// The files selected in Finder, one path a line, when Finder is the app you're in.
+    static func finderSelection() -> String? {
+        guard ScreenControl.workingApp()?.bundleIdentifier == "com.apple.finder" else { return nil }
+        let script = """
+        tell application "Finder" to set picked to selection as alias list
+        set out to ""
+        repeat with f in picked
+            set out to out & POSIX path of f & linefeed
+        end repeat
+        return out
+        """
+        guard let out = appleScript(script)?.trimmingCharacters(in: .whitespacesAndNewlines), !out.isEmpty else { return nil }
+        return String(out.prefix(2000))
+    }
+
     static func appleScript(_ source: String) -> String? {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
