@@ -35,7 +35,7 @@
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Murmur turns Bluetooth on or off when you ask it to.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Murmur asks QuickTime Player to open a recording at the moment that matched your search.</string>
+	<string>Murmur works in your apps and browser when you ask it to: adding a reminder or note, reading or clicking in a web page, opening a recording at the moment that matched your search.</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Murmur indexes the folders you choose so you can search them by describing what's inside. Everything stays on this Mac.</string>
 	<key>NSDocumentsFolderUsageDescription</key>

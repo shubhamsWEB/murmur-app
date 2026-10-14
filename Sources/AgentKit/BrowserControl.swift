@@ -1,0 +1,325 @@
+import AppKit
+
+/// Murmur's hands inside the browser you use (Chrome, Brave, Edge, Arc, Vivaldi, Safari), through Apple Events:
+/// the page's text, clicking and typing by what's on the page, scrolling, tabs, pausing a video. It works in your
+/// own browser, with your logins. It needs "Allow JavaScript from Apple Events" turned on in the browser (Chrome:
+/// View → Developer; Safari: Develop menu) and, once, macOS's "Murmur wants to control …" permission. Where it
+/// can't (Firefox, or the switch is off), commands fall back to reading the screen through Accessibility.
+@MainActor
+public enum BrowserControl {
+    public struct Browser: Sendable {
+        public let bundleID: String
+        public let name: String
+        let safari: Bool
+    }
+
+    static let chromiumIDs: Set<String> = [
+        "com.google.Chrome", "com.google.Chrome.canary", "com.google.Chrome.beta", "com.brave.Browser",
+        "com.microsoft.edgemac", "com.vivaldi.Vivaldi", "company.thebrowser.Browser", "org.chromium.Chromium",
+        "ai.perplexity.comet",
+    ]
+    static let safariIDs: Set<String> = ["com.apple.Safari", "com.apple.SafariTechnologyPreview"]
+
+    /// Told the user how to turn page access on (once a session).
+    private static var explainedSwitch = false
+    /// What to show the user when the browser's switch is off (set by the app: a HUD message).
+    public static var onNeedsPermission: ((String) -> Void)?
+
+    static func browser(for app: NSRunningApplication?) -> Browser? {
+        guard let app, let id = app.bundleIdentifier else { return nil }
+        if chromiumIDs.contains(id) { return Browser(bundleID: id, name: app.localizedName ?? id, safari: false) }
+        if safariIDs.contains(id) { return Browser(bundleID: id, name: app.localizedName ?? id, safari: true) }
+        return nil
+    }
+
+    /// The browser to act in: the app you're working in if it's one, else `preferred`, else one that's running.
+    public static func target(preferred bundleID: String? = nil) -> Browser? {
+        if let working = browser(for: ScreenControl.workingApp()) { return working }
+        let running = NSWorkspace.shared.runningApplications
+        if let bundleID, let app = running.first(where: { $0.bundleIdentifier == bundleID }), let found = browser(for: app) {
+            return found
+        }
+        return running.lazy.compactMap { browser(for: $0) }.first
+    }
+
+    /// The browser in front (or the one you were in when Murmur's window is in front), if it's a scriptable one.
+    public static func inFront() -> Browser? {
+        browser(for: ScreenControl.workingApp())
+    }
+
+    // MARK: Running
+
+    enum Failure: Error {
+        case message(String)
+    }
+
+    /// Runs JXA with the browser's bundle id, a mode and one argument.
+    private static func jxa(_ script: String, _ arguments: [String]) async -> Result<String, Failure> {
+        let output = await MacActions.run("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, "--"] + arguments,
+                                          timeout: 25)
+        if output.contains("execution error") || output.hasPrefix("Couldn't start") {
+            if output.range(of: #"(?i)javascript.*(turned off|apple ?events|not allowed)|allow javascript"#,
+                            options: .regularExpression) != nil {
+                return .failure(.message("switch off"))
+            }
+            if output.contains("-1743") || output.localizedCaseInsensitiveContains("not authorized") {
+                return .failure(.message("not authorized"))
+            }
+            return .failure(.message(String(output.prefix(300))))
+        }
+        return .success(output)
+    }
+
+    private static let runner = #"""
+    function run(argv) {
+      const id = argv[0], safari = argv[1] === "safari", code = argv[2];
+      const app = Application(id);
+      if (app.windows.length === 0) throw new Error("no window open");
+      const w = app.windows[0];
+      if (safari) return String(app.doJavaScript(code, { in: w.currentTab }));
+      return String(w.activeTab.execute({ javascript: code }));
+    }
+    """#
+
+    /// Runs JavaScript in the browser's current tab and returns what it evaluates to.
+    static func evaluate(_ code: String, in browser: Browser) async -> Result<String, Failure> {
+        let result = await jxa(runner, [browser.bundleID, browser.safari ? "safari" : "chromium", code])
+        if case .failure(.message(let why)) = result { explain(why, browser) }
+        return result
+    }
+
+    /// A JavaScript string literal for `text`.
+    static func literal(_ text: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [text]),
+              let array = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return String(array.dropFirst().dropLast())
+    }
+
+    private static func explain(_ why: String, _ browser: Browser) {
+        let message: String
+        switch why {
+        case "switch off":
+            message = browser.safari
+                ? "To work in Safari pages: Safari → Settings → Advanced → Show features for web developers, then Develop → Allow JavaScript from Apple Events."
+                : "To work in \(browser.name) pages: View → Developer → Allow JavaScript from Apple Events."
+        case "not authorized":
+            message = "Allow Murmur to control \(browser.name): System Settings → Privacy & Security → Automation."
+        default:
+            return
+        }
+        guard !explainedSwitch else { return }
+        explainedSwitch = true
+        onNeedsPermission?(message)
+    }
+
+    static func describe(_ failure: Failure, _ browser: Browser) -> String {
+        switch failure {
+        case .message("switch off"):
+            return "Can't work inside \(browser.name) pages: its \"Allow JavaScript from Apple Events\" switch is off "
+                + "(the user has been told how to turn it on). Use read_screen, click and type_text instead."
+        case .message("not authorized"):
+            return "macOS hasn't allowed Murmur to control \(browser.name) (Privacy & Security → Automation). Use "
+                + "read_screen, click and type_text instead."
+        case .message(let other):
+            return "Couldn't do that in \(browser.name): \(other)"
+        }
+    }
+
+    // MARK: Actions
+
+    static let visible = "const vis = e => { const r = e.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return false; const s = getComputedStyle(e); return s.visibility !== 'hidden' && s.display !== 'none'; };"
+    static let labelOf = "const label = e => (e.innerText || e.getAttribute('aria-label') || e.title || e.value || e.alt || '').trim().replace(/\\s+/g, ' ');"
+
+    /// The page: address, title, its text, the links and buttons on it, its fields and any video playing.
+    public static func read(in browser: Browser, limit: Int = 7000) async -> Result<String, Failure> {
+        let code = "(() => {" + visible + labelOf + #"""
+          const text = (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, LIMIT);
+          const seen = new Set(), items = [];
+          for (const e of document.querySelectorAll('a[href],button,[role=button],[role=link],[role=tab],[role=menuitem],[role=option],input[type=submit],input[type=button],summary')) {
+            if (items.length >= 60) break;
+            if (!vis(e)) continue;
+            const l = label(e).slice(0, 80);
+            if (!l || seen.has(l)) continue;
+            seen.add(l);
+            const r = e.getBoundingClientRect();
+            items.push((e.tagName === 'A' ? 'link' : 'button') + ' "' + l + '"' + (r.top > innerHeight ? ' (further down)' : ''));
+          }
+          const fields = [];
+          for (const e of document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,select,[contenteditable=true]')) {
+            if (fields.length >= 15) break;
+            if (!vis(e)) continue;
+            const l = (e.getAttribute('aria-label') || e.placeholder || (e.labels && e.labels[0] && e.labels[0].innerText) || e.name || e.type || 'field').trim().slice(0, 60);
+            fields.push('field "' + l + '"' + (e.value ? ' (has "' + String(e.value).slice(0, 40) + '")' : ''));
+          }
+          const media = [...document.querySelectorAll('video,audio')].slice(0, 3).map(m => m.tagName.toLowerCase() + (m.paused ? ' (paused)' : ' (playing)'));
+          return JSON.stringify({ url: location.href, title: document.title, text, items, fields, media,
+            at: Math.round(scrollY), height: document.documentElement.scrollHeight, view: innerHeight });
+        })()
+        """#.replacingOccurrences(of: "LIMIT", with: String(limit))
+        switch await evaluate(code, in: browser) {
+        case .failure(let failure): return .failure(failure)
+        case .success(let json):
+            guard let data = json.data(using: .utf8),
+                  let page = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .success(json)
+            }
+            var lines = ["Browser: \(browser.name) · \(page["title"] as? String ?? "") · \(page["url"] as? String ?? "")"]
+            if let at = page["at"] as? Int, let height = page["height"] as? Int, let view = page["view"] as? Int, height > view {
+                let percent = min(100, Int(Double(at + view) / Double(height) * 100))
+                lines.append("Scrolled \(percent)% of the page.")
+            }
+            if let media = page["media"] as? [String], !media.isEmpty { lines.append("Media: " + media.joined(separator: ", ")) }
+            lines.append("Page text:")
+            lines.append(page["text"] as? String ?? "")
+            if let fields = page["fields"] as? [String], !fields.isEmpty {
+                lines.append("Fields (browser_type into them by name):")
+                lines.append(contentsOf: fields)
+            }
+            if let items = page["items"] as? [String], !items.isEmpty {
+                lines.append("Links and buttons (browser_click them by their words):")
+                lines.append(contentsOf: items)
+            }
+            return .success(lines.joined(separator: "\n"))
+        }
+    }
+
+    /// Clicks the link or button whose words best match `target` (exact, then starts with, then contains).
+    public static func click(_ target: String, in browser: Browser) async -> String {
+        let code = "((want) => {" + visible + labelOf + #"""
+          want = want.toLowerCase().trim();
+          const all = [...document.querySelectorAll('a[href],button,[role=button],[role=link],[role=tab],[role=menuitem],[role=option],[role=checkbox],[role=switch],[role=radio],input[type=submit],input[type=button],input[type=checkbox],input[type=radio],summary,label,[onclick]')].filter(vis);
+          let best = null, score = 0;
+          for (const e of all) {
+            const l = label(e).toLowerCase();
+            if (!l) continue;
+            const s = l === want ? 4 : l.startsWith(want) ? 3 : l.includes(want) ? 2 : (want.includes(l) && l.length > 3) ? 1 : 0;
+            if (s > score) { best = e; score = s; if (s === 4) break; }
+          }
+          if (!best) return 'NOT_FOUND';
+          best.scrollIntoView({ block: 'center' });
+          best.click();
+          return 'Clicked ' + (best.tagName === 'A' ? 'link' : 'button') + ' "' + label(best).slice(0, 80) + '".';
+        })(
+        """# + literal(target) + ")"
+        switch await evaluate(code, in: browser) {
+        case .failure(let failure): return describe(failure, browser)
+        case .success(let result):
+            if result == "NOT_FOUND" {
+                return "Nothing on the page says \"\(target)\". browser_read to see the links and buttons, or browser_scroll."
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            return result
+        }
+    }
+
+    /// Types into the field named `field` (its label, placeholder or name; empty: the focused field, else the search
+    /// box, else the first one), as if typed, and submits its form when asked.
+    public static func type(_ text: String, into field: String, submit: Bool, in browser: Browser) async -> String {
+        let code = "((field, value, submit) => {" + visible + #"""
+          const all = [...document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]),textarea,[contenteditable=true],[contenteditable=""]')].filter(vis);
+          const name = e => [e.getAttribute('aria-label'), e.placeholder, e.name, e.id, e.labels && e.labels[0] && e.labels[0].innerText, e.title].filter(Boolean).join(' ').toLowerCase();
+          let el = null;
+          if (field) { const f = field.toLowerCase(); el = all.find(e => name(e).includes(f)); }
+          if (!el && all.includes(document.activeElement)) el = document.activeElement;
+          if (!el) el = all.find(e => /search|query|\bq\b/.test(name(e))) || all[0];
+          if (!el) return 'NO_FIELD';
+          el.scrollIntoView({ block: 'center' });
+          el.focus();
+          if (el.isContentEditable) {
+            document.execCommand('selectAll', false, null);
+            document.execCommand('insertText', false, value);
+          } else {
+            const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          const what = (name(el).trim().slice(0, 50) || 'the field');
+          if (!submit) return 'Typed into ' + what + '.';
+          if (el.form) { el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit(); return 'Typed into ' + what + ' and submitted.'; }
+          return 'NEEDS_ENTER';
+        })(
+        """# + literal(field) + ", " + literal(text) + ", " + (submit ? "true" : "false") + ")"
+        switch await evaluate(code, in: browser) {
+        case .failure(let failure): return describe(failure, browser)
+        case .success("NO_FIELD"):
+            return "There's no field to type into on this page."
+        case .success("NEEDS_ENTER"):
+            // No form to submit: press a real Return in the browser.
+            NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first?.activate()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            _ = ScreenControl.press("return")
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            return "Typed it and pressed Return."
+        case .success(let result):
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            return result
+        }
+    }
+
+    /// "down", "up", "top", "bottom".
+    public static func scroll(_ direction: String, in browser: Browser) async -> String {
+        let move: String
+        switch direction.lowercased() {
+        case "up": move = "scrollBy(0, -innerHeight * 0.85)"
+        case "top": move = "scrollTo(0, 0)"
+        case "bottom": move = "scrollTo(0, document.documentElement.scrollHeight)"
+        default: move = "scrollBy(0, innerHeight * 0.85)"
+        }
+        switch await evaluate("(() => { " + move + "; return 'ok'; })()", in: browser) {
+        case .failure(let failure): return describe(failure, browser)
+        case .success:
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            return "Scrolled \(direction)."
+        }
+    }
+
+    /// Pauses or plays the video or audio on the page. Nil when the page has none (or can't be reached).
+    public static func media(_ action: String, in browser: Browser) async -> String? {
+        let code = "((a) => { const ms = [...document.querySelectorAll('video,audio')]; if (!ms.length) return 'NO_MEDIA'; "
+            + "ms.forEach(m => { if (a === 'pause') m.pause(); else m.play(); }); return 'ok'; })(" + literal(action) + ")"
+        guard case .success(let result) = await evaluate(code, in: browser), result == "ok" else { return nil }
+        return action == "pause" ? "Paused the video in \(browser.name)." : "Playing the video in \(browser.name)."
+    }
+
+    /// The front window's tabs, numbered.
+    public static func tabs(in browser: Browser) async -> String {
+        let script = #"""
+        function run(argv) {
+          const app = Application(argv[0]), safari = argv[1] === "safari";
+          if (app.windows.length === 0) return "No window open.";
+          const w = app.windows[0];
+          const current = safari ? w.currentTab.index() : w.activeTabIndex();
+          return w.tabs().map((t, i) => (i + 1) + ". " + (safari ? t.name() : t.title()) + " — " + t.url() + (i + 1 === current ? "  (current)" : "")).join("\n");
+        }
+        """#
+        switch await jxa(script, [browser.bundleID, browser.safari ? "safari" : "chromium"]) {
+        case .failure(let failure): return describe(failure, browser)
+        case .success(let list): return "Tabs in \(browser.name):\n" + list
+        }
+    }
+
+    /// Switches to tab `n` (1-based), or the first whose title or address contains the words.
+    public static func switchTab(_ which: String, in browser: Browser) async -> String {
+        let script = #"""
+        function run(argv) {
+          const app = Application(argv[0]), safari = argv[1] === "safari", want = argv[2].toLowerCase();
+          if (app.windows.length === 0) return "No window open.";
+          const w = app.windows[0], tabs = w.tabs();
+          let i = parseInt(want, 10) - 1;
+          if (isNaN(i)) i = tabs.findIndex(t => ((safari ? t.name() : t.title()) + " " + t.url()).toLowerCase().includes(want));
+          if (i < 0 || i >= tabs.length) return "NOT_FOUND";
+          if (safari) w.currentTab = tabs[i]; else w.activeTabIndex = i + 1;
+          app.activate();
+          return "Switched to " + (safari ? tabs[i].name() : tabs[i].title()) + ".";
+        }
+        """#
+        switch await jxa(script, [browser.bundleID, browser.safari ? "safari" : "chromium", which]) {
+        case .failure(let failure): return describe(failure, browser)
+        case .success("NOT_FOUND"): return "No tab matches \"\(which)\". browser_tabs lists them."
+        case .success(let result):
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            return result
+        }
+    }
+}

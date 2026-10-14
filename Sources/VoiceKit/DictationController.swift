@@ -95,6 +95,7 @@ public final class DictationController: ObservableObject {
         }
         // Which app you're working in, so "what's on my screen" reads it even when Murmur's own window is in front.
         ScreenControl.watchFrontApp()
+        BrowserControl.onNeedsPermission = { [weak self] message in self?.hud.flash(message, seconds: 6, tone: .info) }
     }
 
     public var key: DictationKeyMonitor.Key { monitor.key }

@@ -70,6 +70,14 @@ Typing is the default, so Murmur only treats your words as a command when it’s
   much disk space is left?”), or a quick answer in a small panel.
 - **Coding:** “build a React app with a hello world page” starts Claude Code or Codex in Terminal, in a new project
   folder, with your own login.
+- **In your browser** (Chrome, Safari, Brave, Edge, Arc), Murmur works inside the page: reads it (“summarise this
+  page”), clicks links and buttons by their words, fills in and submits fields, scrolls, switches tabs, pauses the
+  video. Turn on **Allow JavaScript from Apple Events** once (Chrome: View → Developer; Safari: Develop menu).
+  Without it, Murmur reads and clicks the window through Accessibility instead.
+- **In your apps**, Murmur scripts the ones that allow it (Notes, Reminders, Calendar, Mail, Messages, Finder, Music,
+  System Events): “remind me to call Mom at 6”, “what’s on my calendar tomorrow”, “draft an email to Rahul”, “turn on
+  dark mode”. macOS asks once per app (“Murmur wants to control Reminders”).
+- **Mac switches:** Bluetooth, Wi-Fi, brightness to a percentage, volume, pause / resume / skip what’s playing.
 - **Asks before:** quitting an app, running a Shortcut, clicking anything risky, running a Terminal command that
   changes anything (commands that only read run straight away; `sudo` never runs), and starting Claude Code or
   Codex (unless you turn on *Start without asking*).
@@ -99,11 +107,11 @@ as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, C
 - **Your voice** is transcribed on your Mac by NVIDIA Parakeet on the Neural Engine. Audio is held in memory only
   while it’s transcribed, and never saved or sent anywhere.
 - **Your files** are indexed on your Mac, only in the folders you choose, with Google’s EmbeddingGemma.
-- **Your screen** is read only while a command needs it: the front window’s text and buttons through Accessibility,
+- **Your screen** is read only while a command needs it: the browser page’s text, or the front window’s text and buttons through Accessibility,
   or, if you allow **Screen Recording**, its text read from a picture of the window, on your Mac. The picture is
   never saved or sent.
 - **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, the command’s words, the front
-  app’s name, any selected text and, when a step reads the screen, that window’s text are sent to that provider.
+  app’s name, any selected text and, when a step reads the screen or a page, that text are sent to that provider.
   Never audio, never files, never pictures.
 - **Network use** is otherwise limited to the one-time model downloads from Hugging Face.
 

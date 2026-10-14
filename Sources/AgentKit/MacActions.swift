@@ -317,6 +317,30 @@ public enum MacActions {
         return output.isEmpty ? "Ran the shortcut \"\(name)\"." : "Shortcut \"\(name)\" said: \(output.prefix(500))"
     }
 
+    // MARK: Scripting apps
+
+    /// Words that make an AppleScript worth asking about first: it sends, deletes, quits, empties or runs a command.
+    static let riskyScript = #"(?i)\b(delete|send|erase|empty|remove|quit|shut ?down|restart|log ?out|do shell script|move\b[^\n]*\bto (the )?trash|close\b[^\n]*saving)\b"#
+
+    public static func scriptIsRisky(_ source: String) -> Bool {
+        source.range(of: riskyScript, options: .regularExpression) != nil
+    }
+
+    /// Runs an AppleScript (in osascript, so a "Murmur wants to control …" question never blocks Murmur) and returns
+    /// its result or error.
+    public static func appleScript(source: String) async -> String {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-\(UUID().uuidString).applescript")
+        do { try source.write(to: file, atomically: true, encoding: .utf8) } catch { return "Couldn't write the script." }
+        defer { try? FileManager.default.removeItem(at: file) }
+        let output = await run("/usr/bin/osascript", [file.path], timeout: 45)
+        if output.contains("-1743") || output.localizedCaseInsensitiveContains("not authorized to send apple events") {
+            return "macOS hasn't allowed Murmur to control that app. The user can allow it in System Settings → Privacy & "
+                + "Security → Automation."
+        }
+        if output.contains("execution error") || output.contains("syntax error") { return "Script error: \(output.prefix(600))" }
+        return output.isEmpty ? "Done (no result)." : "Result: \(output.prefix(4000))"
+    }
+
     // MARK: Bluetooth and Wi-Fi
 
     /// Bluetooth on or off, the way System Settings and `blueutil` do it (IOBluetooth's power preference). macOS

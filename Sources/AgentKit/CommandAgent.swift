@@ -62,6 +62,7 @@ public final class CommandAgent {
     /// Tools that only bring something up: on their own, they rarely finish a request with more than one part.
     private static let openingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "read_screen", "wait",
+        "browser_read", "browser_tabs", "browser_scroll",
     ]
 
     /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
@@ -73,7 +74,7 @@ public final class CommandAgent {
 
     private static let screenChangingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "click", "press_keys",
-        "type_text", "write_in_app",
+        "type_text", "write_in_app", "browser_click", "browser_type", "browser_scroll", "browser_switch_tab",
     ]
     /// A click on one of these asks you first.
     private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
@@ -349,7 +350,7 @@ public final class CommandAgent {
                 results.append(outcome.result)
                 // A look counts only if nothing changed the screen after it.
                 if Self.screenChangingTools.contains(call.name) { changedScreen = true; looked = false }
-                if call.name == "read_screen" { looked = true }
+                if call.name == "read_screen" || call.name == "browser_read" { looked = true }
                 var content = outcome.result
                 // The last call of a step that changed the screen carries a fresh look at it, so the model sees
                 // where it is (a page that loaded, a dialog that opened) without spending a step to ask.
@@ -442,7 +443,15 @@ public final class CommandAgent {
             return Outcome(result: MacActions.mute(on))
         case "brightness": return Outcome(result: MacActions.brightness(up: text("direction") != "down"))
         case "lock_screen": return Outcome(result: MacActions.lockScreen())
-        case "media_control": return Outcome(result: MacActions.media(text("action")))
+        case "media_control":
+            let action = text("action")
+            // A video in the browser: pause or play it in the page (the media key only toggles, and may pick another
+            // player). Anything else, or no page access: the media keys.
+            if action == "pause" || action == "play", let browser = BrowserControl.target(preferred: lastBrowser?.bundleID),
+               let done = await BrowserControl.media(action, in: browser) {
+                return Outcome(result: done)
+            }
+            return Outcome(result: MacActions.media(action))
         case "set_brightness":
             return Outcome(result: await MacActions.setBrightness(Int(args["percent"]?.number ?? 50)))
         case "set_bluetooth":
@@ -477,7 +486,75 @@ public final class CommandAgent {
         case "site_search":
             useBrowser(args["browser"])
             return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
+        case "browser_read":
+            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+                return Outcome(result: "No browser is open. open_url first.")
+            }
+            host.progress("Reading the page…")
+            switch await BrowserControl.read(in: browser) {
+            case .success(let page):
+                host.log("command: read the page in \(browser.name): \(page.count) characters")
+                return Outcome(result: page)
+            case .failure(let failure):
+                host.log("command: couldn't read the page in \(browser.name); reading the screen instead")
+                return Outcome(result: BrowserControl.describe(failure, browser) + "\n\n" + (await ScreenControl.read()))
+            }
+        case "browser_click":
+            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+                return Outcome(result: "No browser is open.")
+            }
+            let words = text("text")
+            if words.range(of: Self.riskyWords, options: .regularExpression) != nil {
+                guard await host.confirm("Click “\(words)”?", "This may send, buy, post or delete something.") else {
+                    return Outcome(result: "You said no to clicking \(words).", finished: true)
+                }
+            }
+            host.progress("Clicking \(words)…")
+            return Outcome(result: await BrowserControl.click(words, in: browser))
+        case "browser_type":
+            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+                return Outcome(result: "No browser is open.")
+            }
+            host.progress("Typing…")
+            return Outcome(result: await BrowserControl.type(text("text"), into: text("field"),
+                                                             submit: text("submit") == "true", in: browser))
+        case "browser_scroll":
+            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+                return Outcome(result: "No browser is open.")
+            }
+            return Outcome(result: await BrowserControl.scroll(text("direction"), in: browser))
+        case "browser_tabs":
+            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+                return Outcome(result: "No browser is open.")
+            }
+            return Outcome(result: await BrowserControl.tabs(in: browser))
+        case "browser_switch_tab":
+            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+                return Outcome(result: "No browser is open.")
+            }
+            return Outcome(result: await BrowserControl.switchTab(text("tab"), in: browser))
+        case "run_applescript":
+            let script = args["script"]?.description ?? ""
+            guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return Outcome(result: "No script given.")
+            }
+            if MacActions.scriptIsRisky(script) {
+                let purpose = text("purpose")
+                let title = purpose.isEmpty ? "Run this script?" : purpose.capitalizedFirst + "?"
+                guard await host.confirm(title, String(script.prefix(1200))) else {
+                    return Outcome(result: "The user chose not to run it.", finished: true)
+                }
+            }
+            host.progress(text("purpose").isEmpty ? "Working in the app…" : text("purpose") + "…")
+            let result = await MacActions.appleScript(source: script)
+            host.log("command: ran an AppleScript → \(result.hasPrefix("Script error") ? "error" : "ok")")
+            return Outcome(result: result)
         case "read_screen":
+            // In a browser, the page itself says more than its window does.
+            if let browser = BrowserControl.inFront(), case .success(let page) = await BrowserControl.read(in: browser) {
+                host.log("command: read the page in \(browser.name): \(page.count) characters")
+                return Outcome(result: page)
+            }
             host.progress("Looking at the screen…")
             let screen = await ScreenControl.read()
             let controls = screen.split(separator: "\n").filter { $0.hasPrefix("[") }.count
@@ -552,6 +629,9 @@ public final class CommandAgent {
     private func screenAfterChange(_ tool: String) async -> String {
         let web: Set<String> = ["open_url", "web_search", "site_search"]
         try? await Task.sleep(nanoseconds: web.contains(tool) ? 2_000_000_000 : 700_000_000)
+        if let browser = BrowserControl.inFront(), case .success(let page) = await BrowserControl.read(in: browser, limit: 3500) {
+            return "\n\nThe page now:\n\(page)"
+        }
         let screen = await ScreenControl.read()
         return "\n\nThe screen now:\n\(screen)"
     }
@@ -607,8 +687,25 @@ public final class CommandAgent {
                 + "tools don't cover. After an action that changes the screen you are shown the new screen with its "
                 + "[n] numbers; use only numbers from the latest screen. Keep going until the whole request is done, "
                 + "then call done.",
+            "- In the browser (Chrome, Safari, Brave, Edge, Arc), use the browser tools: they work inside the page and "
+                + "are faster and surer than read_screen. browser_read gives the page's address, full text, fields and "
+                + "links/buttons; browser_click clicks a link or button by its words (\"the first video\": click its "
+                + "title words); browser_type types into a field by its name (submit true to search or send the form); "
+                + "browser_scroll (down, up, top, bottom) for more of the page; browser_tabs and browser_switch_tab; "
+                + "media_control pauses or plays the page's video. To summarise or answer about a page: browser_read, "
+                + "then reply from its text. If a browser tool says it can't work in pages, use read_screen and click.",
+            "- Apps that can be scripted (Notes, Reminders, Calendar, Mail, Messages, Contacts, Finder, Music, "
+                + "Safari, System Events…): run_applescript does it directly, without clicking: e.g. tell application "
+                + "\"Reminders\" to make new reminder with properties {name:\"Call Mom\", remind me date:(current date) + "
+                + "3600}; tell application \"Notes\" to make new note with properties {body:\"<h1>Title</h1>text\"}; "
+                + "tell application \"Calendar\" to get summary of every event of calendar 1 whose start date > (current "
+                + "date); tell application \"Mail\" to make new outgoing message with properties {subject:…, content:…, "
+                + "visible:true}; tell application \"System Events\" to tell appearance preferences to set dark mode to "
+                + "true; tell application \"Finder\" to … . Prefer it over clicking through an app. Scripts that send, "
+                + "delete, quit or empty something are shown to the user first. If a script fails, read the error, fix "
+                + "it and try again, or use the app's screen instead.",
             "- Websites: open the result page directly when you can: site_search (YouTube, Amazon, GitHub, Maps, "
-                + "Wikipedia…) or open_url with a search URL; then read_screen and click what the user wants "
+                + "Wikipedia…) or open_url with a search URL; then browser_read and browser_click what the user wants "
                 + "(\"the first video\": the first link that is a video title, not an ad or a channel). YouTube sorted "
                 + "by views (\"the most viewed\"): open_url https://www.youtube.com/results?search_query=<words>&sp=CAM%253D "
                 + "then click the first video title; if the page isn't sorted, use its Filters button, Sort by, View "
@@ -691,6 +788,20 @@ public final class CommandAgent {
                  + "sound, privacy, keyboard…) or \"app store updates\"", ["pane": ("string", "the pane")]),
             tool("site_search", "Search a website in the browser (youtube, google, amazon, github, maps, wikipedia, "
                  + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
+            tool("browser_read", "Read the page in the browser: address, title, its text, fields, links and buttons"),
+            tool("browser_click", "Click a link or button on the browser page by its words",
+                 ["text": ("string", "the link's or button's words, as shown")]),
+            tool("browser_type", "Type into a field on the browser page (by its label or placeholder; empty: the "
+                 + "focused or search field), optionally submitting",
+                 ["field": ("string", "the field's label or placeholder, or empty"), "text": ("string", "what to type"),
+                  "submit": ("boolean", "true to submit (search, send the form)")]),
+            tool("browser_scroll", "Scroll the browser page", ["direction": ("string", "down, up, top or bottom")]),
+            tool("browser_tabs", "List the tabs in the browser's front window"),
+            tool("browser_switch_tab", "Switch to a browser tab by number or by words in its title or address",
+                 ["tab": ("string", "tab number or words")]),
+            tool("run_applescript", "Run an AppleScript to do something in a scriptable app (Notes, Reminders, "
+                 + "Calendar, Mail, Messages, Finder, Music, System Events…) and get its result",
+                 ["script": ("string", "the AppleScript"), "purpose": ("string", "what it does, in a few words")]),
             tool("read_screen", "See the front app's window: the text on it, and its buttons, links and fields, numbered"),
             tool("click", "Click element [n] from the latest read_screen", ["id": ("number", "the element's number")]),
             tool("type_text", "Type text into the front app (optionally into field [n] first; submit presses Return)",
@@ -722,4 +833,8 @@ public final class CommandAgent {
         }
         return list
     }
+}
+
+private extension String {
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }

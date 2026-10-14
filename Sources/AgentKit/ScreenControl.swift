@@ -44,6 +44,14 @@ public enum ScreenControl {
         lastOtherApp = app
     }
 
+    /// The app you're working in: the front one, or the one you were in when Murmur's own window is in front.
+    public static func workingApp() -> NSRunningApplication? {
+        watchFrontApp()
+        if let front = NSWorkspace.shared.frontmostApplication,
+           front.processIdentifier != ProcessInfo.processInfo.processIdentifier { return front }
+        return lastOtherApp.flatMap { $0.isTerminated ? nil : $0 }
+    }
+
     /// The app whose screen to read: the front one, or the one you were in when Murmur is in front.
     private static func targetApp() async -> NSRunningApplication? {
         watchFrontApp()
