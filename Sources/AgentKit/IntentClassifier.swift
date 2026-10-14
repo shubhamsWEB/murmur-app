@@ -91,7 +91,7 @@ public enum IntentClassifier {
         // While Claude Code / Codex is building something: "add a login page to it", "make the app dark", "run it",
         // "fix the error", "tell Claude to add tests" are for that session.
         if CodingSession.current != nil, focus != .textField || frontApp == "Terminal",
-           cleaned.range(of: #"^(add|change|make|fix|update|remove|delete|rename|run|start|restart|stop|deploy|refactor|style|test|write tests|commit|push|install|use|switch|replace|move|show|implement|create|build|tell (claude|codex)|ask (claude|codex))\b.*\b(it|app|project|site|website|page|screen|component|button|feature|bug|error|tests?|code|api|backend|frontend|server|database|design|theme|login|signup|dark mode|readme|repo|claude|codex)\b"#,
+           cleaned.range(of: #"^(add|change|make|fix|update|remove|delete|rename|run|start|restart|deploy|refactor|style|test|write tests|commit|push|install|use|switch|replace|move|implement|create|build|tell (claude|codex)|ask (claude|codex))\b.*\b(it|app|project|site|website|page|screen|component|button|feature|bug|error|tests?|code|api|backend|frontend|server|database|design|theme|login|signup|dark mode|readme|repo|claude|codex)\b"#,
                          options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "for the coding session")
         }
