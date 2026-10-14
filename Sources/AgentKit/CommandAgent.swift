@@ -66,6 +66,13 @@ public final class CommandAgent {
     private var openedPage = false
     /// The user said yes to sending a message in this command: Return in a chat app doesn't ask again.
     private var messageApproved = false
+    /// What this command did, for the next one ("and also ask her…").
+    private var did: [String] = []
+    /// Tools that only look: not worth remembering as something done.
+    private static let lookingTools: Set<String> = [
+        "read_screen", "browser_read", "browser_scroll", "browser_tabs", "wait", "app_dictionary", "find_apps",
+        "list_running_apps", "list_shortcuts",
+    ]
     /// Whether each browser's pages can be scripted, checked once per command.
     private var pageAccess: [String: Bool] = [:]
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
@@ -140,6 +147,9 @@ public final class CommandAgent {
         openedIn = nil
         openedPage = false
         messageApproved = false
+        did = []
+        let app = ScreenControl.workingApp()?.localizedName ?? frontApp
+        defer { CommandMemory.add(utterance, app: app, did: did) }
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
@@ -328,6 +338,10 @@ public final class CommandAgent {
         context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
         if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
         if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
+        if let earlier = CommandMemory.summary() {
+            context += "\nEarlier commands, oldest first (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" "
+                + "refer to):\n\(earlier)"
+        }
         if let session = CodingSession.current {
             context += "\nCoding session: \(session.summary) Requests about that project (\"add a login page\", "
                 + "\"make it dark\", \"fix the error\", \"run it\", \"ask Claude to add tests\") go to it with "
@@ -531,7 +545,18 @@ public final class CommandAgent {
         lastBrowser = app
     }
 
+    /// Runs a tool, and remembers what it did for the next command.
     private func execute(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
+        let outcome = await perform(tool, args)
+        if !Self.lookingTools.contains(tool) {
+            let shown = args.keys.sorted().map { "\($0): \(String(args[$0]?.description.prefix(80) ?? ""))" }
+                .joined(separator: ", ")
+            did.append("\(tool)(\(shown)) → \(outcome.result.prefix(160))")
+        }
+        return outcome
+    }
+
+    private func perform(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
         func text(_ key: String) -> String { args[key]?.description.trimmingCharacters(in: .whitespaces) ?? "" }
         switch tool {
         case "open_app":
@@ -1081,6 +1106,10 @@ public final class CommandAgent {
                 + "app_dictionary first when unsure of the app's words. Apps that can't be scripted (WhatsApp, Slack, "
                 + "Teams, most Electron apps): open_app, read_screen, then click and scroll to the right view and read "
                 + "again. Then reply with the details asked for.",
+            "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
+                + "page. \"And also ask when she's coming back\" after messaging Roma on WhatsApp → send_message to Roma "
+                + "on WhatsApp with that question; \"play it\" after opening a video → play that video; \"do it again\" → "
+                + "repeat it.",
             "- Messages to people (\"send a message to Riya on WhatsApp saying…\", \"text Mom that I'm late\", \"tell "
                 + "the team on Slack…\"): send_message with the app, who it's for and the message in the user's words "
                 + "(fix only obvious transcription slips). It asks the user first. If its result says to finish on the "

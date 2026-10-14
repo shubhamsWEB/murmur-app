@@ -13,7 +13,8 @@ enum ConfirmPanel {
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             panel.standardWindowButton(button)?.isHidden = true
         }
-        panel.level = .modalPanel
+        // Above every window, floating panels included: a question nobody sees is a command that never finishes.
+        panel.level = .screenSaver
         panel.isMovableByWindowBackground = true
         // On every Space, over full-screen apps. (.moveToActiveSpace can't be combined with .canJoinAllSpaces:
         // AppKit throws, and every confirmation crashed Murmur.)
@@ -39,7 +40,10 @@ enum ConfirmPanel {
         }
         // Back to the app you were in afterwards, so the command's next steps (typing, clicking) land there.
         let previous = NSWorkspace.shared.frontmostApplication
+        // macOS can decline a menu bar app's request to come forward: ask both ways, and show the panel regardless.
         NSApp.activate(ignoringOtherApps: true)
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        panel.orderFrontRegardless()
         panel.makeKeyAndOrderFront(nil)
         NSApp.runModal(for: panel)
         panel.orderOut(nil)

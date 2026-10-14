@@ -350,6 +350,7 @@ public enum MacActions {
     /// Runs an AppleScript (in osascript, so a "Murmur wants to control …" question never blocks Murmur) and returns
     /// its result or error.
     public static func appleScript(source: String) async -> String {
+        await Permissions.automation(forScript: source)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-\(UUID().uuidString).applescript")
         do { try source.write(to: file, atomically: true, encoding: .utf8) } catch { return "Couldn't write the script." }
         defer { try? FileManager.default.removeItem(at: file) }
@@ -422,6 +423,7 @@ public enum MacActions {
         let opener = NSWorkspace.shared.urlForApplication(toOpen: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
         NSWorkspace.shared.open(url)
         if opener == quickTime {
+            await Permissions.automation(quickTime)
             for _ in 0..<4 {
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 if runs("tell application id \"\(quickTime)\" to play front document") { break }
@@ -444,6 +446,7 @@ public enum MacActions {
     /// Play or pause in the player you're in (QuickTime, IINA, VLC, Music, Spotify, TV), if it's one.
     static func controlPlayer(_ app: NSRunningApplication, _ action: String) async -> String? {
         guard let id = app.bundleIdentifier, action == "play" || action == "pause" else { return nil }
+        if [quickTime, "com.apple.Music", "com.spotify.client", "com.apple.TV"].contains(id) { await Permissions.automation(id) }
         let name = app.localizedName ?? "the player"
         switch id {
         case quickTime:

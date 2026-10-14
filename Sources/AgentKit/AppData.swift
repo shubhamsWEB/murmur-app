@@ -13,11 +13,7 @@ enum AppData {
 
     /// Events from `start` for `days` days, optionally only those mentioning `search`.
     static func events(start: String, days: Int, search: String) async -> String {
-        do {
-            guard try await store.requestFullAccessToEvents() else { return noAccess("Calendars") }
-        } catch {
-            return noAccess("Calendars")
-        }
+        guard await Permissions.events(.event, store: store) else { return noAccess("Calendars") }
         let calendar = Calendar.current
         let from = day(start)
         let span = min(max(days, 1), 62)
@@ -59,11 +55,7 @@ enum AppData {
 
     /// Open reminders (or all, with `completed`), optionally only those mentioning `search`.
     static func reminders(search: String, completed: Bool) async -> String {
-        do {
-            guard try await store.requestFullAccessToReminders() else { return noAccess("Reminders") }
-        } catch {
-            return noAccess("Reminders")
-        }
+        guard await Permissions.events(.reminder, store: store) else { return noAccess("Reminders") }
         let predicate = completed ? store.predicateForReminders(in: nil)
             : store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)
         let wanted = search.lowercased().trimmingCharacters(in: .whitespaces)

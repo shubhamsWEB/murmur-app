@@ -103,6 +103,7 @@ public enum BrowserControl {
 
     /// Runs JXA with the browser's bundle id, a mode and one argument.
     private static func jxa(_ script: String, _ arguments: [String]) async -> Result<String, Failure> {
+        if let id = arguments.first { await Permissions.automation(id) }
         let output = await MacActions.run("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, "--"] + arguments,
                                           timeout: 25)
         if output.contains("execution error") || output.hasPrefix("Couldn't start") {

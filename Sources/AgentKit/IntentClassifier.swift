@@ -85,6 +85,10 @@ public enum IntentClassifier {
         if verblessFileSearch, focus == .textField {
             return Decision(intent: .dictation, reason: "file words, but you're in a text field")
         }
+        // "and also ask when she's coming back", right after "send a message to Roma…": it follows on.
+        if CommandMemory.isFollowUp(utterance) {
+            return Decision(intent: .command, reason: "follows on from the last command")
+        }
         if cleaned.range(of: messageToSend, options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "a message to send")
         }

@@ -215,7 +215,7 @@ public enum ScreenControl {
         guard CGPreflightScreenCaptureAccess() else {
             if !askedForScreenRecording {
                 askedForScreenRecording = true
-                CGRequestScreenCaptureAccess()
+                _ = await Permissions.inFront { CGRequestScreenCaptureAccess() }
             }
             return nil
         }

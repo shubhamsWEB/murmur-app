@@ -57,6 +57,7 @@ enum Messaging {
         }
         if service.isEmpty || ["messages", "imessage", "sms", "text", "message"].contains(service) {
             if let person = await contact(to), let handle = person.phone.flatMap(internationalNumber).map({ "+" + $0 }) ?? person.email {
+                await Permissions.automation("com.apple.MobileSMS")
                 let script = """
                 tell application "Messages"
                     set targetService to 1st account whose service type = iMessage
@@ -77,6 +78,7 @@ enum Messaging {
 
     /// The person's full name, phone and email from Contacts.
     static func contact(_ name: String) async -> (name: String, phone: String?, email: String?)? {
+        await Permissions.automation("com.apple.AddressBook")
         let script = """
         tell application "Contacts"
             set found to (every person whose name contains "\(quoted(name))")
