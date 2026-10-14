@@ -87,6 +87,15 @@ public final class CommandAgent {
             && text.split(separator: " ").count >= 4
     }
 
+    /// The user's name (from memory) when a file search is for their own document: "my resume", "my Aadhaar card",
+    /// "PAN card", "my passport", "salary slip". Nil otherwise, or when Murmur doesn't know their name.
+    nonisolated public static func ownerForPersonalFile(_ query: String) -> String? {
+        let text = query.lowercased()
+        let personal = text.range(of: #"\b(resume|résumé|cv|aadhaa?r|pan( card)?|passport|licen[cs]e|id card|identity|voter|salary|pay ?slip|offer letter|appointment letter|relieving letter|experience letter|bank statement|certificate|marksheet|mark sheet|degree|transcript|itr|form 16|insurance|visa|birth certificate)\b"#,
+                                   options: .regularExpression) != nil
+        return personal ? CommandMemory.ownerName() : nil
+    }
+
     /// "get me the updates on my last LinkedIn post", "how many stars does it have": the user wants to be told
     /// something, so the command isn't done until an answer is shown.
     nonisolated static func asksForInformation(_ utterance: String) -> Bool {
@@ -614,6 +623,10 @@ public final class CommandAgent {
                 query = "resume cv" + (query.lowercased().hasPrefix("cv") || query.lowercased().hasPrefix("resume")
                     ? "" : " " + query)
             }
+            // "my resume", "my Aadhaar card": the user's own documents carry their name.
+            if let owner = Self.ownerForPersonalFile(text("query")), !query.lowercased().contains(owner.lowercased()) {
+                query += " " + owner
+            }
             host.searchFiles(query)
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url":
@@ -1132,8 +1145,12 @@ public final class CommandAgent {
             "- Personal facts and preferences: when the user tells you something lasting about themselves or how they "
                 + "like things done (\"remember that Mom is Roma on WhatsApp\", \"from now on open links in Chrome\", "
                 + "\"keep my messages short\", \"call me Shubham\"), call remember (the same subject again replaces it; "
+                + "the user's own name goes under subject \"my name\" as \"My name is <full name>\"; "
                 + "forget_fact drops one), then reply in a few words. \"Remind me to…\" is a reminder, not this. Follow "
                 + "what the user told you over everything; use what was noticed from their commands when they don't say.",
+            "- The user's own documents (\"my resume\", \"my Aadhaar card\", \"my PAN card\", \"my passport\"): search or "
+                + "open them with their name from memory in the query (\"Shubham Agrawal Aadhaar\"), as such files are "
+                + "usually named after their owner.",
             "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
                 + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall.",
             "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "

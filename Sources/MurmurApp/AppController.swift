@@ -1,3 +1,4 @@
+import AgentKit
 import AppKit
 import MurmurIndex
 import ServiceManagement
@@ -297,7 +298,8 @@ final class AppController {
             showSearchWindow(query: spoken)
             return "Choose folders to search first."
         }
-        let wanted = SpokenFile(spoken)
+        // "my Aadhaar card": the user's own documents usually carry their name.
+        let wanted = SpokenFile(spoken, owner: CommandAgent.ownerForPersonalFile(spoken))
         let vector = await engine.embedQuery(wanted.text)
         let hits = await engine.search(wanted.text, vector: vector, prefixLast: false, kinds: wanted.kinds, limit: 30)
         let rows = ResultSet(hits, query: wanted.text).ranked
@@ -382,6 +384,10 @@ struct SpokenFile {
     let kinds: Set<FileKind>?
     /// The words that tell one file from another (not "pdf", "document", "my"): what a name has to match.
     let distinctive: [String]
+    /// The user's own name (from memory), for "my resume", "my Aadhaar card": it's searched for, and between files
+    /// that match it picks the one with their name, but a file isn't chosen for having their name alone (that would
+    /// open their resume for "my Aadhaar card").
+    let owner: [String]
 
     private static let typeWords: [String: Set<FileKind>] = [
         "pdf": [.pdf], "pdfs": [.pdf],
@@ -394,8 +400,12 @@ struct SpokenFile {
         "presentation": [.doc, .pdf],
     ]
 
-    init(_ spoken: String) {
+    init(_ spoken: String, owner ownerName: String? = nil) {
+        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let owner = (ownerName ?? "").split(separator: " ").map { fold(String($0)) }.filter { $0.count > 1 }
+        self.owner = owner
         let words = spoken.lowercased().split(separator: " ").map(String.init)
+            .filter { word in !owner.contains(fold(word.trimmingCharacters(in: CharacterSet(charactersIn: "'’s")))) }
         var kinds = Set<FileKind>()
         var rest: [String] = []
         for word in words {
@@ -408,7 +418,8 @@ struct SpokenFile {
             rest = rest.filter { !["cv", "resume", "résumé"].contains($0) } + ["resume", "cv"]
         }
         distinctive = rest
-        text = rest.isEmpty ? spoken : rest.joined(separator: " ")
+        let base = rest.isEmpty ? spoken : rest.joined(separator: " ")
+        text = owner.isEmpty ? base : base + " " + owner.joined(separator: " ")
         // A photo can be a screenshot and the other way round; "file" says nothing.
         if kinds.contains(.image) { kinds.insert(.screenshot) }
         self.kinds = kinds.isEmpty ? nil : kinds
@@ -435,12 +446,21 @@ struct SpokenFile {
                 ["resume", "cv"].contains(word) ? (name.contains("resume") || name.contains("cv")) : name.contains(word)
             }.count
         }
-        if let named = files.first(where: { found($0) == words.count }) { return named }
+        // Among the files that match, the user's own (their name in it) first.
+        func theirs(_ row: ResultRow) -> Bool {
+            let name = fold(row.name + " " + row.folder)
+            return !owner.isEmpty && owner.allSatisfy { name.contains($0) }
+        }
+        let complete = files.filter { found($0) == words.count }
+        if let named = complete.first(where: theirs) ?? complete.first { return named }
         let enough = max(1, (words.count + 1) / 2)
-        var best: (row: ResultRow, count: Int)?
+        var best: (row: ResultRow, count: Int, theirs: Bool)?
         for file in files {
             let count = found(file)
-            if count >= enough, count > (best?.count ?? 0) { best = (file, count) }
+            let own = theirs(file)
+            if count >= enough, count > (best?.count ?? 0) || (count == best?.count && own && best?.theirs == false) {
+                best = (file, count, own)
+            }
         }
         if let best { return best.row }
         return files.count == 1 && files[0].matchedWords ? files[0] : nil

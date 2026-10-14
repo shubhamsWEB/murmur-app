@@ -107,7 +107,11 @@ public enum CommandMemory {
     /// Keeps a fact about you or how you like things done, under a short subject ("Roma", "browser", "message
     /// style"). The same subject again replaces it.
     static func remember(subject: String, fact: String) -> String {
-        let key = subject.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        var key = subject.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        // The user's own name always lives under one subject, so search can find it.
+        if nameSubjects.contains(key) || name(in: fact) != nil {
+            key = "my name"
+        }
         let text = fact.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, !text.isEmpty else { return "Nothing to remember." }
         lock.lock(); defer { lock.unlock() }
@@ -116,6 +120,32 @@ public enum CommandMemory {
              + "ON CONFLICT(subject) DO UPDATE SET text = excluded.text, source = 'told', at = excluded.at",
              [key, text, Date().timeIntervalSince1970])
         return "Remembered: \(text)"
+    }
+
+    private static let nameSubjects: Set<String> = ["name", "my name", "user name", "user's name", "username", "full name",
+                                                    "own name", "user", "me", "owner", "the user's name"]
+
+    /// "My name is Shubham Agrawal", "call me Shubham", "I'm Shubham" → the name.
+    static func name(in fact: String) -> String? {
+        let text = fact.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = text.range(of: #"(?i)^(my (full )?name is|my name's|call me|i am|i'm|the user's name is|user's name is|name:)\s+"#,
+                                     options: .regularExpression) else { return nil }
+        let name = text[range.upperBound...].trimmingCharacters(in: CharacterSet(charactersIn: " .,!\"'"))
+        // A name, not "call me at five": a few words, the first capitalised.
+        guard let first = name.first, first.isUppercase, name.split(separator: " ").count <= 5 else { return nil }
+        return name
+    }
+
+    /// The user's own name, when they told Murmur ("my name is Shubham Agrawal", "call me Shubham"): used to find
+    /// their own documents ("my resume", "my Aadhaar card").
+    public static func ownerName() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return nil }
+        for row in rows(db, "SELECT subject, text FROM fact WHERE source = 'told' ORDER BY at DESC", []) {
+            if let found = name(in: row[1]) { return found }
+            if nameSubjects.contains(row[0]), row[1].split(separator: " ").count <= 4 { return row[1] }
+        }
+        return nil
     }
 
     /// Drops the facts whose subject or text has these words.
