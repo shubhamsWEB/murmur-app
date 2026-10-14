@@ -9,6 +9,9 @@ public struct CommandHost {
     public var showAnswer: (String) -> Void
     /// Paste text where you're typing.
     public var insert: (String) -> Void
+    /// Put text in place of the selection in the app you were in. Returns false when it plainly didn't take (the
+    /// selection is in text you can't edit: a web page, a received email, a PDF), so the result is shown instead.
+    public var replaceSelection: (String) async -> Bool
     /// Open Murmur's file search with this query.
     public var searchFiles: (String) -> Void
     /// Paste into the app in front now (not the one you were in when you spoke): after Murmur opened it.
@@ -25,10 +28,12 @@ public struct CommandHost {
                 insert: @escaping (String) -> Void, searchFiles: @escaping (String) -> Void,
                 progress: @escaping (String) -> Void, log: @escaping (String) -> Void,
                 pasteHere: @escaping (String) -> Void = { _ in },
-                openFile: @escaping (String) async -> String = { _ in "" }) {
+                openFile: @escaping (String) async -> String = { _ in "" },
+                replaceSelection: ((String) async -> Bool)? = nil) {
         self.confirm = confirm
         self.showAnswer = showAnswer
         self.insert = insert
+        self.replaceSelection = replaceSelection ?? { text in insert(text); return true }
         self.searchFiles = searchFiles
         self.openFile = openFile
         self.pasteHere = pasteHere
@@ -56,7 +61,7 @@ public final class CommandAgent {
     /// Tools whose result the model needs to read before it can go on (the screen, a list, a helper's answer).
     /// A step without any of them is the last one, unless the model is still working (no `done` yet and it looked).
     private static let informationTools: Set<String> = [
-        "find_apps", "list_running_apps", "list_shortcuts", "ask_claude", "ask_codex", "read_screen",
+        "find_apps", "list_running_apps", "list_shortcuts", "ask_claude", "ask_codex", "read_screen", "run_command",
     ]
     /// A click on one of these asks you first.
     private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
@@ -157,9 +162,30 @@ public final class CommandAgent {
         public let shows: Bool
     }
 
-    /// "summarise this", "make it more formal", "translate this to Hindi", "explain this": something to do with the
-    /// selected text. Verbs that also start ordinary sentences ("make", "fix"…) need "this" / "it" / "selected" too.
+    /// "summarise this", "make it more formal", "translate this to Hindi", "explain this": one thing to do with the
+    /// selected text, answered in one step. A request that goes on to do more with the result ("summarise this and
+    /// add it to Notes", "translate this and email it to Riya") isn't one: the router plans those (`route`), with
+    /// the selection in hand. Verbs that also start ordinary sentences ("make", "fix"…) need "this" / "it" too.
     nonisolated public static func selectionTask(_ utterance: String) -> SelectionTask? {
+        guard let task = selectionInstruction(utterance) else { return nil }
+        return goesFurther(QuickCommands.clean(utterance)) ? nil : task
+    }
+
+    /// Whether the words are an instruction about the selected text at all, one step or several (for telling a
+    /// command from dictation while text is selected).
+    nonisolated public static func isAboutSelection(_ utterance: String) -> Bool {
+        selectionInstruction(utterance) != nil
+    }
+
+    /// More than the edit itself: a second action, or somewhere else for the result to go.
+    nonisolated static func goesFurther(_ text: String) -> Bool {
+        let nextAction = #"\b(and|then|and then)\b.*\b(add|put|save|send|paste|write|create|make|open|email|mail|share|post|copy|insert|append|store|note|attach|tweet|message|text|search|google|look up|read)\b"#
+        let destination = #"\b(in|into|to|on|onto|as)\s+(a\s+|an\s+|my\s+|the\s+)?(new\s+)?(notes?|apple notes|textedit|pages|word|docs?|google docs|document|file|mail|email|gmail|outlook|slack|whatsapp|messages|imessage|telegram|teams|discord|reminders?|calendar|notion|obsidian|todo|to-do|clipboard|desktop|downloads)\b"#
+        return text.range(of: nextAction, options: .regularExpression) != nil
+            || text.range(of: destination, options: .regularExpression) != nil
+    }
+
+    nonisolated static func selectionInstruction(_ utterance: String) -> SelectionTask? {
         let text = QuickCommands.clean(utterance)
         let reading = #"^(summari[sz]e|sum up|tl ?dr|explain|what does (this|it) (mean|say)|what is this|what's this|reply to|respond to|answer|draft a reply|write a reply)\b"#
         let editing = #"^(translate|rewrite|rephrase|reword|shorten|condense|simplify|expand|lengthen|proofread|paraphrase)\b"#
@@ -207,7 +233,13 @@ public final class CommandAgent {
             return
         }
         host.log("command: \(router.name) worked on \(selection.count) selected characters → \(text.count)")
-        if show { host.showAnswer(text) } else { host.insert(text) }
+        if show {
+            host.showAnswer(text)
+        } else if !(await host.replaceSelection(text)) {
+            // The selection is in text that can't be edited (a web page, a received email): show it to read or paste.
+            host.log("command: the selection didn't change after pasting; showing the result instead")
+            host.showAnswer(text)
+        }
     }
 
     // MARK: - Router loop
@@ -220,7 +252,7 @@ public final class CommandAgent {
     private func route(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool) async {
         var context = "Front app: \(frontApp ?? "unknown")."
         if let selection, !selection.isEmpty {
-            context += "\nSelected text:\n\"\"\"\n\(selection.prefix(4000))\n\"\"\""
+            context += "\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n\(selection.prefix(8000))\n\"\"\""
         }
         let helpers = AssistantCLI.allCases.filter(\.isAllowed)
         let system = Self.systemPrompt(helpers: helpers) + "\n\n" + context
@@ -437,12 +469,43 @@ public final class CommandAgent {
         case "insert_text":
             host.insert(text("text"))
             return Outcome(result: "Pasted.", finished: true, shown: true)
+        case "replace_selection":
+            let body = text("text")
+            if await host.replaceSelection(body) {
+                return Outcome(result: "Replaced the selected text.", finished: true, shown: true)
+            }
+            host.showAnswer(body)
+            return Outcome(result: "The selected text can't be edited there; showed the result instead.",
+                           finished: true, shown: true)
+        case "run_command":
+            return await runCommand(text("command"), purpose: text("purpose"))
         case "reply":
             host.showAnswer(text("text"))
             return Outcome(result: "Shown.", finished: true, shown: true)
         default:
             return Outcome(result: "Unknown tool \(tool).")
         }
+    }
+
+    /// A shell command the model asked for: reading commands run at once, anything else is shown to you first.
+    private func runCommand(_ command: String, purpose: String) async -> Outcome {
+        guard !command.isEmpty else { return Outcome(result: "No command given.") }
+        if ShellCommand.usesSudo(command) {
+            return Outcome(result: "Murmur doesn't run commands as administrator (sudo). Tell the user the command so "
+                + "they can run it in Terminal themselves.")
+        }
+        if !ShellCommand.isReadOnly(command) {
+            let detail = (purpose.isEmpty ? "" : purpose + "\n\n") + command
+            guard await host.confirm("Run this command?", detail) else {
+                return Outcome(result: "The user chose not to run it.", finished: true)
+            }
+        }
+        host.progress("Running a command…")
+        let result = await ShellCommand.run(command)
+        host.log("command: ran `\(command)` → exit \(result.status), \(result.output.count) characters")
+        var summary = result.timedOut ? "Stopped after 60 s." : "Exit status \(result.status)."
+        summary += result.output.isEmpty ? " No output." : "\nOutput:\n\(result.output)"
+        return Outcome(result: summary)
     }
 
     static func systemPrompt(helpers: [AssistantCLI]) -> String {
@@ -478,8 +541,20 @@ public final class CommandAgent {
                 + "letter to…\"): call write_in_app ONCE with the app and the finished text, written by you in full "
                 + "(plain text, a short title line first for notes). Don't call open_app as well. new_document false "
                 + "only when the user wants it added to what's already open.",
-            "- To write or rewrite text for the user (a reply, a shorter version of the selection, a translation), "
-                + "call insert_text with the finished text only.",
+            "- Selected text (below, when there is any) is what \"this\", \"it\" and \"the selection\" mean. Do the "
+                + "whole request in one go: write the summary, translation or rewrite yourself, then put it where the "
+                + "user asked. In place of the selection: replace_selection. In another app: write_in_app (\"summarise "
+                + "this and add it to Notes\" → write_in_app with app Notes and your summary as the text). To read: "
+                + "reply. Never answer that you can't put it somewhere: use the tools.",
+            "- To write text where the user is typing (no selection to replace), call insert_text with the finished "
+                + "text only.",
+            "- Terminal: run_command runs a shell command on this Mac and gives you its output (anything that changes "
+                + "something is shown to the user first). Use it for what the other tools don't cover: disk space, "
+                + "battery, Wi-Fi details, file operations (copy, move, zip, convert an image with sips), git, "
+                + "installed tools. One command at a time; read the output, then go on or reply with the answer. "
+                + "Never use sudo.",
+            "- Don't give up after one try: when a step fails, try another way (another tool, read_screen and click, "
+                + "or run_command). Only reply that something can't be done once the tools truly can't do it.",
             "- To answer a question, call reply with a short answer.",
         ]
         if !helpers.isEmpty {
@@ -546,6 +621,12 @@ public final class CommandAgent {
                   "new_document": ("boolean", "true for a new note/document (default), false to add to the open one")],
                  required: ["app", "text"]),
             tool("insert_text", "Paste finished text where the user is typing", ["text": ("string", "the text")]),
+            tool("replace_selection", "Put finished text in place of the user's selected text (a translation, a "
+                 + "rewrite, a fix)", ["text": ("string", "the finished text")]),
+            tool("run_command", "Run a shell command on the Mac (zsh, in the home folder) and return its output",
+                 ["command": ("string", "the command"),
+                  "purpose": ("string", "one short line on what it does, shown when the user is asked")],
+                 required: ["command"]),
             tool("reply", "Show a short answer to the user", ["text": ("string", "the answer")]),
             tool("done", "Finish when nothing more is needed"),
         ]

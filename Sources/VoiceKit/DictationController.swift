@@ -394,7 +394,7 @@ public final class DictationController: ObservableObject {
                 }
                 var selection = pressedSelection
                 // "Summarise this" with text selected in an app that doesn't report its selection: copy it.
-                if selection == nil, detect || forcedCommand, CommandAgent.selectionTask(text) != nil {
+                if selection == nil, detect || forcedCommand, CommandAgent.isAboutSelection(text) {
                     selection = await TextInserter.copySelection()
                     if let selection { log("selection: \(selection.count) characters, copied with ⌘C") }
                 }
@@ -552,6 +552,10 @@ extension DictationController {
             openFile: { [weak self] query in
                 guard let open = self?.onOpenFile else { return "File search isn't ready." }
                 return await open(query)
+            },
+            replaceSelection: { [weak self] text in
+                guard let self else { return false }
+                return await replaceSelection(with: text)
             }
         )
     }
@@ -710,6 +714,18 @@ extension DictationController {
     }
 
     /// Brings back the app you were in, then pastes there.
+    /// Pastes `text` over the selection in the app you were in, then checks it took: pasting replaces a selection,
+    /// so if the same text is still selected afterwards, the selection was in text that can't be edited (a web
+    /// page, a received email, a PDF) and nothing changed. Returns false then, so the caller shows the result.
+    func replaceSelection(with text: String) async -> Bool {
+        let before = Self.selectedText()
+        pasteIntoPreviousApp(text)
+        try? await Task.sleep(nanoseconds: 700_000_000)   // the app comes forward (0.25 s), then reads the paste
+        guard let before else { return true }              // can't tell: the paste is all there is to go on
+        let after = Self.selectedText()
+        return after != before
+    }
+
     private func pasteIntoPreviousApp(_ text: String) {
         lastText = text
         hud.hide()
@@ -745,9 +761,17 @@ extension DictationController {
         var settable: DarwinBoolean = false
         if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
            settable.boolValue { return .textField }
+        // Text you can select isn't always text you can edit: a web page, a received email or a PDF reports a
+        // selection too. Web content says when it's editable (`AXEditableAncestor`, set inside a text field or a
+        // contenteditable editor); elsewhere a field you can edit has a settable value (above).
         var range: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &range) == .success {
-            return .textField
+            var editable: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, "AXEditableAncestor" as CFString, &editable) == .success,
+               editable != nil {
+                return .textField
+            }
+            return .unknown
         }
         // Web pages and app-drawn views can hold a text field Accessibility doesn't show.
         let unclear: Set<String> = ["AXWebArea", "AXGroup", "AXScrollArea", "AXUnknown", ""]

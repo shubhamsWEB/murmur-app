@@ -60,7 +60,7 @@ public enum IntentClassifier {
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
         // Text selected and "summarise this", "make it more formal", "translate this to Hindi".
-        if hasSelection, CommandAgent.selectionTask(utterance) != nil {
+        if hasSelection, CommandAgent.isAboutSelection(utterance) {
             return Decision(intent: .command, reason: "an instruction about the selected text")
         }
         // "my photos from Goa are amazing" in a message is text; "find my photos…" is a search anywhere.
