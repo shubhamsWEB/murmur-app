@@ -542,7 +542,13 @@ extension DictationController {
             },
             progress: { [weak self] text in
                 guard let self else { return }
-                if text.hasSuffix("…") { hud.show(.working(text)) } else { hud.flash(text, seconds: 2) }
+                // "Thinking…", "Working… (step 3)": still going, so a spinner. Anything else is a step's outcome.
+                if text.contains("…") {
+                    hud.show(.working(text))
+                } else {
+                    let tone = DictationHUD.tone(of: text)
+                    hud.flash(text, seconds: 2, tone: tone == .problem ? .problem : .done)
+                }
             },
             log: { [weak self] line in self?.log(line) },
             pasteHere: { [weak self] text in
@@ -621,7 +627,7 @@ extension DictationController {
                     if warning.runModal() == .alertFirstButtonReturn { self.askForKey(choice) }
                 } else {
                     self.log("command: \(provider) key works")
-                    self.hud.flash("\(provider) key works", seconds: 2)
+                    self.hud.flash("\(provider) key works", seconds: 2, tone: .done)
                 }
             }
             return true
@@ -647,7 +653,7 @@ extension DictationController {
                 warning.runModal()
             } else {
                 self.log("command: \(provider) key works")
-                self.hud.flash("\(provider) key works with \(choice == .anthropic ? AnthropicRouter.model : OpenAIRouter.model)", seconds: 2.5)
+                self.hud.flash("\(provider) key works with \(choice == .anthropic ? AnthropicRouter.model : OpenAIRouter.model)", seconds: 2.5, tone: .done)
             }
         }
     }
@@ -686,7 +692,7 @@ extension DictationController {
                 warning.runModal()
             } else {
                 self.log("command: Anthropic key works")
-                self.hud.flash("Anthropic key works", seconds: 2)
+                self.hud.flash("Anthropic key works", seconds: 2, tone: .done)
             }
         }
     }

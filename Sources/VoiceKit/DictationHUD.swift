@@ -4,13 +4,18 @@ import SwiftUI
 /// The small pill near the bottom of the screen that shows Murmur is listening, then working.
 @MainActor
 final class DictationHUD {
+    /// What a message is: something done, something to know, or something that went wrong.
+    enum Tone: Equatable {
+        case done, info, problem
+    }
+
     enum Mode: Equatable {
         case listening(handsFree: Bool)
         case command
         case working(String)
         case transcribing
         case preparing
-        case message(String)
+        case message(String, Tone)
     }
 
     private let state = HUDState()
@@ -56,12 +61,18 @@ final class DictationHUD {
         state.level = level
     }
 
-    /// Shows a short message, then hides.
-    func flash(_ text: String, seconds: Double = 2.5) {
-        show(.message(text))
+    /// Shows a short message, then hides. Without a tone, words like "can't" or "failed" make it a problem and
+    /// anything else plain information.
+    func flash(_ text: String, seconds: Double = 2.5, tone: Tone? = nil) {
+        show(.message(text, tone ?? Self.tone(of: text)))
         let work = DispatchWorkItem { [weak self] in self?.panel.orderOut(nil) }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    static func tone(of text: String) -> Tone {
+        let problem = #"(?i)\b(can'?t|cannot|couldn'?t|didn'?t|doesn'?t|isn'?t|won'?t|failed|failure|error|rejected|stopped|needs|denied|not allowed|no access|unable)\b|^no "#
+        return text.range(of: problem, options: .regularExpression) != nil ? .problem : .info
     }
 
     func hide() {
@@ -117,7 +128,7 @@ private struct HUDView: View {
         case .working(let text): return text
         case .transcribing: return "Writing it down"
         case .preparing: return "Getting the speech model ready"
-        case .message(let text): return text
+        case .message(let text, _): return text
         }
     }
 
@@ -137,10 +148,17 @@ private struct HUDView: View {
             .animation(.easeOut(duration: 0.09), value: state.level)
         case .transcribing, .preparing, .working:
             ProgressView().controlSize(.small).tint(Palette.coral)
-        case .message:
+        case .message(_, .problem):
             Image(systemName: "exclamationmark.circle.fill")
                 .font(.system(size: 15))
                 .foregroundStyle(Palette.coral)
+        case .message(_, .done):
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(Palette.cream)
+        case .message(_, .info):
+            StarlingMark(.mono(Palette.cream), listening: false)
+                .frame(width: 20, height: 20)
         }
     }
 }
