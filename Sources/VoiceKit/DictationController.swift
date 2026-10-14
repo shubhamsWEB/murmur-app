@@ -93,6 +93,8 @@ public final class DictationController: ObservableObject {
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.hud.setLevel(level) }
         }
+        // Which app you're working in, so "what's on my screen" reads it even when Murmur's own window is in front.
+        ScreenControl.watchFrontApp()
     }
 
     public var key: DictationKeyMonitor.Key { monitor.key }

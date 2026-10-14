@@ -99,8 +99,12 @@ as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, C
 - **Your voice** is transcribed on your Mac by NVIDIA Parakeet on the Neural Engine. Audio is held in memory only
   while it’s transcribed, and never saved or sent anywhere.
 - **Your files** are indexed on your Mac, only in the folders you choose, with Google’s EmbeddingGemma.
-- **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, only the command’s words, the
-  front app’s name and any selected text are sent to that provider. Never audio, never files.
+- **Your screen** is read only while a command needs it: the front window’s text and buttons through Accessibility,
+  or, if you allow **Screen Recording**, its text read from a picture of the window, on your Mac. The picture is
+  never saved or sent.
+- **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, the command’s words, the front
+  app’s name, any selected text and, when a step reads the screen, that window’s text are sent to that provider.
+  Never audio, never files, never pictures.
 - **Network use** is otherwise limited to the one-time model downloads from Hugging Face.
 
 Settings, the index and models live in `~/Library/Application Support/Murmur`.

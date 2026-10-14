@@ -439,7 +439,8 @@ public final class CommandAgent {
         case "read_screen":
             host.progress("Looking at the screen…")
             let screen = await ScreenControl.read()
-            host.log("command: screen has \(screen.split(separator: "\n").count - 2) things")
+            let controls = screen.split(separator: "\n").filter { $0.hasPrefix("[") }.count
+            host.log("command: read the screen: \(screen.contains("Text on screen:") ? "text and " : "no text, ")\(controls) things to press")
             return Outcome(result: screen)
         case "click":
             let id = Int(args["id"]?.number ?? 0)
@@ -556,8 +557,10 @@ public final class CommandAgent {
             "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
                 + "build_with_agent with the user's full request. It starts Claude Code or Codex in Terminal to build "
                 + "it. Never web_search or open a browser for that.",
-            "- You can see and use the front app like a person: read_screen lists its window's buttons, links and "
-                + "fields as [n]; click n; type_text (into field n, submit true to press Return); press_keys "
+            "- You can see and use the front app like a person: read_screen shows the text in its window and lists "
+                + "its buttons, links and fields as [n]. To answer what's on the screen (\"what's on my screen\", "
+                + "\"summarise this page\", \"what does this error say\"), read_screen, then reply from its text. "
+                + "click n; type_text (into field n, submit true to press Return); press_keys "
                 + "(\"return\", \"cmd+l\", \"cmd+n\", \"down\", \"pagedown\"); wait. Use them for any task the other "
                 + "tools don't cover. After an action that changes the screen you are shown the new screen with its "
                 + "[n] numbers; use only numbers from the latest screen. Keep going until the whole request is done, "
@@ -641,7 +644,7 @@ public final class CommandAgent {
                  + "sound, privacy, keyboard…) or \"app store updates\"", ["pane": ("string", "the pane")]),
             tool("site_search", "Search a website in the browser (youtube, google, amazon, github, maps, wikipedia, "
                  + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
-            tool("read_screen", "See the front app's window: its buttons, links and fields, numbered"),
+            tool("read_screen", "See the front app's window: the text on it, and its buttons, links and fields, numbered"),
             tool("click", "Click element [n] from the latest read_screen", ["id": ("number", "the element's number")]),
             tool("type_text", "Type text into the front app (optionally into field [n] first; submit presses Return)",
                  ["text": ("string", "what to type"), "into": ("number", "field number from read_screen, optional"),

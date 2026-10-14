@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
+import ScreenCaptureKit
+import Vision
 
 /// Murmur's eyes and hands in other apps, through Accessibility: what's in the front window (buttons, links, fields,
 /// numbered), clicking one, typing, pressing keys. This is what lets a command go step by step through any app or
@@ -19,10 +21,48 @@ public enum ScreenControl {
 
     // MARK: Reading
 
-    /// The front window as a numbered list: `[7] link "Lofi Girl – beats to relax"`. Fresh numbers every read.
-    public static func read(limit: Int = 140) async -> String {
+    /// The app you were last working in, other than Murmur: when Murmur's own window or panel is in front, that's
+    /// the screen you mean.
+    private static var lastOtherApp: NSRunningApplication?
+    private static var watching: NSObjectProtocol?
+    /// Asked for Screen Recording once this session (macOS shows its prompt only once anyway).
+    private static var askedForScreenRecording = false
+
+    /// Starts following which app is in front (called when Murmur starts, and again on every read).
+    public static func watchFrontApp() {
+        guard watching == nil else { return }
+        remember(NSWorkspace.shared.frontmostApplication)
+        watching = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            MainActor.assumeIsolated { remember(app) }
+        }
+    }
+
+    private static func remember(_ app: NSRunningApplication?) {
+        guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        lastOtherApp = app
+    }
+
+    /// The app whose screen to read: the front one, or the one you were in when Murmur is in front.
+    private static func targetApp() async -> NSRunningApplication? {
+        watchFrontApp()
+        guard let front = NSWorkspace.shared.frontmostApplication else { return lastOtherApp }
+        guard front.processIdentifier == ProcessInfo.processInfo.processIdentifier else { return front }
+        guard let other = lastOtherApp, !other.isTerminated else { return nil }
+        // Murmur's window was in front: bring your app back, so clicks and keys land there too.
+        other.activate()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        return other
+    }
+
+    /// The front window: what it says (its text, top to bottom), then what you can press or type into, numbered:
+    /// `[7] link "Lofi Girl – beats to relax"`. Fresh numbers every read. When the app doesn't share its contents
+    /// through Accessibility (canvas apps, some Electron apps, pictures of text), the window's text is read from a
+    /// capture of it instead (needs Screen Recording).
+    public static func read(limit: Int = 140, textLimit: Int = 3000) async -> String {
         guard AXIsProcessTrusted() else { return "Murmur needs Accessibility permission to see the screen." }
-        guard let app = NSWorkspace.shared.frontmostApplication else { return "No app is in front." }
+        guard let app = await targetApp() else { return "No app is in front." }
         let root = AXUIElementCreateApplication(app.processIdentifier)
         // Chrome and Electron apps build their page's accessibility tree only when an assistant asks for it.
         AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
@@ -36,16 +76,27 @@ public enum ScreenControl {
         if let focused = element(root, kAXFocusedUIElementAttribute) {
             lines.append("Keyboard focus: \(describe(focused) ?? "somewhere")")
         }
+        var controls: [String] = []
+        var texts: [String] = []
+        var textLength = 0
         var queue: [AXUIElement] = [window]
         var index = 0
         var seen = Set<String>()
-        while index < queue.count, index < 6000, elements.count < limit {
+        var seenText = Set<String>()
+        while index < queue.count, index < 8000, elements.count < limit || textLength < textLimit {
             let current = queue[index]
             index += 1
             let role = string(current, kAXRoleAttribute) ?? ""
             let subrole = string(current, kAXSubroleAttribute) ?? ""
             let kind: String? = subrole == "AXSearchField" ? "search field" : roles[role]
-            if let kind, isOnScreen(current) {
+            let visible = isOnScreen(current)
+            if role == "AXStaticText", visible, textLength < textLimit,
+               let text = longString(current, kAXValueAttribute) ?? longString(current, kAXDescriptionAttribute),
+               seenText.insert(text).inserted {
+                texts.append(text)
+                textLength += text.count + 1
+            }
+            if let kind, visible, elements.count < limit {
                 let label = self.label(current, role: role)
                 let editable = role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox"
                 if label != nil || editable {
@@ -55,16 +106,69 @@ public enum ScreenControl {
                     if editable || !seen.contains(key) {
                         seen.insert(key)
                         elements.append(current)
-                        lines.append("[\(elements.count)] \(kind)\(text)")
+                        controls.append("[\(elements.count)] \(kind)\(text)")
                     }
                 }
                 // A link's or button's children are its label, not more things to press.
                 if role == "AXLink" || role == "AXButton" { continue }
             }
+            // A document's text, typed in an editor (Notes, TextEdit, Mail): what it says, as far as the limit.
+            if role == "AXTextArea", visible, textLength < textLimit, let text = longString(current, kAXValueAttribute, max: 1500) {
+                texts.append(text)
+                textLength += text.count + 1
+            }
             queue.append(contentsOf: children(current))
         }
-        if elements.isEmpty { lines.append("(Nothing to press or type into is visible.)") }
+        // Little or no text through Accessibility: read the window's pixels instead.
+        if textLength < 200, let recognised = await recognisedText(of: app) {
+            texts = [recognised]
+        }
+        if !texts.isEmpty {
+            lines.append("Text on screen:")
+            lines.append(String(texts.joined(separator: "\n").prefix(textLimit + 1500)))
+        }
+        lines.append("Things to press or type into:")
+        lines.append(contentsOf: controls)
+        if controls.isEmpty { lines.append("(Nothing to press or type into is visible.)") }
         return lines.joined(separator: "\n")
+    }
+
+    /// The text in a picture of the app's front window (Vision, on this Mac). Nil without Screen Recording
+    /// permission (asked for once), or when there's nothing to read.
+    private static func recognisedText(of app: NSRunningApplication) async -> String? {
+        guard CGPreflightScreenCaptureAccess() else {
+            if !askedForScreenRecording {
+                askedForScreenRecording = true
+                CGRequestScreenCaptureAccess()
+            }
+            return nil
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let windows = content.windows.filter {
+                $0.owningApplication?.processID == app.processIdentifier && $0.windowLayer == 0 && $0.frame.width > 80
+            }
+            guard let window = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+            else { return nil }
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let configuration = SCStreamConfiguration()
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            configuration.width = Int(window.frame.width * scale)
+            configuration.height = Int(window.frame.height * scale)
+            configuration.showsCursor = false
+            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            let lines = (request.results ?? [])
+                .sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }        // top of the window first
+                .compactMap { $0.topCandidates(1).first?.string }
+            let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        } catch {
+            return nil
+        }
     }
 
     // MARK: Acting
@@ -129,6 +233,13 @@ public enum ScreenControl {
         let text = (value(element, attribute) as? String)?
             .replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         return text?.isEmpty == false ? String(text!.prefix(90)) : nil
+    }
+
+    /// Text as it is, up to `max` characters (a paragraph, not just a label).
+    private static func longString(_ element: AXUIElement, _ attribute: String, max: Int = 500) -> String? {
+        let text = (value(element, attribute) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let text, !text.isEmpty else { return nil }
+        return String(text.prefix(max))
     }
 
     private static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
