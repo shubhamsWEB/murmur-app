@@ -103,6 +103,13 @@ public enum QuickCommands {
         (#"^(?:turn )?(?:the )?volume (up|down)$|^turn (up|down) (?:the )?volume$|^(louder|quieter|softer)$"#, { m in
             let word = [m[1], m[2], m[3]].first { !$0.isEmpty } ?? "up"
             return Action(tool: "change_volume", arguments: ["direction": word == "louder" || word == "up" ? "up" : "down"]) }),
+        // "stop the video", "pause", "pause the music on spotify", "resume", "play it again": the media keys.
+        (#"^(pause|stop|resume|unpause|continue|play)(?: playing)?(?: (?:the |this |my |that )?(?:video|music|song|playback|media|youtube|spotify|audio|track|podcast|movie|it))?(?: (?:on|in) (?:youtube|spotify|chrome|safari|apple music|music))?(?: again)?$"#, { m in
+            Action(tool: "media_control", arguments: ["action": ["play", "resume", "unpause", "continue"].contains(m[1]) ? "play" : "pause"]) }),
+        (#"^(?:next|skip)(?: (?:to the next )?(?:the |this )?(?:video|song|track|one))?$|^(?:play |go to )?(?:the )?next (?:video|song|track|one)$"#, { _ in
+            Action(tool: "media_control", arguments: ["action": "next"]) }),
+        (#"^(?:play |go to )?(?:the )?(?:previous|last) (?:video|song|track|one)$|^previous(?: (?:video|song|track))?$"#, { _ in
+            Action(tool: "media_control", arguments: ["action": "previous"]) }),
         // "set brightness to 20%", "make the brightness 20 percent", "brightness 50"
         (#"^(?:(?:set|make|change|put|turn|bring) )?(?:the )?(?:screen |display )?brightness (?:to |at |up to |down to )?(\d{1,3})(?: ?percent| ?%)?$"#, { m in
             Action(tool: "set_brightness", arguments: ["percent": m[1]]) }),

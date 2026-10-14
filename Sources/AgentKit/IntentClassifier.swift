@@ -48,7 +48,7 @@ public enum IntentClassifier {
         "enable", "disable", "connect", "disconnect", "empty", "restart", "reboot", "shut", "sleep", "show", "go",
         "navigate", "take", "download", "clear", "change", "increase", "decrease", "reduce", "raise", "lower",
         "toggle", "create", "make", "build", "add", "delete", "remove", "move", "rename", "copy", "watch",
-        "explain", "ask", "tell", "dim", "brighten",
+        "explain", "ask", "tell", "dim", "brighten", "stop", "resume", "unpause", "skip", "next", "previous",
     ]
 
     /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.

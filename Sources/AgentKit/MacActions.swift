@@ -269,6 +269,22 @@ public enum MacActions {
         return "Set the brightness to about \(Int(level * 100))%."
     }
 
+    /// The media keys: whatever is playing (YouTube in Chrome or Safari, Spotify, Music, a podcast) answers them,
+    /// as it would the keys on the keyboard. Play/pause toggles.
+    public static func media(_ action: String) -> String {
+        switch action {
+        case "next":
+            postMediaKey(17)                 // NX_KEYTYPE_NEXT
+            return "Skipped to the next one."
+        case "previous":
+            postMediaKey(18)                 // NX_KEYTYPE_PREVIOUS
+            return "Went back to the previous one."
+        default:
+            postMediaKey(16)                 // NX_KEYTYPE_PLAY
+            return action == "play" ? "Pressed play." : "Pressed pause."
+        }
+    }
+
     public static func lockScreen() -> String {
         postKey(CGKeyCode(kVK_ANSI_Q), flags: [.maskCommand, .maskControl])
         return "Locked the screen."

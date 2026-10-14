@@ -442,6 +442,7 @@ public final class CommandAgent {
             return Outcome(result: MacActions.mute(on))
         case "brightness": return Outcome(result: MacActions.brightness(up: text("direction") != "down"))
         case "lock_screen": return Outcome(result: MacActions.lockScreen())
+        case "media_control": return Outcome(result: MacActions.media(text("action")))
         case "set_brightness":
             return Outcome(result: await MacActions.setBrightness(Int(args["percent"]?.number ?? 50)))
         case "set_bluetooth":
@@ -592,7 +593,7 @@ public final class CommandAgent {
                 + "open_url for a site.",
             "- Mac settings and updates: open_settings (\"check for updates\" → software update); then read_screen "
                 + "and click if the user asked for a specific switch.",
-            "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot, set_brightness, set_bluetooth, set_wifi "
+            "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot, media_control (pause or resume a playing video or song, next, previous), set_brightness, set_bluetooth, set_wifi "
                 + "(switch these directly; don't open Settings for them).",
             "- Shortcuts: list_shortcuts, run_shortcut.",
             "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
@@ -673,6 +674,8 @@ public final class CommandAgent {
             tool("mute", "Mute or unmute the sound", ["on": ("boolean", "true to mute")]),
             tool("brightness", "Make the screen brighter or dimmer", ["direction": ("string", "up or down")]),
             tool("lock_screen", "Lock the screen"),
+            tool("media_control", "Pause, resume, or skip what's playing (a YouTube video, Spotify, Music): the media keys",
+                 ["action": ("string", "pause, play, next or previous")]),
             tool("set_brightness", "Set the screen brightness to a percentage", ["percent": ("number", "0 to 100")]),
             tool("set_bluetooth", "Turn Bluetooth on or off", ["on": ("boolean", "true for on, false for off")]),
             tool("set_wifi", "Turn Wi-Fi on or off", ["on": ("boolean", "true for on, false for off")]),
