@@ -39,7 +39,7 @@ public struct OllamaClient: Sendable {
         var request = URLRequest(url: base.appendingPathComponent("api/chat"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 60
+        request.timeoutInterval = 120   // a long task's later steps carry a lot of page text: give them time
         let body: [String: Any] = [
             "model": model,
             "messages": messages,

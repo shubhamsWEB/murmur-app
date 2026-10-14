@@ -174,13 +174,33 @@ public enum MacActions {
     }
 
     static func openURL(_ text: String, in browser: AppCatalog.App?) -> String {
+        guard let url = webAddress(text) else { return "That doesn't look like a web address." }
+        open(url, in: browser)
+        return "Opened \(url.host ?? url.absoluteString)."
+    }
+
+    /// The address a spoken or typed web address stands for ("saleshq dot ai"), if it is one.
+    static func webAddress(_ text: String) -> URL? {
         var raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !raw.contains("://") { raw = "https://" + raw.replacingOccurrences(of: " dot ", with: ".") }
-        guard let url = URL(string: raw), let scheme = url.scheme, ["http", "https"].contains(scheme) else {
-            return "That doesn't look like a web address."
-        }
-        open(url, in: browser)
-        return "Opened \(url.host ?? raw)."
+        guard let url = URL(string: raw), let scheme = url.scheme, ["http", "https"].contains(scheme) else { return nil }
+        return url
+    }
+
+    /// The page that searches the web for `query`.
+    static func webSearchAddress(_ query: String) -> URL? {
+        var components = URLComponents(string: "https://www.google.com/search")!
+        components.queryItems = [URLQueryItem(name: "q", value: query)]
+        return components.url
+    }
+
+    /// The page that searches `site` for `query` (a web search limited to the site, for sites without a search page).
+    static func siteSearchAddress(_ site: String, _ query: String) -> URL? {
+        let key = site.lowercased().trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: #"\.(com|in|org)$"#, with: "", options: .regularExpression)
+        guard let base = siteSearches[key] else { return webSearchAddress("\(query) site:\(site)") }
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(["&", "+", "=", "?", "/"])) ?? query
+        return URL(string: base + encoded)
     }
 
     /// Search pages that take the query in their address, so a search on a site is one step, not typing into it.
@@ -220,8 +240,8 @@ public enum MacActions {
         return "Searching the web for \"\(query)\"\(browser.map { " in \($0.name)" } ?? "")."
     }
 
-    /// Opens a web address in the given browser, or the default one.
-    private static func open(_ url: URL, in browser: AppCatalog.App?) {
+    /// Opens a web address in a new tab of the given browser, or the default one.
+    static func open(_ url: URL, in browser: AppCatalog.App?) {
         if let browser, isBrowser(browser) {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true

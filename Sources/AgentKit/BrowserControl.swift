@@ -367,4 +367,73 @@ public enum BrowserControl {
             return result
         }
     }
+
+    // MARK: Pages without piling up tabs
+
+    /// The browser with this bundle id, if it's running (and one Murmur can work in).
+    public static func running(_ bundleID: String?) -> Browser? {
+        guard let bundleID else { return nil }
+        return NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }.flatMap { browser(for: $0) }
+    }
+
+    /// The front window's current tab, title and address. Only Apple Events: it works with page access off.
+    public static func currentTab(in browser: Browser) async -> (title: String, url: String)? {
+        let script = #"""
+        function run(argv) {
+          const app = Application(argv[0]), safari = argv[1] === "safari";
+          if (!app.running() || app.windows.length === 0) return "";
+          const t = safari ? app.windows[0].currentTab : app.windows[0].activeTab;
+          return (safari ? t.name() : t.title()) + "\n" + t.url();
+        }
+        """#
+        guard case .success(let output) = await jxa(script, [browser.bundleID, browser.safari ? "safari" : "chromium"])
+        else { return nil }
+        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2, parts[1].hasPrefix("http") else { return nil }
+        return (parts[0], parts[1])
+    }
+
+    /// Shows `url` without opening another tab when it can: a tab that already has the page (or, for a site's home
+    /// address, any page of that site) comes to the front; otherwise, with `reuse`, the current tab goes there. Nil
+    /// when it did neither (no window, or no permission): the caller opens a new tab as before.
+    public static func show(_ url: URL, in browser: Browser, reuse: Bool) async -> String? {
+        let script = #"""
+        function run(argv) {
+          const app = Application(argv[0]), safari = argv[1] === "safari", want = argv[2], reuse = argv[3] === "1";
+          if (!app.running() || app.windows.length === 0) return "";
+          const norm = u => String(u || "").replace(/^https?:\/\/(www\.)?/i, "").replace(/#.*$/, "").replace(/\/$/, "").toLowerCase();
+          const site = u => norm(u).split(/[\/?]/)[0];
+          const target = norm(want), home = target === site(want);
+          const wins = app.windows();
+          for (let wi = 0; wi < wins.length; wi++) {
+            const tabs = wins[wi].tabs();
+            for (let i = 0; i < tabs.length; i++) {
+              const u = tabs[i].url();
+              if (norm(u) === target || (home && site(u) === target)) {
+                if (safari) wins[wi].currentTab = tabs[i]; else wins[wi].activeTabIndex = i + 1;
+                if (wi > 0) wins[wi].index = 1;
+                app.activate();
+                return "switched";
+              }
+            }
+          }
+          if (!reuse) return "";
+          if (safari) app.windows[0].currentTab.url = want; else app.windows[0].activeTab.url = want;
+          app.activate();
+          return "navigated";
+        }
+        """#
+        let site = url.host?.replacingOccurrences(of: "www.", with: "") ?? url.absoluteString
+        switch await jxa(script, [browser.bundleID, browser.safari ? "safari" : "chromium", url.absoluteString,
+                                  reuse ? "1" : "0"]) {
+        case .success(let result) where result.hasPrefix("switched"):
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            return "Switched to the \(site) tab that was already open in \(browser.name)."
+        case .success(let result) where result.hasPrefix("navigated"):
+            return "Went to \(site) in the same tab."
+        default:
+            return nil
+        }
+    }
 }

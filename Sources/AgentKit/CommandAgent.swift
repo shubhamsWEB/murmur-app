@@ -55,13 +55,15 @@ public final class CommandAgent {
     }
 
     private let host: CommandHost
-    private let maxSteps = 16
+    private let maxSteps = 24
     /// A browser opened earlier in this command: web searches and addresses open there.
     private var lastBrowser: AppCatalog.App?
     /// The browser this command opened a page in (a named one, else the default browser), so later steps act in
     /// that window even before it comes to the front.
     private var openedIn: String?
     private var browserInUse: String? { lastBrowser?.bundleID ?? openedIn }
+    /// This command has put a page up: later pages load in that tab rather than new ones.
+    private var openedPage = false
     /// Whether each browser's pages can be scripted, checked once per command.
     private var pageAccess: [String: Bool] = [:]
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
@@ -76,6 +78,28 @@ public final class CommandAgent {
         let text = QuickCommands.clean(utterance)
         return text.range(of: #"(\band\b|\bthen\b|,)\s*(then\s+)?(also\s+)?[a-z]+"#, options: .regularExpression) != nil
             && text.split(separator: " ").count >= 4
+    }
+
+    /// "get me the updates on my last LinkedIn post", "how many stars does it have": the user wants to be told
+    /// something, so the command isn't done until an answer is shown.
+    nonisolated static func asksForInformation(_ utterance: String) -> Bool {
+        let text = QuickCommands.clean(utterance)
+        return text.range(of: #"^(what|whats|how|who|whose|when|where|which|why|is|are|was|were|do|does|did|can|could|tell me|get me|give me|find out|check|summari[sz]e|read|list|any)\b|\b(updates?|status|latest|news|summary|how many|how much|reactions?|comments|likes|views|impressions|price|weather|score)\b"#,
+                          options: .regularExpression) != nil
+    }
+
+    /// Page and screen dumps are thousands of characters each and slow every later step (a slow step is a timed-out
+    /// one): keep the latest two in full and cut older ones down.
+    nonisolated static func compacted(_ turns: [RouterTurn]) -> [RouterTurn] {
+        var keep = 2
+        var out = turns
+        for index in out.indices.reversed() {
+            guard case .toolResult(let id, let name, let content) = out[index], content.count > 1200 else { continue }
+            if keep > 0 { keep -= 1; continue }
+            out[index] = .toolResult(callID: id, name: name, content: String(content.prefix(500))
+                + "\n… (older page text cut; read the page again if you need it)")
+        }
+        return out
     }
 
     private static let screenChangingTools: Set<String> = [
@@ -99,6 +123,7 @@ public final class CommandAgent {
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
+        openedPage = false
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
@@ -288,6 +313,9 @@ public final class CommandAgent {
                 + "\"make it dark\", \"fix the error\", \"run it\", \"ask Claude to add tests\") go to it with "
                 + "coding_followup, not build_with_agent. A new, different project is build_with_agent."
         }
+        if let browser = BrowserControl.target(), let tab = await BrowserControl.currentTab(in: browser) {
+            context += "\nBrowser: \(browser.name), current tab: \(tab.title.prefix(120)) — \(tab.url.prefix(300))"
+        }
         if let selection, !selection.isEmpty {
             context += "\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n\(selection.prefix(8000))\n\"\"\""
         }
@@ -302,35 +330,39 @@ public final class CommandAgent {
         // Whether anything beyond opening an app or a page has happened: "open saleshq.ai and summarise it" isn't
         // done when the page is open, however soon the model says so.
         var didMoreThanOpen = false
-        var checkedEarlyDone = false
+        var checksBeforeDone = 0
+        var nudgedForTools = false
         let hasMoreSteps = Self.hasMoreThanOneStep(utterance)
+        let wantsAnswer = Self.asksForInformation(utterance)
         for step in 0..<maxSteps {
-            let reply: RouterReply
+            var answer: RouterReply?
             let asked = Date()
             do {
-                reply = try await router.chat(system: system, turns: turns, tools: tools)
+                answer = try await router.chat(system: system, turns: Self.compacted(turns), tools: tools)
                 host.log(String(format: "command: %@ step %d took %.2f s", router.name, step + 1,
                                 Date().timeIntervalSince(asked)))
             } catch {
-                host.log("command: \(router.name) failed: \(error.localizedDescription)")
+                host.log("command: \(router.name) failed at step \(step + 1): \(error.localizedDescription)")
                 RouterDiagnostics.lastError = error.localizedDescription   // a rejected key isn't asked again
-                // A cloud model that fails (offline, bad key) hands over to the local model once.
-                if !(router is OllamaRouter) {
+                // Too slow, or the connection dropped: ask the same model once more before giving up on it.
+                if let failure = error as? RouterError, case .unreachable = failure {
+                    host.progress("Still working… (step \(step + 1))")
+                    answer = try? await router.chat(system: system, turns: Self.compacted(turns), tools: tools)
+                }
+                // A cloud model that still fails (offline, bad key) hands over to the local model.
+                if answer == nil, !(router is OllamaRouter) {
                     router = OllamaRouter(model: routerModel)
                     host.progress("\(error.localizedDescription) Using the local model…")
-                    do {
-                        reply = try await router.chat(system: system, turns: turns, tools: tools)
-                    } catch {
-                        if searchInstead(utterance) { return }
-                        host.showAnswer(error.localizedDescription)
-                        return
-                    }
-                } else {
-                    if searchInstead(utterance) { return }
-                    host.showAnswer(error.localizedDescription)
+                    answer = try? await router.chat(system: system, turns: Self.compacted(turns), tools: tools)
+                }
+                if answer == nil {
+                    if step == 0, searchInstead(utterance) { return }
+                    host.showAnswer(step == 0 ? error.localizedDescription
+                        : "I stopped partway: \(error.localizedDescription) Try asking again.")
                     return
                 }
             }
+            guard let reply = answer else { return }
             let onlyAnswers = reply.calls.allSatisfy { $0.name == "reply" || $0.name == "done" }
             if !explicit, step == 0, onlyAnswers {
                 // A guessed command that only answers: it was dictation. Type the words.
@@ -341,8 +373,12 @@ public final class CommandAgent {
             if reply.calls.isEmpty {
                 // A model sometimes answers in plain text: treat that as the reply.
                 let text = ModelOutput.answer(reply.text)
-                if !text.isEmpty { host.showAnswer(text) }
-                return
+                if !text.isEmpty { host.showAnswer(text); return }
+                // Nothing at all: ask once more rather than stop silently half-way.
+                if nudgedForTools { await wrapUp(router: router, system: system, turns: turns, tools: tools); return }
+                nudgedForTools = true
+                turns.append(.user("Continue the request with tool calls: the next step, reply with the answer, or done."))
+                continue
             }
             turns.append(.assistant(text: reply.text, calls: reply.calls))
             var finishedNow = false
@@ -352,22 +388,28 @@ public final class CommandAgent {
             for (index, call) in reply.calls.enumerated() {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
                 if call.name == "done" {
-                    if hasMoreSteps, !didMoreThanOpen, !checkedEarlyDone {
-                        // Done after only opening something, for a request with more to it: show the model where
-                        // it is and the whole request again, once.
-                        checkedEarlyDone = true
-                        host.log("command: done after only opening something; asking for the rest of the request")
+                    if checksBeforeDone < 2, let why = notDoneYet(utterance, step: step, checks: checksBeforeDone,
+                                                                  didMoreThanOpen: didMoreThanOpen,
+                                                                  hasMoreSteps: hasMoreSteps, wantsAnswer: wantsAnswer) {
+                        // Check before stopping: show the model the request, where things stand and the screen.
+                        checksBeforeDone += 1
+                        host.log("command: done at step \(step + 1), checking it first (\(checksBeforeDone))")
                         let screen = await screenAfterChange(reply.calls.first?.name ?? "")
-                        turns.append(.toolResult(callID: call.id, name: call.name, content:
-                            "Not done yet. The user asked: \"\(utterance)\". So far you only opened something. Do the "
-                            + "rest now: to summarise, explain or answer something about the page, use the text on "
-                            + "the screen below (read_screen again or press_keys \"pagedown\" for more) and reply "
-                            + "with the answer. Then call done.\(screen)"))
-                        host.progress("Working… (step \(step + 2))")
+                        turns.append(.toolResult(callID: call.id, name: call.name, content: why + screen))
+                        host.progress("Checking it's all done…")
                         continue
                     }
                     turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
                     finishedNow = true
+                    continue
+                }
+                // reply ends the command, so a reply with more steps after it in the same response is a progress
+                // note ("Opening your post…"), not the answer: show it and go on.
+                if call.name == "reply",
+                   reply.calls[(index + 1)...].contains(where: { $0.name != "done" && $0.name != "reply" }) {
+                    host.progress(String(call.arguments["text"]?.description.prefix(140) ?? ""))
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Noted as progress, not shown as the answer: reply finishes the command, so keep it for the final answer."))
                     continue
                 }
                 if !Self.openingTools.contains(call.name) { didMoreThanOpen = true }
@@ -397,12 +439,52 @@ public final class CommandAgent {
             lastSignature = signature
             if repeats >= 2 {
                 host.log("command: the same step three times; stopping")
-                host.progress("Stopped: it kept trying the same step.")
+                await wrapUp(router: router, system: system, turns: turns, tools: tools)
                 return
             }
             host.progress("Working… (step \(step + 2))")
         }
         host.log("command: stopped after \(maxSteps) steps")
+        await wrapUp(router: router, system: system, turns: turns, tools: tools)
+    }
+
+    /// Why a command the model calls done isn't done yet, if it isn't: the model sees this and the screen, then goes
+    /// on (or calls done again). Nil: it's done.
+    private func notDoneYet(_ utterance: String, step: Int, checks: Int, didMoreThanOpen: Bool, hasMoreSteps: Bool,
+                            wantsAnswer: Bool) -> String? {
+        let asked = "The user asked: \"\(utterance)\"."
+        if wantsAnswer {
+            // An answer would have finished the command already: none has been given.
+            return "Not done yet. \(asked) They want to be told something, and you haven't told them. Read what's "
+                + "needed (browser_read, browser_scroll or browser_click to get to it, read_screen outside the browser), "
+                + "then call reply with the actual answer: the numbers, names or text they asked for."
+        }
+        if hasMoreSteps, !didMoreThanOpen {
+            return "Not done yet. \(asked) So far you only opened something. Do the rest now: to summarise, explain "
+                + "or answer something about the page, use the text on the screen below (read again or scroll for "
+                + "more) and reply with the answer. Then call done."
+        }
+        if step >= 1, checks == 0 {
+            return "Before finishing, check the work. \(asked) Compare every part of it with the screen below. If "
+                + "it's all done, call done again. If anything is missing or didn't work, do it now."
+        }
+        return nil
+    }
+
+    /// Out of steps, or going round in circles: rather than stop without a word, the model says what it found and
+    /// what's left; failing that, the user is told it stopped.
+    private func wrapUp(router: Router, system: String, turns: [RouterTurn], tools: [ToolSpec]) async {
+        var turns = turns
+        turns.append(.user("Stop here. Call reply now: in two or three sentences, what you found or did for the "
+            + "request, with any answer you have, and what's still left to do."))
+        let replyOnly = tools.filter { $0.name == "reply" }
+        if let last = try? await router.chat(system: system, turns: Self.compacted(turns), tools: replyOnly),
+           let call = last.calls.first(where: { $0.name == "reply" }) {
+            host.showAnswer(call.arguments["text"]?.description ?? "")
+            return
+        }
+        let text = ModelOutput.answer((try? await router.chat(system: system, turns: Self.compacted(turns), tools: []))?.text ?? "")
+        host.showAnswer(text.isEmpty ? "I couldn't finish that one. Try asking again, or in smaller steps." : text)
     }
 
     // MARK: - Tools
@@ -458,12 +540,14 @@ public final class CommandAgent {
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url":
             useBrowser(args["browser"])
-            openedIn = lastBrowser?.bundleID ?? BrowserControl.defaultBrowserID
-            return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))
+            guard let url = MacActions.webAddress(text("url")) else {
+                return Outcome(result: "That doesn't look like a web address.")
+            }
+            return Outcome(result: await showPage(url, opened: "Opened \(url.host ?? url.absoluteString)"))
         case "web_search":
             useBrowser(args["browser"])
-            openedIn = lastBrowser?.bundleID ?? BrowserControl.defaultBrowserID
-            return Outcome(result: MacActions.webSearch(text("query"), in: lastBrowser))
+            guard let url = MacActions.webSearchAddress(text("query")) else { return Outcome(result: "Couldn't build the search.") }
+            return Outcome(result: await showPage(url, opened: "Searching the web for \"\(text("query"))\""))
         case "set_volume": return Outcome(result: MacActions.setVolume(Int(args["percent"]?.number ?? 50)))
         case "change_volume": return Outcome(result: MacActions.changeVolume(by: text("direction") == "down" ? -15 : 15))
         case "mute":
@@ -518,8 +602,10 @@ public final class CommandAgent {
         case "open_settings": return Outcome(result: MacActions.openSettings(text("pane")))
         case "site_search":
             useBrowser(args["browser"])
-            openedIn = lastBrowser?.bundleID ?? BrowserControl.defaultBrowserID
-            return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
+            guard let url = MacActions.siteSearchAddress(text("site"), text("query")) else {
+                return Outcome(result: "Couldn't build the search.")
+            }
+            return Outcome(result: await showPage(url, opened: "Searching \(text("site")) for \"\(text("query"))\""))
         case "browser_read":
             guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open. open_url first.")
@@ -684,6 +770,23 @@ public final class CommandAgent {
         }
     }
 
+    /// Puts a page up for this command without piling up tabs: a tab that already has it comes to the front, and once
+    /// this command has opened a page, the next ones load in that same tab. Otherwise a new tab, as before.
+    private func showPage(_ url: URL, opened: String) async -> String {
+        let bundleID = lastBrowser?.bundleID ?? openedIn ?? BrowserControl.defaultBrowserID
+        if let browser = BrowserControl.running(bundleID),
+           let done = await BrowserControl.show(url, in: browser, reuse: openedPage) {
+            openedIn = browser.bundleID
+            openedPage = true
+            host.log("command: \(done)")
+            return done
+        }
+        openedIn = bundleID
+        openedPage = true
+        MacActions.open(url, in: lastBrowser)
+        return opened + (lastBrowser.map { " in \($0.name)" } ?? "") + "."
+    }
+
     /// Whether Murmur can work inside `browser`'s pages, checked once per command. When the browser's "Allow
     /// JavaScript from Apple Events" is off, Murmur offers once to turn it on (Chrome-family browsers, through their
     /// menu); declined or not possible, the browser tools work through the screen instead, silently.
@@ -819,6 +922,15 @@ public final class CommandAgent {
             "- Don't give up after one try: when a step fails, try another way (another tool, read_screen and click, "
                 + "or run_command). Only reply that something can't be done once the tools truly can't do it.",
             "- To answer a question, call reply with a short answer.",
+            "- Finish the WHOLE request, by the quickest route. A request to be told something (\"get me the updates "
+                + "on my latest LinkedIn post\", \"how many…\", \"what's…\") is only done when you call reply with the "
+                + "actual answer: the numbers, names or text. reply ends the command: use it once, for the final "
+                + "answer, never to describe a step.",
+            "- Tabs: the browser's current tab is given below when there is one. If it already shows what's needed, "
+                + "work there (browser_read) rather than opening it again. open_url, web_search and site_search come to "
+                + "a tab that already has the page, and after your first page they load in that same tab, so never "
+                + "open the same site twice. Inside a site, follow its links and buttons (browser_click: \"Me\", "
+                + "\"Posts\", \"Activity\", the post itself) rather than guessing deep addresses.",
         ]
         if !helpers.isEmpty {
             let names = helpers.map { $0 == .claude ? "ask_claude" : "ask_codex" }.joined(separator: " or ")

@@ -258,7 +258,7 @@ public struct AnthropicRouter: Router {
                 ["name": tool.name, "description": tool.description, "input_schema": tool.parameters]
             }
         }
-        let json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "Anthropic")
+        let json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 60, provider: "Anthropic")
         var text = ""
         var calls: [RouterCall] = []
         for block in json["content"] as? [[String: Any]] ?? [] {
@@ -356,13 +356,13 @@ public struct OpenAIRouter: Router {
         }
         let json: [String: Any]
         do {
-            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "OpenAI")
+            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 60, provider: "OpenAI")
         } catch RouterError.http(_, 400, let detail) where body["reasoning_effort"] != nil
                     && detail.localizedCaseInsensitiveContains("reasoning_effort") {
             // An older model that doesn't take "none" (gpt-5 takes minimal…high): ask without it, and remember.
             Self.reasoningOff = false
             body["reasoning_effort"] = nil
-            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "OpenAI")
+            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 60, provider: "OpenAI")
         }
         let message = ((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]) ?? [:]
         let calls = (message["tool_calls"] as? [[String: Any]] ?? []).compactMap { call -> RouterCall? in
