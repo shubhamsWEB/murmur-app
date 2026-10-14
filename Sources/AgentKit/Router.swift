@@ -305,6 +305,8 @@ public struct OpenAIRouter: Router {
     public static var model: String { UserDefaults.standard.string(forKey: "openaiModel") ?? "gpt-6-luna" }
     public var name: String { "OpenAI" }
     private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
+    /// Send `reasoning_effort: "none"` with tools; turned off for this launch if the model refuses that value.
+    nonisolated(unsafe) static var reasoningOff = true
 
     public init() {}
 
@@ -345,8 +347,23 @@ public struct OpenAIRouter: Router {
 
     public func chat(system: String, turns: [RouterTurn], tools: [ToolSpec]) async throws -> RouterReply {
         var body: [String: Any] = ["model": Self.model, "messages": messages(system: system, turns)]
-        if !tools.isEmpty { body["tools"] = toolList(tools) }   // an empty list is an error; none means plain text
-        let json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "OpenAI")
+        if !tools.isEmpty {
+            body["tools"] = toolList(tools)   // an empty list is an error; none means plain text
+            // GPT-5.4 and later refuse tools alongside reasoning on Chat Completions ("Function tools with
+            // reasoning_effort are not supported … set reasoning_effort to 'none'"), and reason by default. A router
+            // picks tools fast with reasoning off, as Claude runs here with thinking off.
+            if Self.reasoningOff { body["reasoning_effort"] = "none" }
+        }
+        let json: [String: Any]
+        do {
+            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "OpenAI")
+        } catch RouterError.http(_, 400, let detail) where body["reasoning_effort"] != nil
+                    && detail.localizedCaseInsensitiveContains("reasoning_effort") {
+            // An older model that doesn't take "none" (gpt-5 takes minimal…high): ask without it, and remember.
+            Self.reasoningOff = false
+            body["reasoning_effort"] = nil
+            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 20, provider: "OpenAI")
+        }
         let message = ((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]) ?? [:]
         let calls = (message["tool_calls"] as? [[String: Any]] ?? []).compactMap { call -> RouterCall? in
             guard let function = call["function"] as? [String: Any], let name = function["name"] as? String else {
@@ -358,29 +375,30 @@ public struct OpenAIRouter: Router {
         return RouterReply(text: message["content"] as? String ?? "", calls: calls)
     }
 
-    /// Text a tool call carries (a reply, a summary to paste) never includes the model's reasoning either.
-    static func withoutReasoning(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
-        arguments.mapValues { value in
-            guard case .string(let text) = value, ModelOutput.hadReasoning(text) else { return value }
-            return .string(ModelOutput.answer(text))
-        }
-    }
-
     public func choose(system: String, user: String, field: String, options: [String],
                        timeout: TimeInterval) async -> String? {
         let schema: [String: Any] = ["type": "object", "properties": [field: ["type": "string", "enum": options]],
                                      "required": [field]]
         let tool = ToolSpec(name: "answer", description: "Give the answer", parameters: schema)
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": Self.model,
             "messages": [["role": "system", "content": system], ["role": "user", "content": user]],
             "tools": toolList([tool]),
             "tool_choice": ["type": "function", "function": ["name": "answer"]] as [String: Any],
         ]
+        if Self.reasoningOff { body["reasoning_effort"] = "none" }   // tools + reasoning: see `chat`
         let json: [String: Any]
         do {
-            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
-                                           provider: "OpenAI")
+            do {
+                json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
+                                               provider: "OpenAI")
+            } catch RouterError.http(_, 400, let detail) where body["reasoning_effort"] != nil
+                        && detail.localizedCaseInsensitiveContains("reasoning_effort") {
+                Self.reasoningOff = false
+                body["reasoning_effort"] = nil
+                json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
+                                               provider: "OpenAI")
+            }
             RouterDiagnostics.lastError = nil
         } catch {
             RouterDiagnostics.lastError = error.localizedDescription
