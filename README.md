@@ -106,7 +106,7 @@ as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, C
 
 - **Your voice** is transcribed on your Mac by NVIDIA Parakeet on the Neural Engine. Audio is held in memory only
   while it’s transcribed, and never saved or sent anywhere.
-- **Your files** are indexed on your Mac, only in the folders you choose, with Google’s EmbeddingGemma.
+- **Your files** are indexed on your Mac, only in the folders you choose, with Google DeepMind’s EmbeddingGemma 2.
 - **Your screen** is read only while a command needs it: the browser page’s text, or the front window’s text and buttons through Accessibility,
   or, if you allow **Screen Recording**, its text read from a picture of the window, on your Mac. The picture is
   never saved or sent.
