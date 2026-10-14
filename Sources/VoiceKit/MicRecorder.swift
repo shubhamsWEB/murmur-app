@@ -88,10 +88,12 @@ public final class MicRecorder: @unchecked Sendable {
 
 public enum VoiceError: LocalizedError {
     case noMicrophone
+    case busy
 
     public var errorDescription: String? {
         switch self {
         case .noMicrophone: return "No microphone is available."
+        case .busy: return "Murmur is already listening. Finish that first."
         }
     }
 }

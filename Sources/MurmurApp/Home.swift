@@ -825,6 +825,7 @@ private struct DictationPage: View {
     let state: HomeState
     @ObservedObject private var history = DictationHistory.shared
     @ObservedObject private var dictionary = PersonalDictionary.shared
+    @State private var checkingVoice = false
 
     var body: some View {
         let _ = state.revision
@@ -867,8 +868,14 @@ private struct DictationPage: View {
                 }
             }
             SettingsSection("Accuracy") {
+                SettingRow(title: "Voice check",
+                           detail: "Read three short sentences, about ten seconds. Murmur finds the names it mishears and adds them to your dictionary.") {
+                    Button("Check my voice") { checkingVoice = true }.buttonStyle(.murmurSecondary)
+                }
+                RowDivider()
                 DictionaryEditor(dictionary: dictionary)
             }
+            .sheet(isPresented: $checkingVoice) { VoiceCheckView(dictation: dictation) }
             SettingsSection("Commands or text") {
                 SettingRow(title: "Tell commands from dictation",
                            detail: "“Open Slack” runs; “see you at 5” is typed. Off: only the key with ⌃ runs commands.") {

@@ -49,6 +49,8 @@ public final class DictationController: ObservableObject {
     /// At the key press: whether a text field had the focus, and what was selected.
     private var focusAtPress = IntentClassifier.Focus.unknown
     private var selectionAtPress: String?
+    /// The voice check is recording: the talk key waits.
+    private var checking = false
 
     /// Decide from the words whether you're dictating or giving a command (on by default). Fn+⌃ always means a command.
     public var detectCommands: Bool {
@@ -92,6 +94,61 @@ public final class DictationController: ObservableObject {
         monitor.onModifiers = { [weak self] flags in self?.modifiersChanged(flags) }
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.hud.setLevel(level) }
+        }
+        // Your dictionary's words, listened for from the first dictation (the listening model loads in the background).
+        let terms = Self.vocabulary()
+        Task { [transcriber] in await transcriber.setVocabulary(terms) }
+    }
+
+    /// The personal dictionary as custom vocabulary: each word, and what it's heard as.
+    static func vocabulary() -> [ParakeetTranscriber.VocabularyTerm] {
+        PersonalDictionary.shared.entries.map { ParakeetTranscriber.VocabularyTerm(text: $0.written, aliases: $0.heard) }
+    }
+
+    // MARK: Voice check
+
+    /// Starts recording one voice-check sentence (the talk key isn't involved).
+    public func startCheckRecording() throws {
+        guard phase == .idle, !checking else { throw VoiceError.busy }
+        try recorder.start()
+        checking = true
+    }
+
+    /// What was just read.
+    public func stopCheckRecording() -> [Float] {
+        checking = false
+        return recorder.stop()
+    }
+
+    public func cancelCheckRecording() {
+        guard checking else { return }
+        checking = false
+        recorder.cancel()
+    }
+
+    /// A voice-check recording transcribed the way dictation does it: `heard` is Parakeet alone, `text` is with your
+    /// dictionary listened for. `samples` comes back levelled, for saving.
+    public func transcribeForCheck(_ samples: [Float]) async throws -> (transcript: ParakeetTranscriber.Transcript,
+                                                                        samples: [Float]) {
+        let leveled = AudioLevel.normalize(samples, maxGainDB: whisperMode ? 32 : 20)
+        await transcriber.setVocabulary(Self.vocabulary())
+        return (try await transcriber.transcribeDetailed(leveled.samples), leveled.samples)
+    }
+
+    /// Keeps a voice-check sentence on this Mac (a WAV and what it says), so Murmur can learn your voice later.
+    /// In ~/Library/Application Support/Murmur/Voice.
+    public static func keepRecording(_ samples: [Float], said: String, heard: String) {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let folder = base.appendingPathComponent("Murmur/Voice", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let name = "check-\(Int(Date().timeIntervalSince1970 * 1000))"
+            try WAV.write(samples, sampleRate: 16_000, to: folder.appendingPathComponent(name + ".wav"))
+            let info: [String: String] = ["said": said, "heard": heard, "date": ISO8601DateFormatter().string(from: Date())]
+            let data = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: folder.appendingPathComponent(name + ".json"))
+        } catch {
+            // Keeping recordings is a bonus; the check works without it.
         }
     }
 
@@ -138,6 +195,8 @@ public final class DictationController: ObservableObject {
         UserDefaults.standard.set(model.rawValue, forKey: Self.modelDefault)
         transcriber = ParakeetTranscriber(model: model)
         log("dictation: speech model is now \(model.rawValue)")
+        let terms = Self.vocabulary()
+        Task { [transcriber] in await transcriber.setVocabulary(terms) }
         Task { await prepareModel() }
     }
 
@@ -290,6 +349,7 @@ public final class DictationController: ObservableObject {
         case .listening(handsFree: true):
             finish()                       // a tap ends hands-free dictation
         case .idle:
+            guard !checking else { return }
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(.control)
@@ -371,6 +431,7 @@ public final class DictationController: ObservableObject {
         let samples = leveled.samples
         lastSamples = samples
         let transcriber = transcriber
+        let vocabulary = Self.vocabulary()
         let forcedCommand = commandRequested
         let frontApp = previousApp?.localizedName
         let pressedSelection = selectionAtPress
@@ -385,7 +446,12 @@ public final class DictationController: ObservableObject {
             hud.show(ready ? .transcribing : .working(modelStatus))
             let started = Date()
             do {
-                let raw = try await transcriber.transcribe(samples)
+                await transcriber.setVocabulary(vocabulary)
+                let transcript = try await transcriber.transcribeDetailed(samples)
+                if !transcript.applied.isEmpty {
+                    log("dictation: custom vocabulary put in \(transcript.applied.count) of your words")
+                }
+                let raw = transcript.text
                 let text = TranscriptCleanup.quick(TextCleanup.basic(raw), dictionary: PersonalDictionary.shared)
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
@@ -809,7 +875,7 @@ extension DictationController {
     }
 
     /// A word the system spell checker knows.
-    static func isRealWord(_ word: String) -> Bool {
+    public static func isRealWord(_ word: String) -> Bool {
         let range = NSSpellChecker.shared.checkSpelling(of: word, startingAt: 0)
         return range.location == NSNotFound
     }
