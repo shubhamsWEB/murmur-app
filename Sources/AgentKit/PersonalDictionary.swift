@@ -34,7 +34,7 @@ public final class PersonalDictionary: ObservableObject {
         }
     }
 
-    /// The words and names to spell your way, for the AI pass.
+    /// The words and names to spell your way.
     public var terms: [String] { entries.map(\.written) }
 
     /// Adds a word (and optionally what it's heard as); an entry for the same word gains the new spellings.

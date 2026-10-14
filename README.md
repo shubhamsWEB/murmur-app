@@ -63,9 +63,6 @@ menu bar menu) boosts quiet speech.
 - **Instant fixes, always on:** filler sounds (“um”, “uh”) are dropped, a number you correct yourself (“at 2, sorry,
   3”) keeps only the correction, and your **personal dictionary** spells names and terms your way (“kopiko” →
   “Copico”). Add words under **Dictation → Accuracy**; Murmur also learns when you fix a misheard word it typed.
-- **Fix misheard words with AI (optional):** a quick pass that corrects words the speech model got wrong, using the
-  app you're in, the text before your cursor and your dictionary. It never rephrases: Murmur compares the result
-  with what it heard, word by word, and types the original if more than a few words changed.
 
 ### Commands
 
@@ -108,8 +105,6 @@ as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, C
 - **Your voice** is transcribed on your Mac by NVIDIA Parakeet on the Neural Engine. Audio is held in memory only
   while it’s transcribed, and never saved or sent anywhere.
 - **Your files** are indexed on your Mac, only in the folders you choose, with Google’s EmbeddingGemma.
-- **Fixing misheard words** runs on your Mac, or, if you choose “With your AI model”, sends the dictated text (never
-  audio) to Claude or OpenAI.
 - **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, only the command’s words, the
   front app’s name and any selected text are sent to that provider. Never audio, never files.
 - **Network use** is otherwise limited to the one-time model downloads from Hugging Face.

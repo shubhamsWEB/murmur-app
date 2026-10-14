@@ -867,18 +867,6 @@ private struct DictationPage: View {
                 }
             }
             SettingsSection("Accuracy") {
-                SettingRow(title: "Fix misheard words with AI",
-                           detail: "Fixes words the speech model got wrong, using the app you're in and your dictionary. "
-                               + "It never rephrases: if a fix would change more than a few words, Murmur types what it "
-                               + "heard. “With your AI model” sends the text, never audio, to Claude or OpenAI.") {
-                    Picker("Fix misheard words with AI",
-                           selection: state.bind(get: { dictation.polish }, set: { dictation.polish = $0 })) {
-                        ForEach(DictationController.Polish.allCases, id: \.self) { Text($0.display).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 220)
-                }
-                RowDivider()
                 DictionaryEditor(dictionary: dictionary)
             }
             SettingsSection("Commands or text") {

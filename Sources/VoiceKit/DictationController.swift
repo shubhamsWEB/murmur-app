@@ -76,24 +76,6 @@ public final class DictationController: ObservableObject {
     private static let whisperDefault = "whisperMode"
 
     /// Whisper Mode: boost quiet speech up to 32 dB instead of 20 dB, for whispering or speaking softly.
-    /// Where the AI pass that fixes misheard words runs (`TranscriptCleanup.fix`). Off by default: the instant fixes
-    /// (fillers, your dictionary) always run.
-    public enum Polish: String, CaseIterable, Sendable {
-        case off, local, cloud
-        public var display: String {
-            switch self {
-            case .off: "Off"
-            case .local: "On this Mac"
-            case .cloud: "With your AI model"
-            }
-        }
-    }
-
-    public var polish: Polish {
-        get { UserDefaults.standard.string(forKey: "dictation.polish").flatMap(Polish.init) ?? .off }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "dictation.polish") }
-    }
-
     public var whisperMode: Bool {
         get { UserDefaults.standard.bool(forKey: Self.whisperDefault) }
         set { UserDefaults.standard.set(newValue, forKey: Self.whisperDefault) }
@@ -394,10 +376,9 @@ public final class DictationController: ObservableObject {
         let pressedSelection = selectionAtPress
         let focus = focusAtPress
         let detect = detectCommands
-        // Where you're typing, read now while it's still in front: context for fixing misheard words, and the
-        // field to look at again later to learn from your corrections.
+        // Where you're typing, read now while it's still in front: the field to look at again later, to learn from
+        // your corrections.
         let typingInto = Self.focusedElement()
-        let beforeCursor = polish == .off ? nil : typingInto.flatMap { Self.textBeforeCursor(in: $0) }
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
@@ -443,7 +424,7 @@ public final class DictationController: ObservableObject {
                     if hud.isWorking { hud.hide() }
                     return
                 }
-                let output = await polished(text, app: frontApp, before: beforeCursor)
+                let output = text
                 lastText = output
                 DictationHistory.shared.add(output, app: frontApp, kind: .dictation)
                 if focus == .notText {
@@ -804,34 +785,9 @@ extension DictationController {
 
     // MARK: Getting the words right
 
-    /// The AI pass over a dictation, when it's on: misheard words fixed, nothing rephrased (`TranscriptCleanup.fix`
-    /// throws away an answer that changed more than a few words). The transcript as heard when it's off, slow or
-    /// unfaithful.
-    private func polished(_ text: String, app: String?, before: String?) async -> String {
-        guard polish != .off else { return text }
-        let router: Router
-        if polish == .cloud {
-            router = Routers.current(localModel: agent.routerModel)
-        } else {
-            router = OllamaRouter(model: agent.routerModel)
-        }
-        let started = Date()
-        let fixed = await TranscriptCleanup.fix(text, app: app, before: before, terms: PersonalDictionary.shared.terms,
-                                                router: router, timeout: polish == .cloud ? 2.5 : 2.0)
-        let took = Date().timeIntervalSince(started)
-        guard let fixed else {
-            log(String(format: "polish: kept the transcript as heard (%@, %.2f s)", router.name, took))
-            return text
-        }
-        let changed = TranscriptCleanup.editDistance(TranscriptCleanup.words(text), TranscriptCleanup.words(fixed))
-        log(String(format: "polish: %@ fixed %ld word(s) in %.2f s", router.name, changed, took))
-        return fixed
-    }
-
     /// Looks at the field again a little after typing into it. Words of the dictation you replaced with look-alikes
-    /// are mishearings to remember (`CorrectionLearner`). Only a misheard non-word is swapped automatically from then
-    /// on ("kopiko" → "Copico"); a real word you changed ("pool" → "pull") depends on context, so the new spelling
-    /// only joins your dictionary as a term for the AI pass, if it's a name or a term at all.
+    /// are mishearings to remember (`CorrectionLearner`). Only a misheard non-word is swapped from then on ("kopiko"
+    /// → "Copico"): a real word you changed ("pool" → "pull") depends on context, so it's never replaced blindly.
     private func learnFromEdits(of typed: String, in element: AXUIElement) {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 15_000_000_000)
@@ -844,8 +800,6 @@ extension DictationController {
                     dictionary.add(pair.written, learned: true)
                 } else if !Self.isRealWord(pair.heard) {
                     dictionary.learn(heard: pair.heard, written: pair.written)
-                } else if !Self.isRealWord(pair.written) || pair.written.first?.isUppercase == true {
-                    dictionary.add(pair.written, learned: true)
                 } else {
                     continue
                 }
@@ -872,20 +826,6 @@ extension DictationController {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success else { return nil }
         return value as? String
-    }
-
-    /// Up to `limit` characters before the insertion point: what the dictation continues.
-    static func textBeforeCursor(in element: AXUIElement, limit: Int = 400) -> String? {
-        guard let value = value(of: element) else { return nil }
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-              let rangeRef, CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return nil }
-        var range = CFRange()
-        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) else { return nil }
-        let text = value as NSString
-        let end = min(max(range.location, 0), text.length)
-        let start = max(0, end - limit)
-        return text.substring(with: NSRange(location: start, length: end - start))
     }
 
     /// The text selected in the focused app, through Accessibility (for "make this shorter", "reply to this").
