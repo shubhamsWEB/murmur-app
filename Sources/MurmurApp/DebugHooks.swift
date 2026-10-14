@@ -268,7 +268,11 @@ enum DebugHooks {
         Opener.dryRun = mode == "dry"
         app.engine.open(row)
         // A real open waits for the other app to report back (QuickTime Player says where it is).
-        DispatchQueue.main.asyncAfter(deadline: .now() + (Opener.dryRun ? 0.5 : 6), execute: done)
+        let wait = Opener.dryRun ? 0.5 : 6.0
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            done()
+        }
     }
 
     /// `-debugQuickLook`: Space on `row`, then what Quick Look shows (it's on screen, and takes the keyboard).

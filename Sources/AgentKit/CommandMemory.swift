@@ -467,7 +467,10 @@ public enum CommandMemory {
     public static func isFollowUp(_ utterance: String) -> Bool {
         guard let since = sinceLast, since < 300 else { return false }
         let text = QuickCommands.clean(utterance)
-        return text.range(of: #"^(and|also|and also|then|and then|plus|oh and|one more thing|after that)\b|^(tell|ask|send|message|text|reply to|remind|let|call|ping|email|show|give) (her|him|them|it|that|those)\b|^(do it|do that|same|same thing|again|do it again|try again|undo that|send it|send that|open it|play it|reply)\b|\b(her|him|them)\b.*\b(too|also|as well)\b"#,
+        // Follow-ups are short and say what to do: "and also ask her…", "send it", "tell him too". A sentence that
+        // only starts with "Also" or "And" ("Also I noticed a bug…") is dictation.
+        guard text.split(separator: " ").count <= 20 else { return false }
+        return text.range(of: #"^(and|also|and also|then|and then|plus|oh and|one more thing|after that) (please )?(ask|tell|send|message|text|whatsapp|open|play|pause|stop|search|find|show|remind|reply|call|email|ping|close|quit|turn|set|check|add|delete|forward|share|save|copy|paste|summari[sz]e|translate|write|type|book|schedule|do)\b|^(tell|ask|send|message|text|reply to|remind|let|call|ping|email|show|give) (her|him|them|it|that|those)\b|^(do it|do that|same thing|do it again|try again|undo that|send it|send that|open it|play it|paste it)\b"#,
                           options: .regularExpression) != nil
     }
 

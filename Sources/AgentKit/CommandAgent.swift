@@ -66,6 +66,15 @@ public final class CommandAgent {
     private var openedPage = false
     /// The user said yes to sending a message in this command: Return in a chat app doesn't ask again.
     private var messageApproved = false
+    /// Where you were typing when you spoke: the app, the field, and in a browser the tab. A command that goes off to
+    /// another page or app to copy something comes back here to paste it.
+    private struct InputTarget {
+        let app: NSRunningApplication
+        let field: AXUIElement?
+        let tab: String?
+    }
+    private var inputTarget: InputTarget?
+
     /// Memory, read once for this command: applied by the actions on every path.
     private var prefs = CommandMemory.Preferences()
     /// What this command did, for memory: each tool call with its main arguments and result.
@@ -181,6 +190,7 @@ public final class CommandAgent {
         }
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
         prefs = CommandMemory.preferences()
+        inputTarget = await captureInputTarget()
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
@@ -572,6 +582,38 @@ public final class CommandAgent {
         var shown = false
     }
 
+    private func captureInputTarget() async -> InputTarget? {
+        guard let app = ScreenControl.workingApp() else { return nil }
+        var field: AXUIElement?
+        var value: CFTypeRef?
+        if AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString, &value) == .success,
+           let value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+            let element = value as! AXUIElement
+            var pid: pid_t = 0
+            if AXUIElementGetPid(element, &pid) == .success, pid == app.processIdentifier { field = element }
+        }
+        var tab: String?
+        if let browser = BrowserControl.browser(for: app) { tab = await BrowserControl.currentTab(in: browser)?.url }
+        return InputTarget(app: app, field: field, tab: tab)
+    }
+
+    /// Back to where you were typing: the tab (if the command moved to another one), the app, the field.
+    private func backToInput() async {
+        guard let target = inputTarget else { return }
+        if let tab = target.tab, let url = URL(string: tab), let id = target.app.bundleIdentifier,
+           let browser = BrowserControl.running(id), await BrowserControl.currentTab(in: browser)?.url != tab {
+            _ = await BrowserControl.show(url, in: browser, reuse: false)
+        }
+        if !target.app.isActive {
+            target.app.activate(options: [])
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        if let field = target.field {
+            AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+    }
+
     /// No browser named and none in use yet: the one you told Murmur to use for links.
     private func preferredBrowser() {
         guard lastBrowser == nil, let name = prefs.browser else { return }
@@ -862,8 +904,28 @@ public final class CommandAgent {
             host.progress("Written in \(appName)")
             return Outcome(result: "Wrote it in \(appName).", finished: true, shown: true)
         case "insert_text":
-            host.insert(text("text"))
+            // Into the box you were typing in, even if the command went elsewhere to get the text.
+            await backToInput()
+            host.pasteHere(text("text"))
             return Outcome(result: "Pasted.", finished: true, shown: true)
+        case "read_clipboard":
+            let copied = NSPasteboard.general.string(forType: .string) ?? ""
+            return Outcome(result: copied.isEmpty ? "The clipboard has no text."
+                : "Clipboard (\(copied.count) characters):\n\(copied.prefix(8000))")
+        case "copy_text":
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text("text"), forType: .string)
+            return Outcome(result: "Copied \(text("text").count) characters to the clipboard.")
+        case "paste_clipboard":
+            // What's on the clipboard (with its formatting), into the box you were typing in.
+            guard NSPasteboard.general.pasteboardItems?.isEmpty == false else {
+                return Outcome(result: "The clipboard is empty.")
+            }
+            await backToInput()
+            _ = ScreenControl.press("cmd+v")
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            return Outcome(result: "Pasted the clipboard into \(inputTarget?.app.localizedName ?? "the app").",
+                           finished: true, shown: true)
         case "replace_selection":
             let body = text("text")
             if await host.replaceSelection(body) {
@@ -1183,6 +1245,10 @@ public final class CommandAgent {
                 + "the team on Slack…\"): send_message with the app, who it's for and the message in the user's words "
                 + "(fix only obvious transcription slips). It asks the user first. If its result says to finish on the "
                 + "screen, do that. Never just type the request into the box the user is in.",
+            "- Copy and paste: \"paste what I copied\" → paste_clipboard. \"Copy the text from the other page/app and paste "
+                + "it here\" → get the text (browser_switch_tab or open_app, then browser_read or read_screen; or select it "
+                + "and press_keys cmd+c, then read_clipboard), then insert_text with exactly that text: it goes back to "
+                + "the box the user was in. Never type the request itself into the box.",
             "- Documents: open_file with the user's own distinctive words (\"Q3 sales report\", \"lease 2025\"), never "
                 + "a generic word like \"document\". If it says it's showing matches, the user picks; don't open "
                 + "something else instead.",
@@ -1285,7 +1351,11 @@ public final class CommandAgent {
                  ["app": ("string", "app name"), "text": ("string", "the full finished text to write"),
                   "new_document": ("boolean", "true for a new note/document (default), false to add to the open one")],
                  required: ["app", "text"]),
-            tool("insert_text", "Paste finished text where the user is typing", ["text": ("string", "the text")]),
+            tool("insert_text", "Paste finished text into the box the user was typing in when they spoke (Murmur goes "
+                 + "back there first, even after visiting another page or app)", ["text": ("string", "the text")]),
+            tool("read_clipboard", "Read the text on the clipboard (what the user copied)"),
+            tool("copy_text", "Put text on the clipboard", ["text": ("string", "the text")]),
+            tool("paste_clipboard", "Paste what's on the clipboard, formatting and all, into the box the user was typing in"),
             tool("replace_selection", "Put finished text in place of the user's selected text (a translation, a "
                  + "rewrite, a fix)", ["text": ("string", "the finished text")]),
             tool("run_command", "Run a shell command on the Mac (zsh, in the home folder) and return its output",
