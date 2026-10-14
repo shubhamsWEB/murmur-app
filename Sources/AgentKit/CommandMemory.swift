@@ -12,7 +12,28 @@ import SQLite3
 /// latest commands and what's in play), and asks for more with `recall`, which reads the store with an index and
 /// full-text search. On this Mac only (~/Library/Application Support/Murmur/memory.sqlite), 90 days or 3,000
 /// commands, whichever is less.
+///
+/// It's also how Murmur fits the way you work: what you tell it to remember ("Mom is Roma, on WhatsApp", "from now on
+/// open links in Chrome") is kept as facts, and what it notices from your commands (Roma's messages always go on
+/// WhatsApp) as learned defaults, worked out on the fly. Both reach the model with every command; your facts win.
+/// The Memory page shows all three, each with a way to forget it.
 public enum CommandMemory {
+    /// One line on the Memory page: a fact you told Murmur, a pattern it noticed, or a recent command.
+    public struct Item: Identifiable, Sendable, Equatable {
+        public let id: String
+        public let text: String
+        public let detail: String
+    }
+
+    private static let remembersKey = "memory.remembersCommands"
+
+    /// Whether commands are remembered (on unless you turn it off on the Memory page). Facts you tell Murmur are
+    /// kept either way.
+    public static var remembersCommands: Bool {
+        get { UserDefaults.standard.object(forKey: remembersKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: remembersKey) }
+    }
+
     /// One tool call, as remembered: its name, its main arguments and a short result.
     public struct Action: Sendable {
         let tool: String
@@ -44,7 +65,7 @@ public enum CommandMemory {
         let now = Date()
         lock.lock(); defer { lock.unlock() }
         lastAt = now
-        guard let db = open() else { return }
+        guard remembersCommands, let db = open() else { return }
         exec(db, "BEGIN")
         let episode = insert(db, "INSERT INTO episode(at, said, app, window, kind, outcome, summary, result) VALUES(?,?,?,?,?,?,?,?)",
                              [now.timeIntervalSince1970, said, app ?? "", window ?? "", kind, outcome, summary,
@@ -65,10 +86,11 @@ public enum CommandMemory {
         exec(db, "COMMIT")
     }
 
-    /// Forgets the last command (or everything).
-    public static func forget(all: Bool) {
+    /// Forgets the last command, or every command (and with `facts`, what you told Murmur too).
+    public static func forget(all: Bool, facts: Bool = false) {
         lock.lock(); defer { lock.unlock() }
         guard let db = open() else { return }
+        if facts { exec(db, "DELETE FROM fact") }
         if all {
             for table in ["mention", "action", "entity", "episode"] { exec(db, "DELETE FROM \(table)") }
             exec(db, "INSERT INTO episode_fts(episode_fts) VALUES('rebuild')")
@@ -78,6 +100,126 @@ public enum CommandMemory {
             tidy(db)
             lastAt = nil
         }
+    }
+
+    // MARK: Facts you tell Murmur
+
+    /// Keeps a fact about you or how you like things done, under a short subject ("Roma", "browser", "message
+    /// style"). The same subject again replaces it.
+    static func remember(subject: String, fact: String) -> String {
+        let key = subject.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = fact.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !text.isEmpty else { return "Nothing to remember." }
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return "Memory isn't available." }
+        exec(db, "INSERT INTO fact(subject, text, source, at) VALUES(?,?,'told',?) "
+             + "ON CONFLICT(subject) DO UPDATE SET text = excluded.text, source = 'told', at = excluded.at",
+             [key, text, Date().timeIntervalSince1970])
+        return "Remembered: \(text)"
+    }
+
+    /// Drops the facts whose subject or text has these words.
+    static func unremember(_ words: String) -> String {
+        let wanted = words.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else { return "Which one?" }
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return "Memory isn't available." }
+        let gone = rows(db, "SELECT text FROM fact WHERE source = 'told' AND (subject = ? OR lower(text) LIKE ?)",
+                        [wanted, "%\(wanted)%"]).map { $0[0] }
+        exec(db, "DELETE FROM fact WHERE source = 'told' AND (subject = ? OR lower(text) LIKE ?)", [wanted, "%\(wanted)%"])
+        return gone.isEmpty ? "There was nothing about \"\(words)\" to forget." : "Forgot: " + gone.joined(separator: "; ")
+    }
+
+    /// What you told Murmur, newest first.
+    public static func toldFacts() -> [Item] {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return [] }
+        return rows(db, "SELECT id, text, at FROM fact WHERE source = 'told' ORDER BY at DESC", []).map {
+            Item(id: "fact:\($0[0])", text: $0[1], detail: "")
+        }
+    }
+
+    /// Patterns in your commands, worked out now (nothing stored but the ones you dismissed): who you message where,
+    /// the sites and apps you go back to. Only clear patterns: three times or more, and the same way four times in five.
+    public static func learned() -> [Item] {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return [] }
+        return learnedItems(db)
+    }
+
+    /// The latest commands, newest first.
+    public static func recentCommands(limit: Int = 8) -> [Item] {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return [] }
+        return rows(db, "SELECT id, said, summary, at FROM episode ORDER BY id DESC LIMIT ?", [limit]).map {
+            Item(id: "episode:\($0[0])", text: $0[1], detail: "\($0[2]) · \(ago($0[3]))")
+        }
+    }
+
+    /// Forgets one item from the Memory page: a fact, a learned pattern (it stays dismissed), or a command.
+    public static func remove(_ id: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return }
+        let parts = id.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return }
+        switch parts[0] {
+        case "fact": exec(db, "DELETE FROM fact WHERE id = ?", [Int(parts[1]) ?? -1])
+        case "learned":
+            exec(db, "INSERT INTO fact(subject, text, source, at) VALUES(?, '', 'dismissed', ?) "
+                 + "ON CONFLICT(subject) DO UPDATE SET source = 'dismissed'", ["learned:" + parts[1], Date().timeIntervalSince1970])
+        case "episode":
+            exec(db, "DELETE FROM episode WHERE id = ?", [Int(parts[1]) ?? -1])
+            tidy(db)
+        default: break
+        }
+    }
+
+    private static func learnedItems(_ db: OpaquePointer) -> [Item] {
+        let dismissed = Set(rows(db, "SELECT subject FROM fact WHERE source = 'dismissed'", []).map { $0[0] })
+        var items: [Item] = []
+        // Who you message where.
+        let messages = rows(db, """
+            SELECT lower(json_extract(args, '$.to')), json_extract(args, '$.to'), json_extract(args, '$.app'), count(*)
+            FROM action WHERE tool = 'send_message' AND json_extract(args, '$.app') != ''
+            GROUP BY 1, lower(json_extract(args, '$.app')) ORDER BY 1, 4 DESC
+            """, [])
+        var seen = Set<String>()
+        for person in Set(messages.map { $0[0] }).sorted() {
+            let rowsFor = messages.filter { $0[0] == person }
+            let total = rowsFor.reduce(0) { $0 + (Int($1[3]) ?? 0) }
+            guard let top = rowsFor.first, let count = Int(top[3]), total >= 3, Double(count) / Double(total) >= 0.8 else { continue }
+            let key = "message:\(person)"
+            guard !dismissed.contains("learned:" + key), seen.insert(key).inserted else { continue }
+            items.append(Item(id: "learned:" + key, text: "Messages \(top[1]) on \(top[2])",
+                              detail: "\(count) of \(total) messages"))
+        }
+        // Sites and apps you go back to (the last 30 days).
+        let since = Date().timeIntervalSince1970 - 30 * 86400
+        let opened = rows(db, """
+            SELECT a.tool, coalesce(json_extract(a.args, '$.url'), json_extract(a.args, '$.name')) FROM action a
+            JOIN episode e ON e.id = a.episode WHERE e.at > ? AND a.tool IN ('open_url', 'open_app')
+            """, [since])
+        var counts: [String: (label: String, count: Int)] = [:]
+        for row in opened {
+            let label: String
+            if row[0] == "open_url" {
+                var address = row[1].lowercased()
+                if !address.contains("://") { address = "https://" + address }
+                guard let host = URL(string: address)?.host?.replacingOccurrences(of: "www.", with: "") else { continue }
+                label = host
+            } else {
+                label = row[1]
+            }
+            guard !label.isEmpty else { continue }
+            counts[label.lowercased(), default: (label, 0)].count += 1
+        }
+        for (key, value) in counts.sorted(by: { $0.value.count > $1.value.count }) where value.count >= 3 {
+            let id = "often:\(key)"
+            guard !dismissed.contains("learned:" + id) else { continue }
+            items.append(Item(id: "learned:" + id, text: "Often opens \(value.label)", detail: "\(value.count) times this month"))
+            if items.count >= 8 { break }
+        }
+        return Array(items.prefix(8))
     }
 
     // MARK: Reading
@@ -99,8 +241,18 @@ public enum CommandMemory {
                           [now - 2 * 3600]).reversed()
         let things = rows(db, "SELECT type, name, detail, last_seen FROM entity WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 8",
                           [now - 24 * 3600])
-        guard !recent.isEmpty || !things.isEmpty else { return nil }
+        let told = rows(db, "SELECT text FROM fact WHERE source = 'told' ORDER BY at DESC LIMIT 20", []).map { $0[0] }
+        let noticed = learnedItems(db)
+        guard !recent.isEmpty || !things.isEmpty || !told.isEmpty || !noticed.isEmpty else { return nil }
         var lines: [String] = []
+        if !told.isEmpty {
+            lines.append("The user told you (follow these over everything else):")
+            lines.append(contentsOf: told.map { "- \($0)" })
+        }
+        if !noticed.isEmpty {
+            lines.append("Noticed from their commands (defaults when they don't say otherwise): "
+                         + noticed.map { "\($0.text) (\($0.detail))" }.joined(separator: "; "))
+        }
         if !recent.isEmpty {
             lines.append("Latest commands (oldest first):")
             for row in recent {
@@ -289,7 +441,7 @@ public enum CommandMemory {
             """,
             "CREATE INDEX IF NOT EXISTS action_episode ON action(episode)",
             """
-            CREATE TABLE IF NOT EXISTS entity(id INTEGER PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, detail TEXT,
+            CREATE TABLE IF NOT EXISTS entity(id INTEGER PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL COLLATE NOCASE, detail TEXT,
               last_seen REAL, uses INTEGER, UNIQUE(type, name))
             """,
             "CREATE INDEX IF NOT EXISTS entity_seen ON entity(last_seen)",
@@ -298,6 +450,10 @@ public enum CommandMemory {
               entity INTEGER NOT NULL REFERENCES entity(id) ON DELETE CASCADE, PRIMARY KEY(episode, entity))
             """,
             "CREATE INDEX IF NOT EXISTS mention_entity ON mention(entity)",
+            """
+            CREATE TABLE IF NOT EXISTS fact(id INTEGER PRIMARY KEY, subject TEXT NOT NULL UNIQUE, text TEXT NOT NULL,
+              source TEXT NOT NULL, at REAL)
+            """,
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS episode_fts USING fts5(said, summary, result, content='episode',
               content_rowid='id', tokenize='unicode61 remove_diacritics 2')

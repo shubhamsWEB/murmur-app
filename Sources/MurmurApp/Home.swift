@@ -8,7 +8,7 @@ import VoiceKit
 
 /// The sections of Murmur's window.
 enum HomeSection: String, CaseIterable, Identifiable {
-    case home, search, dictation, commands, folders, about
+    case home, search, dictation, commands, memory, folders, about
 
     var id: String { rawValue }
 
@@ -18,6 +18,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         case .search: "Search"
         case .dictation: "Dictation"
         case .commands: "Commands & AI"
+        case .memory: "Memory"
         case .folders: "Folders"
         case .about: "About"
         }
@@ -29,6 +30,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         case .search: "magnifyingglass"
         case .dictation: "waveform"
         case .commands: "sparkles"
+        case .memory: "brain"
         case .folders: "folder"
         case .about: "info.circle"
         }
@@ -149,6 +151,7 @@ private struct HomeView: View {
         case .search: EmptyView()   // drawn full-size above
         case .dictation: DictationPage(dictation: app.dictation, state: state)
         case .commands: CommandsPage(dictation: app.dictation, state: state)
+        case .memory: MemoryPage(state: state)
         case .folders: FoldersPage(app: app, state: state)
         case .about: AboutPage(app: app)
         }
@@ -245,6 +248,7 @@ private struct Sidebar: View {
             VStack(spacing: 2) {
                 item(.dictation)
                 item(.commands, accessory: commandsBadge)
+                item(.memory)
                 item(.folders, accessory: foldersBadge)
             }
             .padding(.horizontal, 10)
@@ -834,6 +838,102 @@ private struct DictationPage: View {
         } else {
             Button("Allow…", action: fix).buttonStyle(.murmurPrimaryCompact)
         }
+    }
+}
+
+// MARK: - Memory
+
+/// What Murmur remembers, in three short lists: what you told it, what it noticed, what you asked lately. Each line
+/// can be forgotten on its own; one switch stops remembering commands, one button forgets everything.
+private struct MemoryPage: View {
+    let state: HomeState
+    @State private var confirmingClear = false
+
+    var body: some View {
+        let _ = state.revision
+        let told = CommandMemory.toldFacts()
+        let noticed = CommandMemory.learned()
+        let recent = CommandMemory.recentCommands(limit: 8)
+        VStack(alignment: .leading, spacing: 26) {
+            PageHeader(title: "Memory",
+                       subtitle: "What Murmur remembers, so it works the way you do. It stays on this Mac.")
+            list("You told Murmur", items: told,
+                 empty: "Nothing yet. Say “remember that…” or “from now on…”, like “remember that Mom is Roma on WhatsApp”.")
+            list("Murmur noticed", items: noticed,
+                 empty: "Patterns in what you ask show up here, like who you message where. Nothing yet.")
+            list("Recent commands", items: recent, empty: "Commands you give appear here.")
+            HStack(spacing: 12) {
+                MurmurSwitch(label: "Remember commands",
+                             isOn: state.bind(get: { CommandMemory.remembersCommands },
+                                              set: { CommandMemory.remembersCommands = $0 }))
+                Text("Remember commands").font(.system(size: 13)).foregroundStyle(Theme.ink2)
+                Spacer()
+                Button("Forget Everything…") { confirmingClear = true }
+                    .buttonStyle(.murmurDestructive)
+                    .disabled(told.isEmpty && recent.isEmpty)
+            }
+        }
+        .alert("Forget everything?", isPresented: $confirmingClear) {
+            Button("Forget Everything", role: .destructive) {
+                CommandMemory.forget(all: true, facts: true)
+                state.revision += 1
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Murmur forgets every command and everything you told it. This can't be undone.")
+        }
+    }
+
+    private func list(_ title: String, items: [CommandMemory.Item], empty: String) -> some View {
+        SettingsSection(title) {
+            if items.isEmpty {
+                Text(empty)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+            } else {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 { RowDivider() }
+                    row(item)
+                }
+            }
+        }
+    }
+
+    private func row(_ item: CommandMemory.Item) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.text)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(2)
+                if !item.detail.isEmpty {
+                    Text(item.detail)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 8)
+            Button {
+                CommandMemory.remove(item.id)
+                state.revision += 1
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.ink3)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Forget this")
+            .accessibilityLabel("Forget \(item.text)")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
     }
 }
 

@@ -49,8 +49,11 @@ public enum IntentClassifier {
         "navigate", "take", "download", "clear", "change", "increase", "decrease", "reduce", "raise", "lower",
         "toggle", "create", "make", "build", "add", "delete", "remove", "move", "rename", "copy", "watch",
         "explain", "ask", "tell", "dim", "brighten", "stop", "resume", "unpause", "skip", "next", "previous",
-        "send", "message", "whatsapp", "text", "email", "ping",
+        "send", "message", "whatsapp", "text", "email", "ping", "remember", "forget",
     ]
+
+    /// "from now on open links in Chrome", "remember that Mom is Roma", "call me Shubham": teaching Murmur.
+    static let somethingToRemember = #"^(from now on|going forward|keep in mind|remember that|remember my|remember i|please remember|call me|my name is)\b"#
 
     /// "send a message to Riya on WhatsApp saying…", "text Mom that I'm late", "WhatsApp Rahul saying…", "message
     /// the team on Slack…": an errand for Murmur, not words for the box you're in.
@@ -86,6 +89,9 @@ public enum IntentClassifier {
             return Decision(intent: .dictation, reason: "file words, but you're in a text field")
         }
         // "and also ask when she's coming back", right after "send a message to Roma…": it follows on.
+        if cleaned.range(of: somethingToRemember, options: .regularExpression) != nil {
+            return Decision(intent: .command, reason: "something to remember")
+        }
         if CommandMemory.isFollowUp(utterance) || CommandMemory.forgetRequest(utterance) != nil {
             return Decision(intent: .command, reason: "follows on from the last command")
         }
@@ -134,7 +140,7 @@ public enum IntentClassifier {
         let system = """
         You classify one utterance spoken to Murmur, a Mac voice assistant. Either the user is giving Murmur a \
         COMMAND to carry out (open or quit apps, search, change settings, ask Murmur a question, rewrite or \
-        summarise the selected text, write something for them), or they are DICTATING words to be typed as-is into \
+        summarise the selected text, write something for them, teach Murmur a preference), or they are DICTATING words to be typed as-is into \
         the text field they are in (a message, an email body, notes), even if those words contain verbs or questions. \
         Answer "command" or "dictation".
         """

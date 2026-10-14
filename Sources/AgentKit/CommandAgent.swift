@@ -160,11 +160,12 @@ public final class CommandAgent {
         let window = ScreenControl.frontWindowTitle()
         // "forget that", "clear your memory".
         if let all = CommandMemory.forgetRequest(utterance) {
-            if all, !(await host.confirm("Clear Murmur's memory?", "Every command it remembers is deleted from this Mac.")) {
+            if all, !(await host.confirm("Clear Murmur's memory?",
+                                         "Every command it remembers, and everything you told it, is deleted from this Mac.")) {
                 return
             }
-            CommandMemory.forget(all: all)
-            host.showAnswer(all ? "Done. I don't remember any earlier commands now." : "Forgotten.")
+            CommandMemory.forget(all: all, facts: all)
+            host.showAnswer(all ? "Done. My memory is empty now." : "Forgotten.")
             return
         }
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
@@ -851,6 +852,12 @@ public final class CommandAgent {
         case "reminders_list":
             host.progress("Reading your reminders…")
             return Outcome(result: await AppData.reminders(search: text("search"), completed: text("completed") == "true"))
+        case "remember":
+            let result = CommandMemory.remember(subject: text("subject"), fact: text("fact"))
+            host.progress(result)
+            return Outcome(result: result)
+        case "forget_fact":
+            return Outcome(result: CommandMemory.unremember(text("about")))
         case "recall":
             return Outcome(result: CommandMemory.recall(text("query"), kind: text("kind"), days: args["days"]?.number ?? 30))
         case "app_dictionary":
@@ -1122,6 +1129,11 @@ public final class CommandAgent {
                 + "app_dictionary first when unsure of the app's words. Apps that can't be scripted (WhatsApp, Slack, "
                 + "Teams, most Electron apps): open_app, read_screen, then click and scroll to the right view and read "
                 + "again. Then reply with the details asked for.",
+            "- Personal facts and preferences: when the user tells you something lasting about themselves or how they "
+                + "like things done (\"remember that Mom is Roma on WhatsApp\", \"from now on open links in Chrome\", "
+                + "\"keep my messages short\", \"call me Shubham\"), call remember (the same subject again replaces it; "
+                + "forget_fact drops one), then reply in a few words. \"Remind me to…\" is a reminder, not this. Follow "
+                + "what the user told you over everything; use what was noticed from their commands when they don't say.",
             "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
                 + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall.",
             "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
@@ -1249,6 +1261,12 @@ public final class CommandAgent {
             tool("reminders_list", "Read the user's reminders",
                  ["search": ("string", "only reminders mentioning this; empty for all"),
                   "completed": ("string", "true to include done ones")], required: []),
+            tool("remember", "Keep a lasting fact or preference the user told you, for every later command (it shows on "
+                 + "Murmur's Memory page)",
+                 ["subject": ("string", "what it's about, in a word or two: a person's name, \"browser\", \"message style\""),
+                  "fact": ("string", "the fact in plain words, e.g. \"Mom is Roma, on WhatsApp\"")]),
+            tool("forget_fact", "Forget a fact or preference the user told you before",
+                 ["about": ("string", "its subject or words from it")]),
             tool("recall", "Look back through earlier commands and what they did (who was messaged and what, files and "
                  + "pages opened, answers given)",
                  ["query": ("string", "words to find: a person, file, site or topic; empty for everything recent"),
