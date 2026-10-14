@@ -367,7 +367,9 @@ public enum CommandMemory {
             case "site_search": part = "searched \(a["site"] ?? "a site") for “\(a["query"] ?? "")”"
             case "search_files": part = "searched files for “\(a["query"] ?? "")”"
             case "media_control": part = "\(a["action"] ?? "played") media"
-            case "calendar_events": part = "read the calendar (\(a["start"] ?? "today"), \(a["days"] ?? "1") days)"
+            case "calendar_events":
+                let days = Int(Double(a["days"] ?? "1") ?? 1)
+                part = "read the calendar for \(a["start"] ?? "today")" + (days > 1 ? " and the \(days - 1) days after" : "")
             case "reminders_list": part = "read reminders"
             case "open_app": part = "opened \(a["name"] ?? "an app")"
             case "quit_app": part = "quit \(a["name"] ?? "an app")"
