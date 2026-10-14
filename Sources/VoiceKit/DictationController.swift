@@ -279,6 +279,10 @@ public final class DictationController: ObservableObject {
         }
         if let logFile {
             items.append(ClosureMenuItem("Open Log") { NSWorkspace.shared.open(logFile) })
+            items.append(ClosureMenuItem("Forget Recent Commands") { [weak self] in
+                CommandMemory.forget(all: true)
+                self?.log("memory: cleared")
+            })
         }
         if !lastSamples.isEmpty {
             items.append(ClosureMenuItem("Save Last Recording…") { [weak self] in self?.saveLastRecording() })

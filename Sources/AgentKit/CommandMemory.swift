@@ -1,51 +1,386 @@
 import Foundation
+import SQLite3
 
-/// The last few commands and what they did, so the next one can follow on: "send Roma a message saying hi", then
-/// "and also ask when she's coming back" (she: Roma; the app: WhatsApp). In memory only, for a quarter of an hour.
+/// Murmur's memory of what you asked and what it did, so a command can follow on from the last one ("and also ask
+/// when she's coming back": she is Roma, the app WhatsApp) and the model can look back further when it needs to
+/// ("what did I send Roma yesterday?").
+///
+/// Structured, so it stays small and fast: each command is one row (what you said, where, what kind of thing it
+/// was, how it went, a one-line summary), its actions are rows, and the people, files, pages, apps and media it
+/// touched are entities linked to it. Everything is worked out from the tool calls themselves: no model call, no
+/// embedding, no background work; one short transaction per command. The model always gets a few lines (the
+/// latest commands and what's in play), and asks for more with `recall`, which reads the store with an index and
+/// full-text search. On this Mac only (~/Library/Application Support/Murmur/memory.sqlite), 90 days or 3,000
+/// commands, whichever is less.
 public enum CommandMemory {
-    struct Entry {
-        let said: String
-        let app: String?
-        let did: [String]
-        let at: Date
+    /// One tool call, as remembered: its name, its main arguments and a short result.
+    public struct Action: Sendable {
+        let tool: String
+        let args: [String: String]
+        let result: String
+    }
+
+    private struct Entity: Hashable {
+        let type: String     // person, app, file, page, media, project
+        let name: String
+        let detail: String
     }
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var entries: [Entry] = []
-    private static let keep: TimeInterval = 15 * 60
+    nonisolated(unsafe) private static var db: OpaquePointer?
+    nonisolated(unsafe) private static var opened = false
+    nonisolated(unsafe) private static var lastAt: Date?
+    private static let keepDays: Double = 90
+    private static let keepCommands = 3000
 
-    static func add(_ said: String, app: String?, did: [String]) {
+    // MARK: Writing
+
+    /// Remembers one finished command.
+    static func record(said: String, app: String?, window: String?, actions: [Action], answer: String?) {
+        let summary = summarise(actions, answer: answer)
+        let kind = kindOf(actions)
+        let outcome = outcomeOf(actions, answer: answer)
+        let entities = entitiesOf(actions, app: app)
+        let now = Date()
         lock.lock(); defer { lock.unlock() }
-        entries.append(Entry(said: said, app: app, did: did, at: Date()))
-        entries = Array(entries.filter { Date().timeIntervalSince($0.at) < keep }.suffix(5))
+        lastAt = now
+        guard let db = open() else { return }
+        exec(db, "BEGIN")
+        let episode = insert(db, "INSERT INTO episode(at, said, app, window, kind, outcome, summary, result) VALUES(?,?,?,?,?,?,?,?)",
+                             [now.timeIntervalSince1970, said, app ?? "", window ?? "", kind, outcome, summary,
+                              String((answer ?? actions.last?.result ?? "").prefix(400))])
+        for (index, action) in actions.enumerated() {
+            let args = (try? JSONSerialization.data(withJSONObject: action.args, options: [.sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            _ = insert(db, "INSERT INTO action(episode, seq, tool, args, result) VALUES(?,?,?,?,?)",
+                       [episode, index, action.tool, args, String(action.result.prefix(240))])
+        }
+        for entity in entities {
+            exec(db, "INSERT INTO entity(type, name, detail, last_seen, uses) VALUES(?,?,?,?,1) "
+                 + "ON CONFLICT(type, name) DO UPDATE SET detail = excluded.detail, last_seen = excluded.last_seen, uses = uses + 1",
+                 [entity.type, entity.name, entity.detail, now.timeIntervalSince1970])
+            exec(db, "INSERT OR IGNORE INTO mention(episode, entity) SELECT ?, id FROM entity WHERE type = ? AND name = ?",
+                 [episode, entity.type, entity.name])
+        }
+        exec(db, "COMMIT")
     }
+
+    /// Forgets the last command (or everything).
+    public static func forget(all: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return }
+        if all {
+            for table in ["mention", "action", "entity", "episode"] { exec(db, "DELETE FROM \(table)") }
+            exec(db, "INSERT INTO episode_fts(episode_fts) VALUES('rebuild')")
+            lastAt = nil
+        } else {
+            exec(db, "DELETE FROM episode WHERE id = (SELECT max(id) FROM episode)")
+            tidy(db)
+            lastAt = nil
+        }
+    }
+
+    // MARK: Reading
 
     /// Seconds since the last command finished.
     public static var sinceLast: TimeInterval? {
         lock.lock(); defer { lock.unlock() }
-        return entries.last.map { Date().timeIntervalSince($0.at) }
+        if !opened { _ = open() }
+        return lastAt.map { Date().timeIntervalSince($0) }
     }
 
-    /// For the model: the recent commands, oldest first, with what each did.
-    static func summary() -> String? {
-        lock.lock()
-        let recent = entries.filter { Date().timeIntervalSince($0.at) < keep }
-        lock.unlock()
-        guard !recent.isEmpty else { return nil }
-        return recent.map { entry in
-            let minutes = Int(Date().timeIntervalSince(entry.at) / 60)
-            let when = minutes < 1 ? "just now" : "\(minutes) min ago"
-            let did = entry.did.suffix(6).map { "\n    did: \($0)" }.joined()
-            return "- \(when), in \(entry.app ?? "?"): \"\(entry.said)\"\(did)"
+    /// What the model always gets, in a few lines: the latest commands (last two hours) and what's in play (the
+    /// people, files, pages and apps of the last day, most recent first).
+    static func workingSet() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return nil }
+        let now = Date().timeIntervalSince1970
+        let recent = rows(db, "SELECT id, at, app, said, summary, outcome FROM episode WHERE at > ? ORDER BY id DESC LIMIT 5",
+                          [now - 2 * 3600]).reversed()
+        let things = rows(db, "SELECT type, name, detail, last_seen FROM entity WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 8",
+                          [now - 24 * 3600])
+        guard !recent.isEmpty || !things.isEmpty else { return nil }
+        var lines: [String] = []
+        if !recent.isEmpty {
+            lines.append("Latest commands (oldest first):")
+            for row in recent {
+                lines.append("#\(row[0]) \(ago(row[1])) in \(row[2].isEmpty ? "?" : row[2]): \"\(row[3])\" → \(row[4]) [\(row[5])]")
+            }
+        }
+        if !things.isEmpty {
+            lines.append("In play: " + things.map { row in
+                "\(row[0]) \(row[1])" + (row[2].isEmpty || row[2] == row[1] ? "" : " (\(row[2].prefix(70)))") + " \(ago(row[3]))"
+            }.joined(separator: "; "))
+        }
+        lines.append("Older history: call recall.")
+        return lines.joined(separator: "\n")
+    }
+
+    /// The model's look further back: commands matching the words (people, files, pages, what was said or
+    /// answered), optionally of one kind and within some days, newest first, with what each did.
+    static func recall(_ query: String, kind: String, days: Double) -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return "Memory isn't available." }
+        let since = Date().timeIntervalSince1970 - max(days, 0.01) * 86400
+        let words = query.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { $0.count > 1 }
+        var found: [[String]]
+        let kindFilter = kind.isEmpty || kind == "any" ? "" : " AND e.kind = '\(kind.filter(\.isLetter))'"
+        if words.isEmpty {
+            found = rows(db, "SELECT e.id, e.at, e.app, e.said, e.summary, e.outcome, e.result FROM episode e WHERE e.at > ?\(kindFilter) "
+                         + "ORDER BY e.id DESC LIMIT 15", [since])
+        } else {
+            let match = words.map { "\"\($0)\"*" }.joined(separator: " OR ")
+            found = rows(db, """
+                SELECT e.id, e.at, e.app, e.said, e.summary, e.outcome, e.result FROM episode e
+                WHERE e.at > ?\(kindFilter) AND (e.id IN (SELECT rowid FROM episode_fts WHERE episode_fts MATCH ?)
+                   OR e.id IN (SELECT m.episode FROM mention m JOIN entity n ON n.id = m.entity WHERE \(words.map { _ in "lower(n.name) LIKE ?" }.joined(separator: " OR "))))
+                ORDER BY e.id DESC LIMIT 15
+                """, ([since, match] as [Any]) + words.map { "%\($0)%" as Any })
+        }
+        guard !found.isEmpty else { return "Nothing in memory\(words.isEmpty ? "" : " about \"\(query)\"") from the last \(Int(max(days, 1))) days." }
+        return found.map { row in
+            var line = "#\(row[0]) \(when(row[1])) in \(row[2].isEmpty ? "?" : row[2]): \"\(row[3])\" → \(row[4]) [\(row[5])]"
+            if !row[6].isEmpty, !row[4].contains(row[6].prefix(40)) { line += "\n    result: \(row[6].prefix(240))" }
+            return line
         }.joined(separator: "\n")
     }
 
-    /// "and also ask when she's coming back", "tell him too", "do that again", "send it", said within a few minutes
+    /// "and also ask when she's coming back", "tell him too", "do it again", "send it", said within a few minutes
     /// of a command: it follows on from it, so it's a command too (it was typed into the box as dictation).
     public static func isFollowUp(_ utterance: String) -> Bool {
         guard let since = sinceLast, since < 300 else { return false }
         let text = QuickCommands.clean(utterance)
         return text.range(of: #"^(and|also|and also|then|and then|plus|oh and|one more thing|after that)\b|^(tell|ask|send|message|text|reply to|remind|let|call|ping|email|show|give) (her|him|them|it|that|those)\b|^(do it|do that|same|same thing|again|do it again|try again|undo that|send it|send that|open it|play it|reply)\b|\b(her|him|them)\b.*\b(too|also|as well)\b"#,
                           options: .regularExpression) != nil
+    }
+
+    /// "forget that", "forget the last command": .last. "clear your memory", "forget everything": .all.
+    public static func forgetRequest(_ utterance: String) -> Bool? {
+        let text = QuickCommands.clean(utterance)
+        if text.range(of: #"^(forget|clear|erase|wipe|delete) (everything|all|all of it|your memory|the memory|my history|the history|what you remember|all my commands)\b"#,
+                      options: .regularExpression) != nil { return true }
+        if text.range(of: #"^(forget|delete|erase) (that|this|it|the last (command|one|thing|message)|what i (just )?(said|asked))$"#,
+                      options: .regularExpression) != nil { return false }
+        return nil
+    }
+
+    // MARK: Structure from the tool calls
+
+    private static let looking: Set<String> = [
+        "read_screen", "browser_read", "browser_scroll", "browser_tabs", "wait", "app_dictionary", "find_apps",
+        "list_running_apps", "list_shortcuts", "recall",
+    ]
+
+    private static func kindOf(_ actions: [Action]) -> String {
+        for action in actions where !looking.contains(action.tool) {
+            switch action.tool {
+            case "send_message": return "message"
+            case "open_file", "search_files", "open_folder": return "file"
+            case "open_url", "web_search", "site_search", "browser_click", "browser_type", "browser_switch_tab": return "web"
+            case "media_control": return "media"
+            case "calendar_events", "reminders_list": return "calendar"
+            case "write_in_app", "insert_text", "replace_selection", "type_text": return "write"
+            case "build_with_agent", "coding_followup", "ask_claude", "ask_codex": return "code"
+            case "open_app", "quit_app", "hide_app": return "app"
+            case "reply": continue
+            default:
+                if action.tool.hasPrefix("set_") || ["mute", "set_volume", "change_volume", "brightness", "lock_screen",
+                                                     "open_settings"].contains(action.tool) { return "setting" }
+            }
+        }
+        return actions.contains { $0.tool == "reply" } ? "answer" : "other"
+    }
+
+    private static func outcomeOf(_ actions: [Action], answer: String?) -> String {
+        let last = (actions.last?.result ?? "").lowercased()
+        if last.contains("chose not to") || last.contains("cancelled") || last.contains("said no") || last.contains("declined") {
+            return "declined"
+        }
+        if answer != nil { return "answered" }
+        if last.contains("couldn't") || last.contains("failed") || last.contains("error") || last.contains("can't") { return "problem" }
+        return actions.isEmpty ? "nothing done" : "done"
+    }
+
+    /// One line on what the command did: "messaged Roma on WhatsApp: “hi”; opened interview.mp4".
+    private static func summarise(_ actions: [Action], answer: String?) -> String {
+        var parts: [String] = []
+        for action in actions where !looking.contains(action.tool) {
+            let a = action.args
+            let part: String
+            switch action.tool {
+            case "send_message": part = "messaged \(a["to"] ?? "?") on \(a["app"].flatMap { $0.isEmpty ? nil : $0 } ?? "chat"): “\((a["text"] ?? "").prefix(80))”"
+            case "open_file": part = "opened \(openedName(action) ?? a["query"] ?? "a file")"
+            case "open_url": part = "opened \(a["url"] ?? "a page")"
+            case "web_search": part = "searched the web for “\(a["query"] ?? "")”"
+            case "site_search": part = "searched \(a["site"] ?? "a site") for “\(a["query"] ?? "")”"
+            case "search_files": part = "searched files for “\(a["query"] ?? "")”"
+            case "media_control": part = "\(a["action"] ?? "played") media"
+            case "calendar_events": part = "read the calendar (\(a["start"] ?? "today"), \(a["days"] ?? "1") days)"
+            case "reminders_list": part = "read reminders"
+            case "open_app": part = "opened \(a["name"] ?? "an app")"
+            case "quit_app": part = "quit \(a["name"] ?? "an app")"
+            case "write_in_app": part = "wrote in \(a["app"] ?? "an app")"
+            case "browser_click": part = "clicked “\((a["text"] ?? "").prefix(40))”"
+            case "reply": part = "answered: “\((a["text"] ?? "").prefix(100))”"
+            case "build_with_agent": part = "started building: \((a["task"] ?? "").prefix(60))"
+            case "coding_followup": part = "told the coding session: \((a["message"] ?? "").prefix(60))"
+            default: part = action.tool.replacingOccurrences(of: "_", with: " ")
+            }
+            if parts.last != part { parts.append(part) }
+        }
+        if parts.isEmpty, let answer { parts.append("answered: “\(answer.prefix(100))”") }
+        return parts.isEmpty ? "nothing" : parts.prefix(5).joined(separator: "; ")
+    }
+
+    private static func entitiesOf(_ actions: [Action], app: String?) -> [Entity] {
+        var found: [Entity] = []
+        if let app, !app.isEmpty { found.append(Entity(type: "app", name: app, detail: "")) }
+        for action in actions {
+            let a = action.args
+            switch action.tool {
+            case "send_message":
+                if let to = a["to"], !to.isEmpty { found.append(Entity(type: "person", name: to, detail: a["app"] ?? "")) }
+                if let chat = a["app"], !chat.isEmpty { found.append(Entity(type: "app", name: chat, detail: "")) }
+            case "open_file":
+                if let name = openedName(action) { found.append(Entity(type: "file", name: name, detail: a["query"] ?? "")) }
+            case "open_url", "web_search", "site_search":
+                let page = a["url"] ?? [a["site"], a["query"]].compactMap { $0 }.joined(separator: ": ")
+                if !page.isEmpty { found.append(Entity(type: "page", name: String(page.prefix(120)), detail: "")) }
+            case "open_app", "write_in_app":
+                if let name = a["name"] ?? a["app"], !name.isEmpty { found.append(Entity(type: "app", name: name, detail: "")) }
+            case "media_control":
+                found.append(Entity(type: "media", name: String(action.result.prefix(80)), detail: ""))
+            case "build_with_agent", "coding_followup":
+                if let folder = a["folder_name"], !folder.isEmpty { found.append(Entity(type: "project", name: folder, detail: "")) }
+            default: break
+            }
+        }
+        return Array(Set(found))
+    }
+
+    /// "Opened interview.mp4." / "Playing interview.mp4." → interview.mp4
+    private static func openedName(_ action: Action) -> String? {
+        guard let range = action.result.range(of: #"^(Opened|Playing) (.+?)\.?$"#, options: .regularExpression) else { return nil }
+        let text = String(action.result[range])
+        return text.replacingOccurrences(of: #"^(Opened|Playing) "#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    }
+
+    // MARK: SQLite
+
+    private static func open() -> OpaquePointer? {
+        if opened { return db }
+        opened = true
+        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Murmur")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var handle: OpaquePointer?
+        guard sqlite3_open(folder.appendingPathComponent("memory.sqlite").path, &handle) == SQLITE_OK else { return nil }
+        db = handle
+        for statement in [
+            "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA foreign_keys = ON",
+            """
+            CREATE TABLE IF NOT EXISTS episode(id INTEGER PRIMARY KEY, at REAL NOT NULL, said TEXT NOT NULL, app TEXT,
+              window TEXT, kind TEXT, outcome TEXT, summary TEXT, result TEXT)
+            """,
+            "CREATE INDEX IF NOT EXISTS episode_at ON episode(at)",
+            """
+            CREATE TABLE IF NOT EXISTS action(episode INTEGER NOT NULL REFERENCES episode(id) ON DELETE CASCADE,
+              seq INTEGER, tool TEXT, args TEXT, result TEXT)
+            """,
+            "CREATE INDEX IF NOT EXISTS action_episode ON action(episode)",
+            """
+            CREATE TABLE IF NOT EXISTS entity(id INTEGER PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL, detail TEXT,
+              last_seen REAL, uses INTEGER, UNIQUE(type, name))
+            """,
+            "CREATE INDEX IF NOT EXISTS entity_seen ON entity(last_seen)",
+            """
+            CREATE TABLE IF NOT EXISTS mention(episode INTEGER NOT NULL REFERENCES episode(id) ON DELETE CASCADE,
+              entity INTEGER NOT NULL REFERENCES entity(id) ON DELETE CASCADE, PRIMARY KEY(episode, entity))
+            """,
+            "CREATE INDEX IF NOT EXISTS mention_entity ON mention(entity)",
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS episode_fts USING fts5(said, summary, result, content='episode',
+              content_rowid='id', tokenize='unicode61 remove_diacritics 2')
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS episode_ai AFTER INSERT ON episode BEGIN
+              INSERT INTO episode_fts(rowid, said, summary, result) VALUES (new.id, new.said, new.summary, new.result); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS episode_ad AFTER DELETE ON episode BEGIN
+              INSERT INTO episode_fts(episode_fts, rowid, said, summary, result) VALUES ('delete', old.id, old.said, old.summary, old.result); END
+            """,
+        ] { exec(handle!, statement) }
+        // Keep it small: 90 days, 3,000 commands.
+        exec(handle!, "DELETE FROM episode WHERE at < ?", [Date().timeIntervalSince1970 - keepDays * 86400])
+        exec(handle!, "DELETE FROM episode WHERE id <= (SELECT max(id) FROM episode) - ?", [keepCommands])
+        tidy(handle!)
+        if let last = rows(handle!, "SELECT max(at) FROM episode", []).first?.first, let seconds = Double(last) {
+            lastAt = Date(timeIntervalSince1970: seconds)
+        }
+        return db
+    }
+
+    /// People, files and pages no command mentions any more go too.
+    private static func tidy(_ db: OpaquePointer) {
+        exec(db, "DELETE FROM entity WHERE id NOT IN (SELECT entity FROM mention)")
+    }
+
+    private static func bind(_ statement: OpaquePointer?, _ values: [Any]) {
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        for (index, value) in values.enumerated() {
+            let position = Int32(index + 1)
+            switch value {
+            case let number as Int: sqlite3_bind_int64(statement, position, Int64(number))
+            case let number as Int64: sqlite3_bind_int64(statement, position, number)
+            case let number as Double: sqlite3_bind_double(statement, position, number)
+            default: sqlite3_bind_text(statement, position, "\(value)", -1, transient)
+            }
+        }
+    }
+
+    @discardableResult
+    private static func exec(_ db: OpaquePointer, _ sql: String, _ values: [Any] = []) -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(statement) }
+        bind(statement, values)
+        return sqlite3_step(statement) == SQLITE_DONE
+    }
+
+    private static func insert(_ db: OpaquePointer, _ sql: String, _ values: [Any]) -> Int64 {
+        exec(db, sql, values)
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    private static func rows(_ db: OpaquePointer, _ sql: String, _ values: [Any]) -> [[String]] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        bind(statement, values)
+        var out: [[String]] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let count = sqlite3_column_count(statement)
+            out.append((0..<count).map { column in
+                sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
+            })
+        }
+        return out
+    }
+
+    private static func ago(_ seconds: String) -> String {
+        guard let at = Double(seconds) else { return "" }
+        let minutes = Int((Date().timeIntervalSince1970 - at) / 60)
+        if minutes < 1 { return "just now" }
+        if minutes < 60 { return "\(minutes) min ago" }
+        if minutes < 24 * 60 { return "\(minutes / 60) h ago" }
+        return "\(minutes / (24 * 60)) d ago"
+    }
+
+    private static func when(_ seconds: String) -> String {
+        guard let at = Double(seconds) else { return "" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE d MMM HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: at))
     }
 }

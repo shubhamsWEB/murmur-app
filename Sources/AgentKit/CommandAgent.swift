@@ -66,13 +66,11 @@ public final class CommandAgent {
     private var openedPage = false
     /// The user said yes to sending a message in this command: Return in a chat app doesn't ask again.
     private var messageApproved = false
-    /// What this command did, for the next one ("and also ask her…").
-    private var did: [String] = []
-    /// Tools that only look: not worth remembering as something done.
-    private static let lookingTools: Set<String> = [
-        "read_screen", "browser_read", "browser_scroll", "browser_tabs", "wait", "app_dictionary", "find_apps",
-        "list_running_apps", "list_shortcuts",
-    ]
+    /// What this command did, for memory: each tool call with its main arguments and result.
+    private var did: [CommandMemory.Action] = []
+    /// The answer shown for this command, if any (for memory).
+    private let shown: Shown
+    private final class Shown { var answer: String? }
     /// Whether each browser's pages can be scripted, checked once per command.
     private var pageAccess: [String: Bool] = [:]
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
@@ -127,7 +125,16 @@ public final class CommandAgent {
     private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
 
     public init(host: CommandHost) {
+        // Every answer shown is remembered with the command that gave it.
+        let shown = Shown()
+        var host = host
+        let show = host.showAnswer
+        host.showAnswer = { text in
+            shown.answer = text
+            show(text)
+        }
         self.host = host
+        self.shown = shown
     }
 
     /// Runs one spoken command. `selection` is the text selected in the front app, if any.
@@ -148,8 +155,19 @@ public final class CommandAgent {
         openedPage = false
         messageApproved = false
         did = []
+        shown.answer = nil
         let app = ScreenControl.workingApp()?.localizedName ?? frontApp
-        defer { CommandMemory.add(utterance, app: app, did: did) }
+        let window = ScreenControl.frontWindowTitle()
+        // "forget that", "clear your memory".
+        if let all = CommandMemory.forgetRequest(utterance) {
+            if all, !(await host.confirm("Clear Murmur's memory?", "Every command it remembers is deleted from this Mac.")) {
+                return
+            }
+            CommandMemory.forget(all: all)
+            host.showAnswer(all ? "Done. I don't remember any earlier commands now." : "Forgotten.")
+            return
+        }
+        defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
@@ -338,9 +356,8 @@ public final class CommandAgent {
         context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
         if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
         if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
-        if let earlier = CommandMemory.summary() {
-            context += "\nEarlier commands, oldest first (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" "
-                + "refer to):\n\(earlier)"
+        if let memory = CommandMemory.workingSet() {
+            context += "\nMemory (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" refer to):\n\(memory)"
         }
         if let session = CodingSession.current {
             context += "\nCoding session: \(session.summary) Requests about that project (\"add a login page\", "
@@ -548,11 +565,8 @@ public final class CommandAgent {
     /// Runs a tool, and remembers what it did for the next command.
     private func execute(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
         let outcome = await perform(tool, args)
-        if !Self.lookingTools.contains(tool) {
-            let shown = args.keys.sorted().map { "\($0): \(String(args[$0]?.description.prefix(80) ?? ""))" }
-                .joined(separator: ", ")
-            did.append("\(tool)(\(shown)) → \(outcome.result.prefix(160))")
-        }
+        did.append(CommandMemory.Action(tool: tool, args: args.mapValues { String($0.description.prefix(200)) },
+                                        result: String(outcome.result.prefix(300))))
         return outcome
     }
 
@@ -837,6 +851,8 @@ public final class CommandAgent {
         case "reminders_list":
             host.progress("Reading your reminders…")
             return Outcome(result: await AppData.reminders(search: text("search"), completed: text("completed") == "true"))
+        case "recall":
+            return Outcome(result: CommandMemory.recall(text("query"), kind: text("kind"), days: args["days"]?.number ?? 30))
         case "app_dictionary":
             return Outcome(result: await AppData.scriptingDictionary(text("app")))
         case "send_message":
@@ -1106,6 +1122,8 @@ public final class CommandAgent {
                 + "app_dictionary first when unsure of the app's words. Apps that can't be scripted (WhatsApp, Slack, "
                 + "Teams, most Electron apps): open_app, read_screen, then click and scroll to the right view and read "
                 + "again. Then reply with the details asked for.",
+            "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
+                + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall.",
             "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
                 + "page. \"And also ask when she's coming back\" after messaging Roma on WhatsApp → send_message to Roma "
                 + "on WhatsApp with that question; \"play it\" after opening a video → play that video; \"do it again\" → "
@@ -1231,6 +1249,11 @@ public final class CommandAgent {
             tool("reminders_list", "Read the user's reminders",
                  ["search": ("string", "only reminders mentioning this; empty for all"),
                   "completed": ("string", "true to include done ones")], required: []),
+            tool("recall", "Look back through earlier commands and what they did (who was messaged and what, files and "
+                 + "pages opened, answers given)",
+                 ["query": ("string", "words to find: a person, file, site or topic; empty for everything recent"),
+                  "kind": ("string", "message, file, web, media, calendar, write, code, app, setting, answer, or any"),
+                  "days": ("number", "how far back, in days (default 30)")], required: ["query"]),
             tool("app_dictionary", "An app's AppleScript terms (what it holds and its commands), to write a "
                  + "run_applescript that reads or changes it", ["app": ("string", "app name")]),
             tool("send_message", "Send a message to a person or channel in WhatsApp, Messages, Slack and other chat apps "
