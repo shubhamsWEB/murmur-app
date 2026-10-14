@@ -88,6 +88,13 @@ public enum IntentClassifier {
         if QuickCommands.codingTask(utterance) != nil {
             return Decision(intent: .command, reason: "something to build (Claude Code / Codex)")
         }
+        // While Claude Code / Codex is building something: "add a login page to it", "make the app dark", "run it",
+        // "fix the error", "tell Claude to add tests" are for that session.
+        if CodingSession.current != nil, focus != .textField || frontApp == "Terminal",
+           cleaned.range(of: #"^(add|change|make|fix|update|remove|delete|rename|run|start|restart|stop|deploy|refactor|style|test|write tests|commit|push|install|use|switch|replace|move|show|implement|create|build|tell (claude|codex)|ask (claude|codex))\b.*\b(it|app|project|site|website|page|screen|component|button|feature|bug|error|tests?|code|api|backend|frontend|server|database|design|theme|login|signup|dark mode|readme|repo|claude|codex)\b"#,
+                         options: .regularExpression) != nil {
+            return Decision(intent: .command, reason: "for the coding session")
+        }
         // A chain of steps for the computer: "open Notes and write…", "search YouTube for lofi and play the first one".
         if cleaned.range(of: #"^(open|launch|start|go to|visit|switch to|search|find|look up|play|google) .+ (and|then) (then )?(write|type|draft|jot|note|add|put|create|make|compose|list|play|watch|click|open|search|press|select|pick|scroll|sort|filter|subscribe|save|download|summari[sz]e|sum up|explain|describe|read|translate|tell|check|compare|reply|answer|copy|send|email|share|bookmark|find|look)\b"#,
                          options: .regularExpression) != nil {

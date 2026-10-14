@@ -112,6 +112,23 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
     /// ask first (Claude Code's acceptEdits, Codex's --full-auto).
     @MainActor
     public func startSession(_ task: String, in folder: URL) async -> String {
+        await launch(task: task, in: folder, prompt: nil)
+    }
+
+    /// Opens the session again in its folder (its Terminal tab was closed, or the agent exited), continuing the last
+    /// conversation there with `message`.
+    @MainActor
+    public func resumeSession(_ message: String, in session: CodingSession) async -> String {
+        // Claude Code continues the folder's last conversation; Codex starts a new one, told what came before.
+        let prompt = self == .claude ? message
+            : "You're continuing work on the project in this folder (it was started for: \"\(session.task)\"). "
+                + "Look at what's there first. The user now asks: \(message)"
+        let result = await launch(task: session.task, in: URL(fileURLWithPath: session.folder), prompt: prompt, resume: true)
+        return result.hasPrefix("Started") ? "Opened \(display) again in \(session.place) with: “\(message.prefix(80))”." : result
+    }
+
+    @MainActor
+    private func launch(task: String, in folder: URL, prompt followUp: String?, resume: Bool = false) async -> String {
         guard let executable = await locate() else {
             return "\(display) isn't installed (no `\(command)` on your PATH)."
         }
@@ -121,7 +138,7 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
         } catch {
             return "Couldn't make \(folder.path): \(error.localizedDescription)"
         }
-        let prompt = """
+        let prompt = followUp ?? """
         You were started by Murmur, the user's voice assistant, from this spoken request:
 
         "\(task)"
@@ -135,11 +152,13 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
         try? files.createDirectory(at: support, withIntermediateDirectories: true)
         let promptFile = support.appendingPathComponent("task-\(stamp).md")
         let launcher = support.appendingPathComponent("\(folder.lastPathComponent)-\(stamp).command")
+        let ttyFile = support.appendingPathComponent("\(folder.lastPathComponent)-\(stamp).tty")
         func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let start: String
         switch self {
         case .claude:
-            start = "exec \(quoted(executable.path)) --permission-mode acceptEdits \"$(cat \(quoted(promptFile.path)))\""
+            // --continue picks up the folder's last conversation.
+            start = "exec \(quoted(executable.path)) \(resume ? "--continue " : "")--permission-mode acceptEdits \"$(cat \(quoted(promptFile.path)))\""
         case .codex:
             start = "exec \(quoted(executable.path)) --full-auto \"$(cat \(quoted(promptFile.path)))\""
         }
@@ -147,6 +166,7 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
         #!/bin/zsh -l
         # Started by Murmur: \(display) building "\(task.replacingOccurrences(of: "\n", with: " ").prefix(80))"
         cd \(quoted(folder.path)) || exit 1
+        tty > \(quoted(ttyFile.path))
         git init -q 2>/dev/null
         printf '\\e]0;%s\\a' \(quoted("Murmur · \(display) · \(folder.lastPathComponent)"))
         \(start)
@@ -167,6 +187,8 @@ public enum AssistantCLI: String, CaseIterable, Sendable {
         } catch {
             return "Couldn't open Terminal: \(error.localizedDescription)"
         }
+        CodingSession.current = CodingSession(helper: rawValue, folder: folder.path, task: task, ttyFile: ttyFile.path,
+                                              started: Date())
         return "Started \(display) in Terminal, building in \(folder.path)."
     }
 }

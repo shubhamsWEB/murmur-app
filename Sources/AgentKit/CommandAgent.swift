@@ -136,6 +136,10 @@ public final class CommandAgent {
     /// Hands a build to Claude Code (or Codex): asks you first (it writes files and uses your subscription), makes a
     /// new project folder and opens the session in Terminal, where you watch it and answer its questions.
     private func build(_ task: String, helper requested: String, folderName: String) async -> Outcome {
+        // A change to what's being built ("add a login page", "make it dark", "run it"): the same session.
+        if let session = CodingSession.current, !CodingSession.isNewProject(task) {
+            return await followUp(task, in: session)
+        }
         host.progress("Getting a coding agent ready…")
         var candidates: [AssistantCLI] = requested == "codex" ? [.codex, .claude] : [.claude, .codex]
         if requested == "claude" { candidates = [.claude, .codex] }
@@ -165,6 +169,15 @@ public final class CommandAgent {
         let result = await helper.startSession(task, in: folder)
         host.log("command: \(result)")
         host.progress(result.hasPrefix("Started") ? "\(helper.display) is building it in Terminal" : result)
+        return Outcome(result: result, finished: true)
+    }
+
+    /// A request for the coding session already running: typed into its Terminal tab (or the session reopened).
+    private func followUp(_ message: String, in session: CodingSession) async -> Outcome {
+        host.progress("Sending it to \(session.assistant.display)…")
+        let result = await session.send(message)
+        host.log("command: coding follow-up → \(result.hasPrefix("Sent") ? "sent to the running session" : "reopened the session")")
+        host.progress(result.hasPrefix("Sent") ? "Sent to \(session.assistant.display)" : result)
         return Outcome(result: result, finished: true)
     }
 
@@ -262,6 +275,11 @@ public final class CommandAgent {
 
     private func route(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool) async {
         var context = "Front app: \(frontApp ?? "unknown")."
+        if let session = CodingSession.current {
+            context += "\nCoding session: \(session.summary) Requests about that project (\"add a login page\", "
+                + "\"make it dark\", \"fix the error\", \"run it\", \"ask Claude to add tests\") go to it with "
+                + "coding_followup, not build_with_agent. A new, different project is build_with_agent."
+        }
         if let selection, !selection.isEmpty {
             context += "\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n\(selection.prefix(8000))\n\"\"\""
         }
@@ -480,6 +498,11 @@ public final class CommandAgent {
             host.progress("Asking \(helper.display)…")
             let answer = await helper.run(task)
             return Outcome(result: "\(helper.display) answered:\n\(answer.prefix(6000))")
+        case "coding_followup":
+            guard let session = CodingSession.current else {
+                return await build(text("message"), helper: "", folderName: "")
+            }
+            return await followUp(text("message"), in: session)
         case "build_with_agent":
             return await build(text("task"), helper: text("helper"), folderName: text("folder_name"))
         case "open_settings": return Outcome(result: MacActions.openSettings(text("pane")))
@@ -780,6 +803,9 @@ public final class CommandAgent {
             tool("list_shortcuts", "List the user's Shortcuts"),
             tool("run_shortcut", "Run one of the user's Shortcuts (asks first)",
                  ["name": ("string", "shortcut name"), "input": ("string", "optional text input")], required: ["name"]),
+            tool("coding_followup", "Send a request to the Claude Code / Codex session already building the user's "
+                 + "project (add or change a feature, fix a bug, run it, test it, commit)",
+                 ["message": ("string", "the user's request, in their words, complete")]),
             tool("build_with_agent", "Start a Claude Code (or Codex) session in Terminal that builds software in a new "
                  + "project folder", ["task": ("string", "the user's full request"),
                                       "helper": ("string", "claude or codex; empty for the default"),
