@@ -89,7 +89,7 @@ public enum IntentClassifier {
             return Decision(intent: .command, reason: "something to build (Claude Code / Codex)")
         }
         // A chain of steps for the computer: "open Notes and write…", "search YouTube for lofi and play the first one".
-        if cleaned.range(of: #"^(open|launch|start|go to|switch to|search|find|look up|play|google) .+ (and|then) (then )?(write|type|draft|jot|note|add|put|create|make|compose|list|play|watch|click|open|search|press|select|pick|scroll|sort|filter|subscribe|save|download)\b"#,
+        if cleaned.range(of: #"^(open|launch|start|go to|visit|switch to|search|find|look up|play|google) .+ (and|then) (then )?(write|type|draft|jot|note|add|put|create|make|compose|list|play|watch|click|open|search|press|select|pick|scroll|sort|filter|subscribe|save|download|summari[sz]e|sum up|explain|describe|read|translate|tell|check|compare|reply|answer|copy|send|email|share|bookmark|find|look)\b"#,
                          options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "a chain of steps")
         }

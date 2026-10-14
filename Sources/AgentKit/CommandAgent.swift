@@ -59,6 +59,18 @@ public final class CommandAgent {
     /// A browser opened earlier in this command: web searches and addresses open there.
     private var lastBrowser: AppCatalog.App?
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
+    /// Tools that only bring something up: on their own, they rarely finish a request with more than one part.
+    private static let openingTools: Set<String> = [
+        "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "read_screen", "wait",
+    ]
+
+    /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
+    nonisolated static func hasMoreThanOneStep(_ utterance: String) -> Bool {
+        let text = QuickCommands.clean(utterance)
+        return text.range(of: #"(\band\b|\bthen\b|,)\s*(then\s+)?(also\s+)?[a-z]+"#, options: .regularExpression) != nil
+            && text.split(separator: " ").count >= 4
+    }
+
     private static let screenChangingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "click", "press_keys",
         "type_text", "write_in_app",
@@ -260,6 +272,11 @@ public final class CommandAgent {
         host.progress("Thinking…")
         var lastSignature = ""
         var repeats = 0
+        // Whether anything beyond opening an app or a page has happened: "open saleshq.ai and summarise it" isn't
+        // done when the page is open, however soon the model says so.
+        var didMoreThanOpen = false
+        var checkedEarlyDone = false
+        let hasMoreSteps = Self.hasMoreThanOneStep(utterance)
         for step in 0..<maxSteps {
             let reply: RouterReply
             let asked = Date()
@@ -308,10 +325,25 @@ public final class CommandAgent {
             for (index, call) in reply.calls.enumerated() {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
                 if call.name == "done" {
+                    if hasMoreSteps, !didMoreThanOpen, !checkedEarlyDone {
+                        // Done after only opening something, for a request with more to it: show the model where
+                        // it is and the whole request again, once.
+                        checkedEarlyDone = true
+                        host.log("command: done after only opening something; asking for the rest of the request")
+                        let screen = await screenAfterChange(reply.calls.first?.name ?? "")
+                        turns.append(.toolResult(callID: call.id, name: call.name, content:
+                            "Not done yet. The user asked: \"\(utterance)\". So far you only opened something. Do the "
+                            + "rest now: to summarise, explain or answer something about the page, use the text on "
+                            + "the screen below (read_screen again or press_keys \"pagedown\" for more) and reply "
+                            + "with the answer. Then call done.\(screen)"))
+                        host.progress("Working… (step \(step + 2))")
+                        continue
+                    }
                     turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
                     finishedNow = true
                     continue
                 }
+                if !Self.openingTools.contains(call.name) { didMoreThanOpen = true }
                 let outcome = await execute(call.name, call.arguments)
                 if outcome.finished { return }
                 results.append(outcome.result)
