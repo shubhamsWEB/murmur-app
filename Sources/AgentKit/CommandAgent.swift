@@ -225,9 +225,7 @@ public final class CommandAgent {
                 reply = try? await router.chat(system: system, turns: turns, tools: [])
             }
         }
-        let text = (reply?.text ?? "")
-            .replacingOccurrences(of: #"(?s)<think>.*?</think>"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = ModelOutput.answer(reply?.text ?? "")
         guard !text.isEmpty else {
             host.showAnswer("Couldn't do that with the selected text. \(RouterDiagnostics.lastError ?? "The model didn't answer.")")
             return
@@ -296,7 +294,7 @@ public final class CommandAgent {
             }
             if reply.calls.isEmpty {
                 // A model sometimes answers in plain text: treat that as the reply.
-                let text = reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = ModelOutput.answer(reply.text)
                 if !text.isEmpty { host.showAnswer(text) }
                 return
             }

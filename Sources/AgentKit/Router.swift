@@ -358,6 +358,14 @@ public struct OpenAIRouter: Router {
         return RouterReply(text: message["content"] as? String ?? "", calls: calls)
     }
 
+    /// Text a tool call carries (a reply, a summary to paste) never includes the model's reasoning either.
+    static func withoutReasoning(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
+        arguments.mapValues { value in
+            guard case .string(let text) = value, ModelOutput.hadReasoning(text) else { return value }
+            return .string(ModelOutput.answer(text))
+        }
+    }
+
     public func choose(system: String, user: String, field: String, options: [String],
                        timeout: TimeInterval) async -> String? {
         let schema: [String: Any] = ["type": "object", "properties": [field: ["type": "string", "enum": options]],
@@ -421,12 +429,30 @@ public struct OllamaRouter: Router {
             return ["type": "function", "function": function]
         }
         // Plain text (no tools) is writing for you: capped, so a summary can't run to pages.
-        let reply = try await OllamaClient(model: model).chat(messages: messages(system: system, turns), tools: list,
-                                                              maxTokens: tools.isEmpty ? 700 : nil)
-        let calls = reply.toolCalls.enumerated().map { index, call in
-            RouterCall(id: "call_\(index)", name: call.name, arguments: call.arguments)
+        let client = OllamaClient(model: model)
+        var history = messages(system: system, turns)
+        var reply = try await client.chat(messages: history, tools: list, maxTokens: tools.isEmpty ? 700 : nil)
+        var text = ModelOutput.answer(reply.content)
+        // Only reasoning came back (the model ignored "think": false and ran out of room mid-thought): ask once
+        // more with Qwen's own switch and more room, so the answer gets written.
+        if text.isEmpty, reply.toolCalls.isEmpty, ModelOutput.hadReasoning(reply.content),
+           let last = history.indices.last, history[last]["role"] as? String == "user" {
+            history[last]["content"] = "\(history[last]["content"] as? String ?? "")\n\n/no_think Reply with the answer only."
+            reply = try await client.chat(messages: history, tools: list, maxTokens: tools.isEmpty ? 1500 : nil)
+            text = ModelOutput.answer(reply.content)
         }
-        return RouterReply(text: reply.content, calls: calls)
+        let calls = reply.toolCalls.enumerated().map { index, call in
+            RouterCall(id: "call_\(index)", name: call.name, arguments: Self.withoutReasoning(call.arguments))
+        }
+        return RouterReply(text: text, calls: calls)
+    }
+
+    /// Text a tool call carries (a reply, a summary to paste) never includes the model's reasoning either.
+    static func withoutReasoning(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
+        arguments.mapValues { value in
+            guard case .string(let text) = value, ModelOutput.hadReasoning(text) else { return value }
+            return .string(ModelOutput.answer(text))
+        }
     }
 
     public func choose(system: String, user: String, field: String, options: [String],
