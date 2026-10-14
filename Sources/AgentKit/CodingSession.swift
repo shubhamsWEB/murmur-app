@@ -49,7 +49,7 @@ public struct CodingSession: Codable, Sendable {
         if text.range(of: #"\b(new|another|separate|different|second|fresh) (app|project|website|site|repo|api|tool|bot|game|script|extension)\b"#,
                       options: .regularExpression) != nil { return true }
         // "add a login page to the app", "build a settings screen for it": the project in hand.
-        if text.range(of: #"\b(it|its|the app|my app|this app|the project|this project|the site|the website|the code|existing)\b|\b(to|in|for|into|on) (the|my|this|our) \w+"#,
+        if text.range(of: #"\b(it|its|the app|my app|this app|the project|this project|the site|the website|the code|existing)\b|\b(to|in|for|into|on) (the|my|this|our) (app|project|site|website|page|code|repo|frontend|backend|api|ui|server)\b"#,
                       options: .regularExpression) != nil { return false }
         return text.range(of: #"^(?:please )?(?:create|build|make|scaffold|set up|setup|generate|bootstrap|spin up|start|code|develop) (?:me |us )?(?:a|an)\b"#,
                           options: .regularExpression) != nil
