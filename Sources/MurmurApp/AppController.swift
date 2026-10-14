@@ -380,6 +380,8 @@ final class AppController {
 struct SpokenFile {
     let text: String
     let kinds: Set<FileKind>?
+    /// The words that tell one file from another (not "pdf", "document", "my"): what a name has to match.
+    let distinctive: [String]
 
     private static let typeWords: [String: Set<FileKind>] = [
         "pdf": [.pdf], "pdfs": [.pdf],
@@ -405,6 +407,7 @@ struct SpokenFile {
         if rest.contains(where: { ["cv", "resume", "résumé"].contains($0) }) {
             rest = rest.filter { !["cv", "resume", "résumé"].contains($0) } + ["resume", "cv"]
         }
+        distinctive = rest
         text = rest.isEmpty ? spoken : rest.joined(separator: " ")
         // A photo can be a screenshot and the other way round; "file" says nothing.
         if kinds.contains(.image) { kinds.insert(.screenshot) }
@@ -419,13 +422,15 @@ struct SpokenFile {
         let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
         let minor: Set<String> = ["for", "about", "with", "from", "and", "in", "on", "to", "at", "my", "of", "the",
                                   "latest", "last", "new", "old", "one"]
-        let words = fold(text).split(separator: " ").map(String.init).filter { $0.count > 1 && !minor.contains($0) }
+        // Only the words that tell files apart: "open the pdf" has none, and "pdf" matched every PDF's name (its
+        // extension), so the same top PDF opened every time.
+        let words = distinctive.map(fold).filter { $0.count > 1 && !minor.contains($0) }
         var files: [ResultRow] = []
         var seen = Set<String>()
         for row in rows where seen.insert(row.id).inserted { files.append(row) }
-        guard !words.isEmpty else { return files.count == 1 ? files[0] : nil }
+        guard !words.isEmpty else { return nil }   // nothing to tell them apart: show the matches
         func found(_ row: ResultRow) -> Int {
-            let name = fold(row.name + " " + row.folder)
+            let name = fold((row.name as NSString).deletingPathExtension + " " + row.folder)
             return words.filter { word in
                 ["resume", "cv"].contains(word) ? (name.contains("resume") || name.contains("cv")) : name.contains(word)
             }.count

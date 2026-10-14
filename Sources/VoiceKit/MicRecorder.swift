@@ -9,6 +9,10 @@ public final class MicRecorder: @unchecked Sendable {
     private var samples: [Float] = []
     private var sampleRate: Double = 48_000
     private var running = false
+    /// Which input channel to keep, decided on the first buffer with sound: the loudest one when the others are
+    /// much quieter (a mic on one channel of a two-channel interface or headset: averaging would halve your voice),
+    /// otherwise -1, all of them averaged.
+    private var channel: Int?
 
     /// Called on the audio thread with the loudness of each buffer, 0…1 (for the HUD's meter).
     public var onLevel: ((Float) -> Void)?
@@ -25,6 +29,7 @@ public final class MicRecorder: @unchecked Sendable {
         lock.lock()
         samples.removeAll(keepingCapacity: true)
         sampleRate = format.sampleRate
+        channel = format.channelCount > 1 ? nil : -1
         lock.unlock()
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             self?.append(buffer)
@@ -65,14 +70,38 @@ public final class MicRecorder: @unchecked Sendable {
         let frames = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
         guard frames > 0, channels > 0 else { return }
-        var mono = [Float](repeating: 0, count: frames)
-        for channel in 0..<channels {
-            let pointer = data[channel]
-            for i in 0..<frames { mono[i] += pointer[i] }
+        lock.lock()
+        var use = channel
+        lock.unlock()
+        if use == nil {
+            var energies = [Float](repeating: 0, count: channels)
+            for c in 0..<channels {
+                let pointer = data[c]
+                for i in 0..<frames { energies[c] += pointer[i] * pointer[i] }
+            }
+            let loudest = energies.indices.max { energies[$0] < energies[$1] } ?? 0
+            let quietest = energies.min() ?? 0
+            if energies[loudest] > 1e-7 {
+                // 6 dB or more between channels: one carries the voice. Keep it alone.
+                use = quietest * 4 < energies[loudest] ? loudest : -1
+                lock.lock()
+                channel = use
+                lock.unlock()
+            }
         }
-        if channels > 1 {
-            let scale = 1 / Float(channels)
-            for i in 0..<frames { mono[i] *= scale }
+        var mono = [Float](repeating: 0, count: frames)
+        if let only = use, only >= 0, only < channels {
+            let pointer = data[only]
+            for i in 0..<frames { mono[i] = pointer[i] }
+        } else {
+            for c in 0..<channels {
+                let pointer = data[c]
+                for i in 0..<frames { mono[i] += pointer[i] }
+            }
+            if channels > 1 {
+                let scale = 1 / Float(channels)
+                for i in 0..<frames { mono[i] *= scale }
+            }
         }
         var sum: Float = 0
         for value in mono { sum += value * value }

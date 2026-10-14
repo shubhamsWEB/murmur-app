@@ -7,7 +7,8 @@ import Foundation
 /// Steps: remove DC offset → high-pass at 80 Hz (rumble and fan hum, which would otherwise be boosted too) → measure
 /// the speech level (the loudest 5 % of 20 ms frames) and the noise floor (the quietest 10 %) → apply one gain that
 /// brings speech to about −20 dBFS, capped at `maxGainDB` and never more than keeps speech clearly above the noise →
-/// soft-limit peaks so nothing clips.
+/// lift words said more quietly than the rest (trailing off, turning away from the mic) toward the same level, a few
+/// dB at a time and never in the pauses → soft-limit peaks so nothing clips.
 enum AudioLevel {
     struct Result {
         let samples: [Float]
@@ -63,9 +64,29 @@ enum AudioLevel {
         if speechDB - noiseDB < 6 { gainDB = min(gainDB, 6) }   // nothing but noise: don't turn it into a roar
         let gain = powf(10, gainDB / 20)
 
-        // Apply gain with a soft limiter above 0.8 so peaks round off instead of clipping.
+        // Word by word: a 20 ms frame of speech (well above the noise) that's quieter than the target gets up to
+        // 12 dB more, rising over ~60 ms and falling back at once for loud frames and gently in pauses, so soft words
+        // reach the model at a level it hears, without pumping up the noise between them.
+        let wordTarget: Float = 0.06            // about −24 dBFS
+        let maxLift: Float = 4                  // +12 dB
+        let speechFloor = max(noise * 2, 0.0005) * gain
+        var lifts = [Float](repeating: 1, count: levels.count)
+        var current: Float = 1
+        for k in levels.indices {
+            let level = levels[k] * gain
+            let want: Float = level > speechFloor ? min(maxLift, max(1, wordTarget / max(level, 1e-6))) : 1
+            if want < current { current = want } else { current += (want - current) * (level > speechFloor ? 0.35 : 0.08) }
+            lifts[k] = current
+        }
+
+        // Apply gain (the frame lifts blended sample by sample) with a soft limiter above 0.8 so peaks round off
+        // instead of clipping.
         for i in 0..<samples.count {
-            let v = samples[i] * gain
+            let position = Float(i) / Float(frame) - 0.5
+            let k = min(max(Int(position), 0), lifts.count - 1)
+            let next = min(k + 1, lifts.count - 1)
+            let t = min(max(position - Float(k), 0), 1)
+            let v = samples[i] * gain * (lifts[k] + (lifts[next] - lifts[k]) * t)
             let a = abs(v)
             if a > 0.8 {
                 let over = (a - 0.8) / 0.2

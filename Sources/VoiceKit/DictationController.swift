@@ -297,9 +297,11 @@ public final class DictationController: ObservableObject {
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(.control)
             previousApp = NSWorkspace.shared.frontmostApplication
+            // The microphone first: asking the app for its focus and selection can take a moment (Chrome, Electron
+            // apps), and a quick first word was lost while it did.
+            begin(handsFree: doubleTap)
             focusAtPress = Self.focus()
             selectionAtPress = Self.selectedText()
-            begin(handsFree: doubleTap)
         default:
             break
         }
@@ -360,7 +362,17 @@ public final class DictationController: ObservableObject {
         hud.hide()
     }
 
+    /// Stops listening a quarter of a second after the key comes up: the last word is often still being said as
+    /// the key is released, and its end was cut off.
     private func finish() {
+        phase = .transcribing
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            self?.finishRecording()
+        }
+    }
+
+    private func finishRecording() {
         let recorded = recorder.stop()
         guard recorded.count >= minimumSamples else {
             phase = .idle
@@ -368,7 +380,7 @@ public final class DictationController: ObservableObject {
             return
         }
         phase = .transcribing
-        let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 32 : 20)
+        let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 40 : 30)
         log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, gain +%.0f dB%@",
                    leveled.speechDB, leveled.noiseDB, leveled.gainDB, whisperMode ? " (whisper mode)" : ""))
         let samples = leveled.samples
