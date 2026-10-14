@@ -32,6 +32,8 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Murmur turns Bluetooth on or off when you ask it to.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Murmur asks QuickTime Player to open a recording at the moment that matched your search.</string>
 	<key>NSDesktopFolderUsageDescription</key>

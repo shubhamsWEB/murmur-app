@@ -103,6 +103,12 @@ public enum QuickCommands {
         (#"^(?:turn )?(?:the )?volume (up|down)$|^turn (up|down) (?:the )?volume$|^(louder|quieter|softer)$"#, { m in
             let word = [m[1], m[2], m[3]].first { !$0.isEmpty } ?? "up"
             return Action(tool: "change_volume", arguments: ["direction": word == "louder" || word == "up" ? "up" : "down"]) }),
+        // "turn off bluetooth", "switch wifi on", "disable wi-fi"
+        (#"^(?:turn|switch|put) (on|off) (?:the |my )?(bluetooth|wi-?fi|wifi|wireless)$|^(?:turn|switch|put) (?:the |my )?(bluetooth|wi-?fi|wifi|wireless) (on|off)$|^(enable|disable) (?:the |my )?(bluetooth|wi-?fi|wifi|wireless)$"#, { m in
+            let state = [m[1], m[4], m[5]].first { !$0.isEmpty } ?? "on"
+            let thing = [m[2], m[3], m[6]].first { !$0.isEmpty } ?? ""
+            let on = state == "on" || state == "enable"
+            return Action(tool: thing == "bluetooth" ? "set_bluetooth" : "set_wifi", arguments: ["on": on ? "true" : "false"]) }),
         (#"^(mute|unmute)(?: (?:the )?(?:sound|volume|audio|mac))?$"#, { m in
             Action(tool: "mute", arguments: ["on": m[1] == "mute" ? "true" : "false"]) }),
         (#"^(?:turn )?(?:the )?(?:screen )?brightness (up|down)$|^(brighter|dimmer)$"#, { m in

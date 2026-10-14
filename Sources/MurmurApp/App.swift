@@ -9,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // MURMUR_WORKER_DIR runs another worker (the Python reference, for evals) in place of the bundled model. Only
         // dev runs take it: anywhere else it would have Murmur, and its helpers, start whatever that folder holds.
         if UserDefaults.standard.string(forKey: "defaultsSuite") == nil { unsetenv("MURMUR_WORKER_DIR") }
+        // An exception AppKit catches and carries on from leaves Swift's concurrency state broken, and Murmur crashes
+        // later somewhere unrelated. Crash at the exception instead, so the report shows what threw.
+        UserDefaults.standard.register(defaults: ["NSApplicationCrashOnExceptions": true])
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

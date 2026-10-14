@@ -286,6 +286,49 @@ public enum MacActions {
         return output.isEmpty ? "Ran the shortcut \"\(name)\"." : "Shortcut \"\(name)\" said: \(output.prefix(500))"
     }
 
+    // MARK: Bluetooth and Wi-Fi
+
+    /// Bluetooth on or off, the way System Settings and `blueutil` do it (IOBluetooth's power preference). macOS
+    /// asks once for Bluetooth permission.
+    public static func setBluetooth(_ on: Bool) async -> String {
+        typealias GetPower = @convention(c) () -> Int32
+        typealias SetPower = @convention(c) (Int32) -> Void
+        guard let handle = dlopen("/System/Library/Frameworks/IOBluetooth.framework/IOBluetooth", RTLD_LAZY),
+              let getSymbol = dlsym(handle, "IOBluetoothPreferenceGetControllerPowerState"),
+              let setSymbol = dlsym(handle, "IOBluetoothPreferenceSetControllerPowerState") else {
+            return "Couldn't reach Bluetooth from here. Use open_settings bluetooth, then read_screen and click."
+        }
+        let power = unsafeBitCast(getSymbol, to: GetPower.self)
+        let setPower = unsafeBitCast(setSymbol, to: SetPower.self)
+        let word = on ? "on" : "off"
+        if (power() != 0) == on { return "Bluetooth is already \(word)." }
+        setPower(on ? 1 : 0)
+        for _ in 0..<20 {            // it takes a moment to switch
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if (power() != 0) == on { return "Turned Bluetooth \(word)." }
+        }
+        return "Bluetooth didn't switch \(word). Murmur may need Bluetooth permission (System Settings → Privacy & "
+            + "Security → Bluetooth)."
+    }
+
+    /// Wi-Fi on or off (`networksetup`, no password needed).
+    public static func setWiFi(_ on: Bool) async -> String {
+        let ports = await run("/usr/sbin/networksetup", ["-listallhardwareports"], timeout: 10)
+        // "Hardware Port: Wi-Fi\nDevice: en0"
+        var device: String?
+        let lines = ports.components(separatedBy: "\n")
+        for (index, line) in lines.enumerated() where line.contains("Wi-Fi") || line.contains("AirPort") {
+            if index + 1 < lines.count, lines[index + 1].hasPrefix("Device: ") {
+                device = String(lines[index + 1].dropFirst("Device: ".count)).trimmingCharacters(in: .whitespaces)
+                break
+            }
+        }
+        guard let device else { return "This Mac has no Wi-Fi." }
+        let output = await run("/usr/sbin/networksetup", ["-setairportpower", device, on ? "on" : "off"], timeout: 15)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Turned Wi-Fi \(on ? "on" : "off")." : "Wi-Fi: \(trimmed.prefix(200))"
+    }
+
     // MARK: Helpers
 
     @discardableResult
