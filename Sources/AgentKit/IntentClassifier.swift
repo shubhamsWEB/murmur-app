@@ -54,6 +54,17 @@ public enum IntentClassifier {
     /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.
     static let aboutTheMac = #"\b(on|for|of|in) (my|this|the) (mac|macbook|laptop|computer|system|screen|desktop)\b"#
 
+    /// A question or instruction about what's on the screen: "what's on my screen", "summarise this page", "what
+    /// does this error say", "read this email", "what am I looking at". Nobody dictates these into a message.
+    static let aboutTheScreen = #"^(what(['’]s| is| are| does| do)?|whats|which|read|describe|summari[sz]e|explain|tell me|look at|check)\b.*\b(screen|on screen|this (page|tab|window|error|message|email|mail|article|document|doc|site|website|video|chart|table|code|dialog|popup|notification)|the (page|tab|window|error|dialog|popup))\b|^what (am i|i'm|im) (looking at|seeing)\b"#
+
+    /// Questions that open a sentence: with "…on my Mac" they're asked of the Mac ("how much space is left on my
+    /// Mac?"), not written to someone.
+    static let questionOpeners: Set<String> = [
+        "what", "what's", "what’s", "whats", "how", "which", "why", "where", "when", "is", "are", "can", "could", "do", "does",
+        "did", "read", "describe",
+    ]
+
     public static func decide(_ utterance: String, forcedCommand: Bool, focus: Focus, frontApp: String?,
                               hasSelection: Bool, router: Router) async -> Decision {
         if forcedCommand { return Decision(intent: .command, reason: "⌃ held") }
@@ -85,10 +96,17 @@ public enum IntentClassifier {
         if WakeName.strip(utterance) != nil {
             return Decision(intent: .command, reason: "addressed to Murmur")
         }
+        if cleaned.range(of: aboutTheScreen, options: .regularExpression) != nil {
+            return Decision(intent: .command, reason: "about what's on the screen")
+        }
         // Somewhere you can't type (the desktop, a Finder window, a player): whatever you said is for Murmur.
         if focus == .notText { return Decision(intent: .command, reason: "nowhere to type") }
         let first = cleaned.split(separator: " ").first.map(String.init) ?? ""
         let mentionsMac = cleaned.range(of: aboutTheMac, options: .regularExpression) != nil
+        // "What's on my screen?", "how much space is left on my Mac?", "open the Downloads folder on my Mac".
+        if mentionsMac, commandOpeners.contains(first) || questionOpeners.contains(first) {
+            return Decision(intent: .command, reason: "about this Mac")
+        }
         guard commandOpeners.contains(first) || mentionsMac else {
             return Decision(intent: .dictation, reason: "reads as text")
         }
