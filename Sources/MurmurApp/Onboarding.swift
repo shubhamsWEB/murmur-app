@@ -1029,7 +1029,6 @@ private struct CommandsStep: View {
 
 private struct ReadyStep: View {
     @Bindable var state: OnboardingState
-    @State private var checkingVoice = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1069,20 +1068,6 @@ private struct ReadyStep: View {
             .frame(maxWidth: 470, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card)).overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
             .padding(.top, 28)
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Teach Murmur your names").font(.system(size: 13, weight: .semibold))
-                    Text("Read three short sentences, about ten seconds.").font(.system(size: 12)).foregroundStyle(Theme.ink2)
-                }
-                Spacer(minLength: 8)
-                Button("Check my voice") { checkingVoice = true }.buttonStyle(.murmurSecondary)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .frame(maxWidth: 470)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card)).overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
-            .padding(.top, 12)
-            .sheet(isPresented: $checkingVoice) { VoiceCheckView(dictation: state.app.dictation) }
             HStack(spacing: 8) {
                 Image(systemName: "sparkle.magnifyingglass")
                 Text("Murmur lives in the menu bar, which shows how indexing is going.")

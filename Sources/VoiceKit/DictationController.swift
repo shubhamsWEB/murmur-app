@@ -49,8 +49,6 @@ public final class DictationController: ObservableObject {
     /// At the key press: whether a text field had the focus, and what was selected.
     private var focusAtPress = IntentClassifier.Focus.unknown
     private var selectionAtPress: String?
-    /// The voice check is recording: the talk key waits.
-    private var checking = false
 
     /// Decide from the words whether you're dictating or giving a command (on by default). Fn+⌃ always means a command.
     public var detectCommands: Bool {
@@ -94,88 +92,6 @@ public final class DictationController: ObservableObject {
         monitor.onModifiers = { [weak self] flags in self?.modifiersChanged(flags) }
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.hud.setLevel(level) }
-        }
-        // Your dictionary's words, listened for from the first dictation (the listening model loads in the background).
-        let terms = Self.vocabulary()
-        Task { [transcriber] in await transcriber.setVocabulary(terms) }
-    }
-
-    /// Listen for your dictionary's words in the audio (custom vocabulary). On by default; off, the dictionary
-    /// still swaps the spellings you gave it.
-    public static var listensForDictionary: Bool {
-        get { UserDefaults.standard.object(forKey: "listenForDictionary") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "listenForDictionary") }
-    }
-
-    /// The personal dictionary as custom vocabulary: each word, and what it's heard as.
-    static func vocabulary() -> [ParakeetTranscriber.VocabularyTerm] {
-        guard listensForDictionary else { return [] }
-        return PersonalDictionary.shared.entries.map {
-            ParakeetTranscriber.VocabularyTerm(text: $0.written, aliases: $0.heard)
-        }
-    }
-
-    /// The transcript with your words put in only where that can't break an ordinary sentence: what was heard there
-    /// has a word that isn't English ("samai raina" → "Samay Raina"), or is a "heard as" you gave. Ordinary words
-    /// ("summarise this") are never swapped for a name, however close they sound.
-    public static func written(_ transcript: ParakeetTranscriber.Transcript) -> String {
-        let entries = PersonalDictionary.shared.entries
-        return transcript.text { replacement in
-            let original = replacement.original.lowercased()
-            let yours = entries.contains { entry in
-                entry.written.lowercased() == replacement.term.lowercased()
-                    && entry.heard.contains { $0.lowercased() == original }
-            }
-            if yours { return true }
-            let words = original.split(separator: " ").map(String.init)
-            return words.contains { !isRealWord($0) }
-        }
-    }
-
-    // MARK: Voice check
-
-    /// Starts recording one voice-check sentence (the talk key isn't involved).
-    public func startCheckRecording() throws {
-        guard phase == .idle, !checking else { throw VoiceError.busy }
-        try recorder.start()
-        checking = true
-    }
-
-    /// What was just read.
-    public func stopCheckRecording() -> [Float] {
-        checking = false
-        return recorder.stop()
-    }
-
-    public func cancelCheckRecording() {
-        guard checking else { return }
-        checking = false
-        recorder.cancel()
-    }
-
-    /// A voice-check recording transcribed the way dictation does it: `heard` is Parakeet alone, `text` is with your
-    /// dictionary listened for. `samples` comes back levelled, for saving.
-    public func transcribeForCheck(_ samples: [Float]) async throws -> (transcript: ParakeetTranscriber.Transcript,
-                                                                        samples: [Float]) {
-        let leveled = AudioLevel.normalize(samples, maxGainDB: whisperMode ? 32 : 20)
-        await transcriber.setVocabulary(Self.vocabulary())
-        return (try await transcriber.transcribeDetailed(leveled.samples, waitForVocabulary: true), leveled.samples)
-    }
-
-    /// Keeps a voice-check sentence on this Mac (a WAV and what it says), so Murmur can learn your voice later.
-    /// In ~/Library/Application Support/Murmur/Voice.
-    public static func keepRecording(_ samples: [Float], said: String, heard: String) {
-        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        let folder = base.appendingPathComponent("Murmur/Voice", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let name = "check-\(Int(Date().timeIntervalSince1970 * 1000))"
-            try WAV.write(samples, sampleRate: 16_000, to: folder.appendingPathComponent(name + ".wav"))
-            let info: [String: String] = ["said": said, "heard": heard, "date": ISO8601DateFormatter().string(from: Date())]
-            let data = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: folder.appendingPathComponent(name + ".json"))
-        } catch {
-            // Keeping recordings is a bonus; the check works without it.
         }
     }
 
@@ -222,8 +138,6 @@ public final class DictationController: ObservableObject {
         UserDefaults.standard.set(model.rawValue, forKey: Self.modelDefault)
         transcriber = ParakeetTranscriber(model: model)
         log("dictation: speech model is now \(model.rawValue)")
-        let terms = Self.vocabulary()
-        Task { [transcriber] in await transcriber.setVocabulary(terms) }
         Task { await prepareModel() }
     }
 
@@ -376,7 +290,6 @@ public final class DictationController: ObservableObject {
         case .listening(handsFree: true):
             finish()                       // a tap ends hands-free dictation
         case .idle:
-            guard !checking else { return }
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(.control)
@@ -458,30 +371,19 @@ public final class DictationController: ObservableObject {
         let samples = leveled.samples
         lastSamples = samples
         let transcriber = transcriber
-        let vocabulary = Self.vocabulary()
         let forcedCommand = commandRequested
         let frontApp = previousApp?.localizedName
         let pressedSelection = selectionAtPress
         let focus = focusAtPress
         let detect = detectCommands
-        // Where you're typing, read now while it's still in front: the field to look at again later, to learn from
-        // your corrections.
-        let typingInto = Self.focusedElement()
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
             hud.show(ready ? .transcribing : .working(modelStatus))
             let started = Date()
             do {
-                await transcriber.setVocabulary(vocabulary)
-                let transcript = try await transcriber.transcribeDetailed(samples)
-                let raw = Self.written(transcript)
-                if raw != transcript.heard {
-                    log("dictation: listening for your words changed the transcript")
-                } else if !transcript.replacements.isEmpty {
-                    log("dictation: skipped \(transcript.replacements.count) vocabulary swap(s) of ordinary words")
-                }
-                let text = TranscriptCleanup.quick(TextCleanup.basic(raw), dictionary: PersonalDictionary.shared)
+                let raw = try await transcriber.transcribe(samples)
+                let text = TextCleanup.basic(raw)
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
                            seconds, text.count, Date().timeIntervalSince(started)))
@@ -519,19 +421,17 @@ public final class DictationController: ObservableObject {
                     if hud.isWorking { hud.hide() }
                     return
                 }
-                let output = text
-                lastText = output
-                DictationHistory.shared.add(output, app: frontApp, kind: .dictation)
+                lastText = text
+                DictationHistory.shared.add(text, app: frontApp, kind: .dictation)
                 if focus == .notText {
                     // Pasting into Finder or the desktop makes a text clipping file: copy it instead.
-                    TextInserter.copy(output)
+                    TextInserter.copy(text)
                     log("dictation: nowhere to type, copied instead")
                     hud.flash("Nowhere to type here · copied to clipboard", seconds: 3)
                     return
                 }
                 hud.hide()
-                report(TextInserter.insert(output))
-                if let typingInto { learnFromEdits(of: output, in: typingInto) }
+                report(TextInserter.insert(text))
             } catch {
                 phase = .idle
                 log("dictation: transcription failed: \(error.localizedDescription)")
@@ -876,51 +776,6 @@ extension DictationController {
         // Web pages and app-drawn views can hold a text field Accessibility doesn't show.
         let unclear: Set<String> = ["AXWebArea", "AXGroup", "AXScrollArea", "AXUnknown", ""]
         return unclear.contains(role_) ? .unknown : .notText
-    }
-
-    // MARK: Getting the words right
-
-    /// Looks at the field again a little after typing into it. Words of the dictation you replaced with look-alikes
-    /// are mishearings to remember (`CorrectionLearner`). Only a misheard non-word is swapped from then on ("kopiko"
-    /// → "Copico"): a real word you changed ("pool" → "pull") depends on context, so it's never replaced blindly.
-    private func learnFromEdits(of typed: String, in element: AXUIElement) {
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 15_000_000_000)
-            guard let now = Self.value(of: element) else { return }
-            let dictionary = PersonalDictionary.shared
-            for pair in CorrectionLearner.corrections(typed: typed, now: now) {
-                let caseOnly = pair.heard.lowercased() == pair.written.lowercased()
-                if caseOnly {
-                    guard CorrectionLearner.hasDistinctiveCapitals(pair.written) else { continue }
-                    dictionary.add(pair.written, learned: true)
-                } else if !Self.isRealWord(pair.heard) {
-                    dictionary.learn(heard: pair.heard, written: pair.written)
-                } else {
-                    continue
-                }
-                self?.log("dictionary: learned a spelling from your correction")
-            }
-        }
-    }
-
-    /// A word the system spell checker knows.
-    public static func isRealWord(_ word: String) -> Bool {
-        let range = NSSpellChecker.shared.checkSpelling(of: word, startingAt: 0)
-        return range.location == NSNotFound
-    }
-
-    static func focusedElement() -> AXUIElement? {
-        let system = AXUIElementCreateSystemWide()
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
-        return (focused as! AXUIElement)
-    }
-
-    static func value(of element: AXUIElement) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success else { return nil }
-        return value as? String
     }
 
     /// The text selected in the focused app, through Accessibility (for "make this shorter", "reply to this").

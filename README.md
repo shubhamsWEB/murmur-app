@@ -58,18 +58,6 @@ Murmur needs a Mac with Apple silicon on macOS 14 or later. The speech and searc
 A small capsule at the bottom of the screen shows when Murmur is listening and what it did. Whisper Mode (in the
 menu bar menu) boosts quiet speech.
 
-### Getting your words right
-
-- **Instant fixes, always on:** filler sounds (“um”, “uh”) are dropped, a number you correct yourself (“at 2, sorry,
-  3”) keeps only the correction, and your **personal dictionary** spells names and terms your way (“kopiko” →
-  “Copico”). Add words under **Dictation → Accuracy**; Murmur also learns when you fix a misheard word it typed.
-- **Listens for your words:** every word in your dictionary is also listened for in the audio itself (FluidAudio’s
-  custom vocabulary, on your Mac), so a name like “Samay Raina” comes out right even when the speech model alone
-  would write “samai”.
-- **Voice check:** under **Dictation → Accuracy → Check my voice**, type the names you use and read three short
-  sentences (about ten seconds). Murmur shows how many words it got right, with and without your dictionary, and
-  adds the names it misheard. You can keep that recording on your Mac for future tuning; it’s off by default.
-
 ### Commands
 
 Typing is the default, so Murmur only treats your words as a command when it’s clearly one:
@@ -109,8 +97,7 @@ as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, C
 ## Privacy
 
 - **Your voice** is transcribed on your Mac by NVIDIA Parakeet on the Neural Engine. Audio is held in memory only
-  while it’s transcribed, and never sent anywhere. It’s saved only if you choose to keep a voice-check recording,
-  in `~/Library/Application Support/Murmur/Voice`.
+  while it’s transcribed, and never saved or sent anywhere.
 - **Your files** are indexed on your Mac, only in the folders you choose, with Google’s EmbeddingGemma.
 - **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, only the command’s words, the
   front app’s name and any selected text are sent to that provider. Never audio, never files.
