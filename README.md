@@ -66,11 +66,13 @@ Typing is the default, so Murmur only treats your words as a command when it’s
   screen”, “take a screenshot”, “open YouTube in Chrome”, “search the web for …”, “open my resume PDF”,
   “run shortcut Morning”, “check for updates”.
 - **Everything else** goes to a model that plans the steps: multi-step tasks across apps (“open Notes and write a
-  packing list for Goa”), work on selected text, or a quick answer in a small panel.
+  packing list for Goa”), work on selected text (“summarise this and add it to Notes”), Terminal commands (“how
+  much disk space is left?”), or a quick answer in a small panel.
 - **Coding:** “build a React app with a hello world page” starts Claude Code or Codex in Terminal, in a new project
   folder, with your own login.
-- **Asks before:** quitting an app, running a Shortcut, clicking anything risky, and starting Claude Code or Codex
-  (unless you turn on *Start without asking*).
+- **Asks before:** quitting an app, running a Shortcut, clicking anything risky, running a Terminal command that
+  changes anything (commands that only read run straight away; `sudo` never runs), and starting Claude Code or
+  Codex (unless you turn on *Start without asking*).
 
 Say “Murmur, …” first or hold ⌃ to make sure something is treated as a command. **Open Log** in the menu bar menu
 shows every decision and why.
