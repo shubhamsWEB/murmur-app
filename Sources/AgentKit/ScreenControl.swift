@@ -136,6 +136,14 @@ public enum ScreenControl {
                 // A link's or button's children are its label, not more things to press.
                 if role == "AXLink" || role == "AXButton" { continue }
             }
+            // What an app shows in things that aren't text or controls (a calendar's events, a list's rows, a cell):
+            // their description or title is what they say.
+            if kind == nil, role != "AXStaticText", role != "AXWindow", visible, textLength < textLimit,
+               let text = longString(current, kAXDescriptionAttribute) ?? longString(current, kAXTitleAttribute),
+               text.count >= 3, seenText.insert(text).inserted {
+                texts.append(text)
+                textLength += text.count + 1
+            }
             // A document's text, typed in an editor (Notes, TextEdit, Mail): what it says, as far as the limit.
             if role == "AXTextArea", visible, textLength < textLimit, let text = longString(current, kAXValueAttribute, max: 1500) {
                 texts.append(text)

@@ -32,6 +32,16 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Murmur reads your calendar when you ask about it ("what's on my calendar tomorrow?"). Nothing leaves your Mac except what you send to a cloud model you chose.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Murmur reads your calendar when you ask about it ("what's on my calendar tomorrow?").</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Murmur reads your reminders when you ask about them ("what are my reminders?").</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Murmur reads your reminders when you ask about them.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Murmur looks up a person's number when you ask it to message them.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Murmur turns Bluetooth on or off when you ask it to.</string>
 	<key>NSAppleEventsUsageDescription</key>

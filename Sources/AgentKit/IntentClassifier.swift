@@ -49,7 +49,12 @@ public enum IntentClassifier {
         "navigate", "take", "download", "clear", "change", "increase", "decrease", "reduce", "raise", "lower",
         "toggle", "create", "make", "build", "add", "delete", "remove", "move", "rename", "copy", "watch",
         "explain", "ask", "tell", "dim", "brighten", "stop", "resume", "unpause", "skip", "next", "previous",
+        "send", "message", "whatsapp", "text", "email", "ping",
     ]
+
+    /// "send a message to Riya on WhatsApp saying…", "text Mom that I'm late", "WhatsApp Rahul saying…", "message
+    /// the team on Slack…": an errand for Murmur, not words for the box you're in.
+    static let messageToSend = #"^(send|write|drop|shoot) (a |an )?(quick |short )?(message|msg|text|whatsapp|dm|reply|note|email|mail)\b.*\bto\b|^(message|text|whatsapp|ping|dm|email|mail) (?!(me|us|you|him|her|them)\b)[a-z]+.*\b(on|in|via|over|through) (whatsapp|slack|telegram|signal|messages|imessage|teams|discord)\b|^(message|text|whatsapp|ping|dm) (?!(me|us|you|him|her|them)\b)[a-z]+( [a-z]+)? (saying|that|to say|and say|asking|telling|to tell)\b|^(send|tell) .+\b(on|in|via|over|through) (whatsapp|slack|telegram|signal|imessage|teams|discord)\b"#
 
     /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.
     static let aboutTheMac = #"\b(on|for|of|in) (my|this|the) (mac|macbook|laptop|computer|system|screen|desktop)\b"#
@@ -79,6 +84,9 @@ public enum IntentClassifier {
             && cleaned.range(of: #"^(find|search|show|get|look|open)\b"#, options: .regularExpression) == nil
         if verblessFileSearch, focus == .textField {
             return Decision(intent: .dictation, reason: "file words, but you're in a text field")
+        }
+        if cleaned.range(of: messageToSend, options: .regularExpression) != nil {
+            return Decision(intent: .command, reason: "a message to send")
         }
         if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {
             return Decision(intent: .command, reason: "known command (\(quick.map(\.tool).joined(separator: " + ")))")

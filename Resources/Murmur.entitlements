@@ -8,5 +8,8 @@
 	<!-- Murmur: dictation records the microphone (the hardened runtime blocks it without this). -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- "What's on my calendar?", "my reminders": read through EventKit (the hardened runtime blocks it without this). -->
+	<key>com.apple.security.personal-information.calendars</key>
+	<true/>
 </dict>
 </plist>

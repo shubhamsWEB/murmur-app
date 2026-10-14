@@ -64,6 +64,8 @@ public final class CommandAgent {
     private var browserInUse: String? { lastBrowser?.bundleID ?? openedIn }
     /// This command has put a page up: later pages load in that tab rather than new ones.
     private var openedPage = false
+    /// The user said yes to sending a message in this command: Return in a chat app doesn't ask again.
+    private var messageApproved = false
     /// Whether each browser's pages can be scripted, checked once per command.
     private var pageAccess: [String: Bool] = [:]
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
@@ -135,6 +137,7 @@ public final class CommandAgent {
         pageAccess = [:]
         openedIn = nil
         openedPage = false
+        messageApproved = false
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
@@ -318,7 +321,9 @@ public final class CommandAgent {
     }
 
     private func route(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool) async {
-        var context = "Front app (where the user is): \(frontApp ?? "unknown")."
+        let now = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year().hour().minute())
+        var context = "Now: \(now) (\(TimeZone.current.identifier))."
+        context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
         if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
         if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
         if let session = CodingSession.current {
@@ -750,6 +755,9 @@ public final class CommandAgent {
             if let id = args["into"]?.number, id > 0 {
                 _ = await ScreenControl.focus(Int(id))
             }
+            if text("submit") == "true", !(await mayPressReturn("return")) {
+                return Outcome(result: "You chose not to send it.", finished: true)
+            }
             host.pasteHere(words)
             try? await Task.sleep(nanoseconds: 350_000_000)
             if text("submit") == "true" {
@@ -758,6 +766,9 @@ public final class CommandAgent {
             }
             return Outcome(result: "Typed \(words.count) characters\(text("submit") == "true" ? " and pressed Return" : "").")
         case "press_keys":
+            guard await mayPressReturn(text("keys")) else {
+                return Outcome(result: "You chose not to send it.", finished: true)
+            }
             let result = ScreenControl.press(text("keys"))
             try? await Task.sleep(nanoseconds: 300_000_000)
             return Outcome(result: result)
@@ -792,12 +803,42 @@ public final class CommandAgent {
                            finished: true, shown: true)
         case "run_command":
             return await runCommand(text("command"), purpose: text("purpose"))
+        case "calendar_events":
+            host.progress("Reading your calendar…")
+            return Outcome(result: await AppData.events(start: text("start"), days: Int(args["days"]?.number ?? 1),
+                                                         search: text("search")))
+        case "reminders_list":
+            host.progress("Reading your reminders…")
+            return Outcome(result: await AppData.reminders(search: text("search"), completed: text("completed") == "true"))
+        case "app_dictionary":
+            return Outcome(result: await AppData.scriptingDictionary(text("app")))
+        case "send_message":
+            let to = text("to"), body = text("text")
+            let app = text("app").isEmpty ? (ScreenControl.workingApp()?.localizedName ?? "Messages") : text("app")
+            guard !to.isEmpty, !body.isEmpty else { return Outcome(result: "Who should it go to, and what should it say?") }
+            guard await host.confirm("Send this to \(to) on \(app)?", "“\(body)”") else {
+                return Outcome(result: "You chose not to send it.", finished: true)
+            }
+            messageApproved = true
+            host.progress("Sending to \(to)…")
+            return Outcome(result: await Messaging.send(body, to: to, in: app, paste: host.pasteHere))
         case "reply":
             host.showAnswer(text("text"))
             return Outcome(result: "Shown.", finished: true, shown: true)
         default:
             return Outcome(result: "Unknown tool \(tool).")
         }
+    }
+
+    /// Return in a chat app sends what's typed: the user says yes first, unless they already did for this message.
+    private func mayPressReturn(_ keys: String) async -> Bool {
+        guard ["return", "enter"].contains(keys.lowercased().trimmingCharacters(in: .whitespaces)), !messageApproved,
+              let app = ScreenControl.workingApp(), let id = app.bundleIdentifier, Messaging.apps.contains(id) else {
+            return true
+        }
+        let yes = await host.confirm("Send this message?", "Pressing Return in \(app.localizedName ?? "this app") sends what's typed.")
+        if yes { messageApproved = true }
+        return yes
     }
 
     /// Play or pause what the user means, where they are: Finder's selected video or song, the player in front, the
@@ -813,6 +854,14 @@ public final class CommandAgent {
             return nil
         }
         if let working, let done = await MacActions.controlPlayer(working, action) { return done }
+        // Another player with a video or song open (its window is named after the file): space plays and pauses.
+        if let working, BrowserControl.browser(for: working) == nil, let title = ScreenControl.frontWindowTitle(),
+           MacActions.isPlayable(title) {
+            working.activate()
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            _ = ScreenControl.press("space")
+            return "\(action == "play" ? "Played" : "Paused") \(title) in \(working.localizedName ?? "the player")."
+        }
         if let browser = BrowserControl.inFront() ?? BrowserControl.target(preferred: browserInUse),
            await canScript(browser), let done = await BrowserControl.media(action, in: browser) {
             return done
@@ -999,6 +1048,18 @@ public final class CommandAgent {
                 + "selected: media_control play. A player (QuickTime, Music, Spotify, IINA, VLC): media_control. A "
                 + "browser: the page tools. Go to YouTube or the web only when the user names a site or asks to search "
                 + "online; never web_search or search_files for something already on the screen.",
+            "- Information inside apps: get the data, don't just open the app. Calendar: calendar_events (\"what's on "
+                + "my calendar tomorrow\", \"my meetings this week\": start and days from today's date above). "
+                + "Reminders: reminders_list. Other apps that can be scripted (Mail, Notes, Messages, Contacts, Music, "
+                + "Safari, Finder, Photos, Things, OmniFocus…): run_applescript that reads it and returns text, e.g. "
+                + "tell application \"Mail\" to get {subject, sender} of messages 1 thru 10 of inbox; call "
+                + "app_dictionary first when unsure of the app's words. Apps that can't be scripted (WhatsApp, Slack, "
+                + "Teams, most Electron apps): open_app, read_screen, then click and scroll to the right view and read "
+                + "again. Then reply with the details asked for.",
+            "- Messages to people (\"send a message to Riya on WhatsApp saying…\", \"text Mom that I'm late\", \"tell "
+                + "the team on Slack…\"): send_message with the app, who it's for and the message in the user's words "
+                + "(fix only obvious transcription slips). It asks the user first. If its result says to finish on the "
+                + "screen, do that. Never just type the request into the box the user is in.",
             "- Documents: open_file with the user's own distinctive words (\"Q3 sales report\", \"lease 2025\"), never "
                 + "a generic word like \"document\". If it says it's showing matches, the user picks; don't open "
                 + "something else instead.",
@@ -1109,6 +1170,20 @@ public final class CommandAgent {
                   "purpose": ("string", "one short line on what it does, shown when the user is asked")],
                  required: ["command"]),
             tool("reply", "Show a short answer to the user", ["text": ("string", "the answer")]),
+            tool("calendar_events", "Read the user's calendar events, from every calendar account",
+                 ["start": ("string", "today, tomorrow, a weekday, or YYYY-MM-DD"),
+                  "days": ("number", "how many days: 1 for a day, 7 for a week"),
+                  "search": ("string", "only events mentioning this; empty for all")], required: ["start"]),
+            tool("reminders_list", "Read the user's reminders",
+                 ["search": ("string", "only reminders mentioning this; empty for all"),
+                  "completed": ("string", "true to include done ones")], required: []),
+            tool("app_dictionary", "An app's AppleScript terms (what it holds and its commands), to write a "
+                 + "run_applescript that reads or changes it", ["app": ("string", "app name")]),
+            tool("send_message", "Send a message to a person or channel in WhatsApp, Messages, Slack and other chat apps "
+                 + "(the user is asked first)",
+                 ["app": ("string", "WhatsApp, Messages, Slack… (empty: the chat app in front)"),
+                  "to": ("string", "the person, group or channel, as the user said it"),
+                  "text": ("string", "the message, in the user's words")], required: ["to", "text"]),
             tool("done", "Finish when nothing more is needed"),
         ]
         if helpers.contains(.claude) {

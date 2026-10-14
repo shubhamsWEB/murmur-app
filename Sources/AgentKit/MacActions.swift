@@ -424,7 +424,7 @@ public enum MacActions {
         if opener == quickTime {
             for _ in 0..<4 {
                 try? await Task.sleep(nanoseconds: 700_000_000)
-                if appleScript("tell application id \"\(quickTime)\" to play front document") != nil { break }
+                if runs("tell application id \"\(quickTime)\" to play front document") { break }
             }
         }
         return "Playing \(url.lastPathComponent)."
@@ -436,9 +436,9 @@ public enum MacActions {
         let name = app.localizedName ?? "the player"
         switch id {
         case quickTime:
-            guard appleScript("tell application id \"\(quickTime)\" to \(action) front document") != nil else { return nil }
+            guard runs("tell application id \"\(quickTime)\" to \(action) front document") else { return nil }
         case "com.apple.Music", "com.spotify.client", "com.apple.TV":
-            guard appleScript("tell application id \"\(id)\" to \(action)") != nil else { return nil }
+            guard runs("tell application id \"\(id)\" to \(action)") else { return nil }
         case "com.colliderli.iina", "org.videolan.vlc", "io.mpv":
             app.activate()
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -470,6 +470,14 @@ public enum MacActions {
         """
         guard let out = appleScript(script)?.trimmingCharacters(in: .whitespacesAndNewlines), !out.isEmpty else { return nil }
         return String(out.prefix(2000))
+    }
+
+    /// Whether a script ran without an error (a command like "play" succeeds without returning anything).
+    static func runs(_ source: String) -> Bool {
+        guard let script = NSAppleScript(source: source) else { return false }
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        return error == nil
     }
 
     static func appleScript(_ source: String) -> String? {
