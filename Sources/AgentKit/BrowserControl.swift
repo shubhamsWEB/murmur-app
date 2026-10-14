@@ -22,6 +22,41 @@ public enum BrowserControl {
 
     /// Told the user how to turn page access on (once a session).
     private static var explainedSwitch = false
+    /// Browsers whose pages can't be scripted this session (the switch is off and stays off): no more tries.
+    public static var unavailable: Set<String> = []
+
+    public enum PageAccess: Equatable {
+        case ok, switchOff, notAuthorized, failed
+    }
+
+    /// Whether JavaScript can run in the browser's page right now.
+    public static func probe(_ browser: Browser) async -> PageAccess {
+        switch await jxa(runner, [browser.bundleID, browser.safari ? "safari" : "chromium", "'ok'"]) {
+        case .success(let value): return value == "ok" ? .ok : .failed
+        case .failure(.message("switch off")): return .switchOff
+        case .failure(.message("not authorized")): return .notAuthorized
+        case .failure: return .failed
+        }
+    }
+
+    /// Turns on the browser's "Allow JavaScript from Apple Events" (Chrome-family: View → Developer), through its
+    /// menu, then checks it took. Safari asks for a password there, so it's left to the user.
+    public static func enablePageAccess(in browser: Browser) async -> Bool {
+        guard !browser.safari,
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first,
+              await ScreenControl.turnOnMenuItem(titled: "Allow JavaScript from Apple Events", in: app) else { return false }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        return await probe(browser) == .ok
+    }
+
+    /// The one-time note on how to allow page access, when Murmur couldn't turn it on itself.
+    public static func explainOnce(_ access: PageAccess, _ browser: Browser) {
+        switch access {
+        case .switchOff: explain("switch off", browser)
+        case .notAuthorized: explain("not authorized", browser)
+        default: break
+        }
+    }
     /// What to show the user when the browser's switch is off (set by the app: a HUD message).
     public static var onNeedsPermission: ((String) -> Void)?
 
@@ -32,14 +67,27 @@ public enum BrowserControl {
         return nil
     }
 
-    /// The browser to act in: the app you're working in if it's one, else `preferred`, else one that's running.
+    /// The browser to act in: the app you're working in if it's one; else the one this command opened a page in
+    /// (`preferred`); else the browser you used last; else your default browser; only then any running one. (Not
+    /// just "one that's running": a background Safari or Edge would be the wrong window, with its own settings.)
     public static func target(preferred bundleID: String? = nil) -> Browser? {
         if let working = browser(for: ScreenControl.workingApp()) { return working }
         let running = NSWorkspace.shared.runningApplications
-        if let bundleID, let app = running.first(where: { $0.bundleIdentifier == bundleID }), let found = browser(for: app) {
-            return found
+        func runningBrowser(_ id: String?) -> Browser? {
+            guard let id else { return nil }
+            return running.first { $0.bundleIdentifier == id }.flatMap { browser(for: $0) }
         }
+        if let found = runningBrowser(bundleID) { return found }
+        if let last = ScreenControl.lastBrowserApp, !last.isTerminated, let found = browser(for: last) { return found }
+        if let found = runningBrowser(defaultBrowserID) { return found }
         return running.lazy.compactMap { browser(for: $0) }.first
+    }
+
+    /// The browser that opens web links.
+    static var defaultBrowserID: String? {
+        guard let url = URL(string: "https://example.com"),
+              let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
+        return Bundle(url: app)?.bundleIdentifier
     }
 
     /// The browser in front (or the one you were in when Murmur's window is in front), if it's a scriptable one.
@@ -83,9 +131,7 @@ public enum BrowserControl {
 
     /// Runs JavaScript in the browser's current tab and returns what it evaluates to.
     static func evaluate(_ code: String, in browser: Browser) async -> Result<String, Failure> {
-        let result = await jxa(runner, [browser.bundleID, browser.safari ? "safari" : "chromium", code])
-        if case .failure(.message(let why)) = result { explain(why, browser) }
-        return result
+        await jxa(runner, [browser.bundleID, browser.safari ? "safari" : "chromium", code])
     }
 
     /// A JavaScript string literal for `text`.
@@ -115,8 +161,7 @@ public enum BrowserControl {
     public static func describe(_ failure: Failure, _ browser: Browser) -> String {
         switch failure {
         case .message("switch off"):
-            return "Can't work inside \(browser.name) pages: its \"Allow JavaScript from Apple Events\" switch is off "
-                + "(the user has been told how to turn it on). Use read_screen, click and type_text instead."
+            return "Can't work inside \(browser.name)'s page directly. Use read_screen, click and type_text instead."
         case .message("not authorized"):
             return "macOS hasn't allowed Murmur to control \(browser.name) (Privacy & Security → Automation). Use "
                 + "read_screen, click and type_text instead."

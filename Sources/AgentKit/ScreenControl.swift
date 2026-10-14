@@ -42,7 +42,11 @@ public enum ScreenControl {
     private static func remember(_ app: NSRunningApplication?) {
         guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
         lastOtherApp = app
+        if BrowserControl.browser(for: app) != nil { lastBrowserApp = app }
     }
+
+    /// The browser you were in last (Chrome, Safari…), for "summarise this page" said from another app.
+    public private(set) static var lastBrowserApp: NSRunningApplication?
 
     /// The app you're working in: the front one, or the one you were in when Murmur's own window is in front.
     public static func workingApp() -> NSRunningApplication? {
@@ -180,6 +184,66 @@ public enum ScreenControl {
     }
 
     // MARK: Acting
+
+    /// Clicks the button or link whose words match `text` (the same words, then starting with them, then containing
+    /// them), from a fresh look at the screen: browser_click when the browser's page can't be scripted.
+    public static func click(labeled text: String) async -> String {
+        _ = await read()
+        let want = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !want.isEmpty else { return "Say what to click." }
+        var best: (index: Int, score: Int)?
+        for (index, element) in elements.enumerated() {
+            let role = string(element, kAXRoleAttribute) ?? ""
+            guard let words = label(element, role: role)?.lowercased() else { continue }
+            let score = words == want ? 3 : words.hasPrefix(want) ? 2 : words.contains(want) ? 1 : 0
+            if score > (best?.score ?? 0) { best = (index, score) }
+        }
+        guard let best else { return "Nothing on the screen says “\(text)”. read_screen to see what's there, or scroll." }
+        return await click(best.index + 1)
+    }
+
+    /// Puts the cursor in the field whose label or placeholder contains `name`; with no name (or no match), the
+    /// focused field, else a search field, else the first field. Returns whether there was one.
+    public static func focusField(named name: String) async -> Bool {
+        _ = await read()
+        let editable = elements.enumerated().filter { _, element in
+            let role = string(element, kAXRoleAttribute) ?? ""
+            return role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox"
+                || string(element, kAXSubroleAttribute) == "AXSearchField"
+        }
+        guard !editable.isEmpty else { return false }
+        let want = name.lowercased().trimmingCharacters(in: .whitespaces)
+        func words(_ element: AXUIElement) -> String {
+            [string(element, kAXDescriptionAttribute), string(element, "AXPlaceholderValue"),
+             string(element, kAXTitleAttribute)].compactMap { $0 }.joined(separator: " ").lowercased()
+        }
+        let pick = (want.isEmpty ? nil : editable.first { words($0.element).contains(want) })
+            ?? editable.first { string($0.element, kAXSubroleAttribute) == "AXSearchField" || words($0.element).contains("search") }
+            ?? editable.first
+        guard let pick else { return false }
+        return await focus(pick.offset + 1)
+    }
+
+    /// Presses the menu item called `title` anywhere in `app`'s menu bar, unless it's already ticked: a setting with
+    /// no other way in ("Allow JavaScript from Apple Events"). Returns whether it was pressed (or already on).
+    public static func turnOnMenuItem(titled title: String, in app: NSRunningApplication) async -> Bool {
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let bar = element(root, kAXMenuBarAttribute) else { return false }
+        var queue: [(node: AXUIElement, depth: Int)] = [(bar, 0)]
+        var seen = 0
+        while !queue.isEmpty, seen < 6000 {
+            let (node, depth) = queue.removeFirst()
+            for child in children(node) {
+                seen += 1
+                if string(child, kAXRoleAttribute) == "AXMenuItem", string(child, kAXTitleAttribute) == title {
+                    if let mark = string(child, "AXMenuItemMarkChar"), !mark.isEmpty { return true }   // already on
+                    return AXUIElementPerformAction(child, kAXPressAction as CFString) == .success
+                }
+                if depth < 7 { queue.append((child, depth + 1)) }
+            }
+        }
+        return false
+    }
 
     /// What element `id` is, for asking before a risky click.
     public static func name(of id: Int) -> String? {

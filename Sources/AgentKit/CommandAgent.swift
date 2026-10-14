@@ -58,6 +58,12 @@ public final class CommandAgent {
     private let maxSteps = 16
     /// A browser opened earlier in this command: web searches and addresses open there.
     private var lastBrowser: AppCatalog.App?
+    /// The browser this command opened a page in (a named one, else the default browser), so later steps act in
+    /// that window even before it comes to the front.
+    private var openedIn: String?
+    private var browserInUse: String? { lastBrowser?.bundleID ?? openedIn }
+    /// Whether each browser's pages can be scripted, checked once per command.
+    private var pageAccess: [String: Bool] = [:]
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
     /// Tools that only bring something up: on their own, they rarely finish a request with more than one part.
     private static let openingTools: Set<String> = [
@@ -91,6 +97,8 @@ public final class CommandAgent {
                     editable: Bool = false) async {
         let started = Date()
         lastBrowser = nil
+        pageAccess = [:]
+        openedIn = nil
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
@@ -450,9 +458,11 @@ public final class CommandAgent {
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url":
             useBrowser(args["browser"])
+            openedIn = lastBrowser?.bundleID ?? BrowserControl.defaultBrowserID
             return Outcome(result: MacActions.openURL(text("url"), in: lastBrowser))
         case "web_search":
             useBrowser(args["browser"])
+            openedIn = lastBrowser?.bundleID ?? BrowserControl.defaultBrowserID
             return Outcome(result: MacActions.webSearch(text("query"), in: lastBrowser))
         case "set_volume": return Outcome(result: MacActions.setVolume(Int(args["percent"]?.number ?? 50)))
         case "change_volume": return Outcome(result: MacActions.changeVolume(by: text("direction") == "down" ? -15 : 15))
@@ -465,8 +475,8 @@ public final class CommandAgent {
             let action = text("action")
             // A video in the browser: pause or play it in the page (the media key only toggles, and may pick another
             // player). Anything else, or no page access: the media keys.
-            if action == "pause" || action == "play", let browser = BrowserControl.target(preferred: lastBrowser?.bundleID),
-               let done = await BrowserControl.media(action, in: browser) {
+            if action == "pause" || action == "play", let browser = BrowserControl.target(preferred: browserInUse),
+               await canScript(browser), let done = await BrowserControl.media(action, in: browser) {
                 return Outcome(result: done)
             }
             return Outcome(result: MacActions.media(action))
@@ -508,22 +518,20 @@ public final class CommandAgent {
         case "open_settings": return Outcome(result: MacActions.openSettings(text("pane")))
         case "site_search":
             useBrowser(args["browser"])
+            openedIn = lastBrowser?.bundleID ?? BrowserControl.defaultBrowserID
             return Outcome(result: MacActions.siteSearch(text("site"), text("query"), in: lastBrowser))
         case "browser_read":
-            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+            guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open. open_url first.")
             }
             host.progress("Reading the page…")
-            switch await BrowserControl.read(in: browser) {
-            case .success(let page):
+            if await canScript(browser), case .success(let page) = await BrowserControl.read(in: browser) {
                 host.log("command: read the page in \(browser.name): \(page.count) characters")
                 return Outcome(result: page)
-            case .failure(let failure):
-                host.log("command: couldn't read the page in \(browser.name); reading the screen instead")
-                return Outcome(result: BrowserControl.describe(failure, browser) + "\n\n" + (await ScreenControl.read()))
             }
+            return Outcome(result: await ScreenControl.read())
         case "browser_click":
-            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+            guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open.")
             }
             let words = text("text")
@@ -533,29 +541,56 @@ public final class CommandAgent {
                 }
             }
             host.progress("Clicking \(words)…")
-            return Outcome(result: await BrowserControl.click(words, in: browser))
+            if await canScript(browser) { return Outcome(result: await BrowserControl.click(words, in: browser)) }
+            return Outcome(result: await ScreenControl.click(labeled: words))
         case "browser_type":
-            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+            guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open.")
             }
             host.progress("Typing…")
-            return Outcome(result: await BrowserControl.type(text("text"), into: text("field"),
-                                                             submit: text("submit") == "true", in: browser))
+            let submit = text("submit") == "true"
+            if await canScript(browser) {
+                return Outcome(result: await BrowserControl.type(text("text"), into: text("field"), submit: submit, in: browser))
+            }
+            // The page can't be scripted: click into the field and type, as a person would.
+            guard await ScreenControl.focusField(named: text("field")) else {
+                return Outcome(result: "There's no field to type into on this page.")
+            }
+            host.pasteHere(text("text"))
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if submit {
+                _ = ScreenControl.press("return")
+                try? await Task.sleep(nanoseconds: 800_000_000)
+            }
+            return Outcome(result: "Typed it\(submit ? " and pressed Return" : "").")
         case "browser_scroll":
-            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+            guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open.")
             }
-            return Outcome(result: await BrowserControl.scroll(text("direction"), in: browser))
+            if await canScript(browser) { return Outcome(result: await BrowserControl.scroll(text("direction"), in: browser)) }
+            let keys = ["up": "pageup", "top": "cmd+up", "bottom": "cmd+down"][text("direction").lowercased()] ?? "pagedown"
+            NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first?.activate()
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            _ = ScreenControl.press(keys)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            return Outcome(result: "Scrolled \(text("direction")).")
         case "browser_tabs":
-            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+            guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open.")
             }
-            return Outcome(result: await BrowserControl.tabs(in: browser))
+            if await canScript(browser) { return Outcome(result: await BrowserControl.tabs(in: browser)) }
+            return Outcome(result: "Can't list \(browser.name)'s tabs right now. press_keys cmd+1 … cmd+9 switches to a tab by position.")
         case "browser_switch_tab":
-            guard let browser = BrowserControl.target(preferred: lastBrowser?.bundleID) else {
+            guard let browser = BrowserControl.target(preferred: browserInUse) else {
                 return Outcome(result: "No browser is open.")
             }
-            return Outcome(result: await BrowserControl.switchTab(text("tab"), in: browser))
+            if await canScript(browser) { return Outcome(result: await BrowserControl.switchTab(text("tab"), in: browser)) }
+            if let number = Int(text("tab")), (1...9).contains(number) {
+                NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first?.activate()
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                return Outcome(result: ScreenControl.press("cmd+\(number)"))
+            }
+            return Outcome(result: "Can't find tabs by name right now. press_keys cmd+1 … cmd+9 switches by position.")
         case "run_applescript":
             let script = args["script"]?.description ?? ""
             guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -574,7 +609,8 @@ public final class CommandAgent {
             return Outcome(result: result)
         case "read_screen":
             // In a browser, the page itself says more than its window does.
-            if let browser = BrowserControl.inFront(), case .success(let page) = await BrowserControl.read(in: browser) {
+            if let browser = BrowserControl.inFront(), await canScript(browser),
+               case .success(let page) = await BrowserControl.read(in: browser) {
                 host.log("command: read the page in \(browser.name): \(page.count) characters")
                 return Outcome(result: page)
             }
@@ -648,11 +684,41 @@ public final class CommandAgent {
         }
     }
 
+    /// Whether Murmur can work inside `browser`'s pages, checked once per command. When the browser's "Allow
+    /// JavaScript from Apple Events" is off, Murmur offers once to turn it on (Chrome-family browsers, through their
+    /// menu); declined or not possible, the browser tools work through the screen instead, silently.
+    private func canScript(_ browser: BrowserControl.Browser) async -> Bool {
+        if let known = pageAccess[browser.bundleID] { return known }
+        if BrowserControl.unavailable.contains(browser.bundleID) {
+            pageAccess[browser.bundleID] = false
+            return false
+        }
+        var access = await BrowserControl.probe(browser)
+        if access == .switchOff, !browser.safari {
+            let yes = await host.confirm("Let Murmur work inside \(browser.name) pages?",
+                "Murmur will turn on \(browser.name)'s “Allow JavaScript from Apple Events” (View → Developer), so it can "
+                + "read pages and click and type in them directly. You can turn it off there at any time.")
+            if yes, await BrowserControl.enablePageAccess(in: browser) {
+                access = .ok
+                host.log("command: turned on page access in \(browser.name)")
+            }
+        }
+        let usable = access == .ok
+        if !usable {
+            BrowserControl.unavailable.insert(browser.bundleID)
+            BrowserControl.explainOnce(access, browser)
+            host.log("command: \(browser.name) pages can't be scripted (\(access)); working through the screen")
+        }
+        pageAccess[browser.bundleID] = usable
+        return usable
+    }
+
     /// The screen after an action: a moment for it to settle (a web page takes longer), then what's on it.
     private func screenAfterChange(_ tool: String) async -> String {
         let web: Set<String> = ["open_url", "web_search", "site_search"]
         try? await Task.sleep(nanoseconds: web.contains(tool) ? 2_000_000_000 : 700_000_000)
-        if let browser = BrowserControl.inFront(), case .success(let page) = await BrowserControl.read(in: browser, limit: 3500) {
+        if let browser = BrowserControl.inFront(), await canScript(browser),
+           case .success(let page) = await BrowserControl.read(in: browser, limit: 3500) {
             return "\n\nThe page now:\n\(page)"
         }
         let screen = await ScreenControl.read()
