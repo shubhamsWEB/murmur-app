@@ -58,10 +58,10 @@ public final class CommandAgent {
     private let maxSteps = 16
     /// A browser opened earlier in this command: web searches and addresses open there.
     private var lastBrowser: AppCatalog.App?
-    /// Tools whose result the model needs to read before it can go on (the screen, a list, a helper's answer).
-    /// A step without any of them is the last one, unless the model is still working (no `done` yet and it looked).
-    private static let informationTools: Set<String> = [
-        "find_apps", "list_running_apps", "list_shortcuts", "ask_claude", "ask_codex", "read_screen", "run_command",
+    /// Tools after which the screen is different: the step's last result shows the model the new screen.
+    private static let screenChangingTools: Set<String> = [
+        "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "click", "press_keys",
+        "type_text", "write_in_app",
     ]
     /// A click on one of these asks you first.
     private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
@@ -258,6 +258,8 @@ public final class CommandAgent {
         var turns: [RouterTurn] = [.user(utterance)]
         var router = currentRouter()
         host.progress("Thinking…")
+        var lastSignature = ""
+        var repeats = 0
         for step in 0..<maxSteps {
             let reply: RouterReply
             let asked = Date()
@@ -299,10 +301,11 @@ public final class CommandAgent {
                 return
             }
             turns.append(.assistant(text: reply.text, calls: reply.calls))
-            var needsAnotherLook = false
             var finishedNow = false
             var results: [String] = []
-            for call in reply.calls {
+            var changedScreen = false
+            var looked = false
+            for (index, call) in reply.calls.enumerated() {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
                 if call.name == "done" {
                     turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
@@ -312,15 +315,33 @@ public final class CommandAgent {
                 let outcome = await execute(call.name, call.arguments)
                 if outcome.finished { return }
                 results.append(outcome.result)
-                if Self.informationTools.contains(call.name) { needsAnotherLook = true }
-                turns.append(.toolResult(callID: call.id, name: call.name, content: outcome.result))
+                // A look counts only if nothing changed the screen after it.
+                if Self.screenChangingTools.contains(call.name) { changedScreen = true; looked = false }
+                if call.name == "read_screen" { looked = true }
+                var content = outcome.result
+                // The last call of a step that changed the screen carries a fresh look at it, so the model sees
+                // where it is (a page that loaded, a dialog that opened) without spending a step to ask.
+                if index == reply.calls.count - 1, changedScreen, !looked, !finishedNow {
+                    content += await screenAfterChange(call.name)
+                }
+                turns.append(.toolResult(callID: call.id, name: call.name, content: content))
             }
-            // Actions only (open, search, volume…), or the model said done: finished, without another trip to the
-            // model just to say so. Otherwise it looked at something (the screen, a list) and goes on from there.
-            if !needsAnotherLook || finishedNow {
-                if !results.isEmpty { host.progress(results.joined(separator: " ")) }
+            if !results.isEmpty { host.progress(results.last ?? "") }
+            // Finished only when the model says so (done, or a tool that finishes: an answer, pasted text).
+            // A step of actions alone ("open YouTube") is a step, not the end: the model goes on from what it sees.
+            if finishedNow { return }
+            // Going round in circles (the same calls again and again): stop rather than loop to the limit.
+            let signature = reply.calls.map { call in
+                call.name + call.arguments.keys.sorted().map { "\($0)=\(call.arguments[$0]?.description ?? "")" }.joined(separator: ",")
+            }.joined(separator: "|")
+            repeats = signature == lastSignature ? repeats + 1 : 0
+            lastSignature = signature
+            if repeats >= 2 {
+                host.log("command: the same step three times; stopping")
+                host.progress("Stopped: it kept trying the same step.")
                 return
             }
+            host.progress("Working… (step \(step + 2))")
         }
         host.log("command: stopped after \(maxSteps) steps")
     }
@@ -485,6 +506,14 @@ public final class CommandAgent {
         }
     }
 
+    /// The screen after an action: a moment for it to settle (a web page takes longer), then what's on it.
+    private func screenAfterChange(_ tool: String) async -> String {
+        let web: Set<String> = ["open_url", "web_search", "site_search"]
+        try? await Task.sleep(nanoseconds: web.contains(tool) ? 2_000_000_000 : 700_000_000)
+        let screen = await ScreenControl.read()
+        return "\n\nThe screen now:\n\(screen)"
+    }
+
     /// A shell command the model asked for: reading commands run at once, anything else is shown to you first.
     private func runCommand(_ command: String, purpose: String) async -> Outcome {
         guard !command.isEmpty else { return Outcome(result: "No command given.") }
@@ -510,8 +539,10 @@ public final class CommandAgent {
         var lines = [
             "You are Murmur, a voice assistant on the user's Mac. The user spoke a command; carry it out with tools.",
             "Rules:",
-            "- Respond only with tool calls. Call every tool the request needs in ONE response, in order "
-                + "(e.g. open_app then web_search). Keep it to the fewest steps.",
+            "- Respond only with tool calls. Work in steps until the WHOLE request is done: each response does what "
+                + "it can (several calls in order are fine), then you see the results and the screen, and go on. "
+                + "When everything the user asked for is done, call done. If one response does it all (\"open "
+                + "Slack\"), put done at the end of that same response.",
             "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said.",
             "- Opening a file (\"open my resume pdf\"): open_file with the description.",
             "- Files: \"search\", \"find\" or \"look for\" means the user's own files on this Mac: search_files. "
@@ -528,12 +559,15 @@ public final class CommandAgent {
             "- You can see and use the front app like a person: read_screen lists its window's buttons, links and "
                 + "fields as [n]; click n; type_text (into field n, submit true to press Return); press_keys "
                 + "(\"return\", \"cmd+l\", \"cmd+n\", \"down\", \"pagedown\"); wait. Use them for any task the other "
-                + "tools don't cover, step by step: act, then read_screen in the SAME response to see the result, and "
-                + "go on until the whole request is done. Numbers change on every read: only use numbers from the "
-                + "latest read_screen. When everything is done, call done.",
+                + "tools don't cover. After an action that changes the screen you are shown the new screen with its "
+                + "[n] numbers; use only numbers from the latest screen. Keep going until the whole request is done, "
+                + "then call done.",
             "- Websites: open the result page directly when you can: site_search (YouTube, Amazon, GitHub, Maps, "
                 + "Wikipedia…) or open_url with a search URL; then read_screen and click what the user wants "
-                + "(\"the first video\": the first link that is a video title, not an ad or a channel).",
+                + "(\"the first video\": the first link that is a video title, not an ad or a channel). YouTube sorted "
+                + "by views (\"the most viewed\"): open_url https://www.youtube.com/results?search_query=<words>&sp=CAM%253D "
+                + "then click the first video title; if the page isn't sorted, use its Filters button, Sort by, View "
+                + "count. To play a video, click its title.",
             "- Clicking send, buy, post or delete asks the user; only do it when they asked for it.",
             "- To write something in an app (\"open Notes and write a shopping list\", \"open TextEdit and draft a "
                 + "letter to…\"): call write_in_app ONCE with the app and the finished text, written by you in full "
