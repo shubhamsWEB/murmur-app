@@ -133,6 +133,8 @@ public final class CommandAgent {
         // In Finder what's selected is files (⌘C copies their names, which looked like selected text): they reach
         // the model as Finder's selection instead.
         let selection = ScreenControl.workingApp()?.bundleIdentifier == "com.apple.finder" ? nil : selection
+        // Where the command happens, for the log: the app and the window you're looking at.
+        host.log("command: in \(ScreenControl.workingApp()?.localizedName ?? "?"), window \"\(ScreenControl.frontWindowTitle() ?? "")\"")
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -642,8 +644,8 @@ public final class CommandAgent {
             }
             return Outcome(result: await showPage(url, opened: "Searching \(text("site")) for \"\(text("query"))\""))
         case "browser_read":
-            guard let browser = BrowserControl.target(preferred: browserInUse) else {
-                return Outcome(result: "No browser is open. open_url first.")
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
             }
             host.progress("Reading the page…")
             if await canScript(browser), case .success(let page) = await BrowserControl.read(in: browser) {
@@ -652,8 +654,8 @@ public final class CommandAgent {
             }
             return Outcome(result: await ScreenControl.read())
         case "browser_click":
-            guard let browser = BrowserControl.target(preferred: browserInUse) else {
-                return Outcome(result: "No browser is open.")
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
             }
             let words = text("text")
             if words.range(of: Self.riskyWords, options: .regularExpression) != nil {
@@ -665,8 +667,8 @@ public final class CommandAgent {
             if await canScript(browser) { return Outcome(result: await BrowserControl.click(words, in: browser)) }
             return Outcome(result: await ScreenControl.click(labeled: words))
         case "browser_type":
-            guard let browser = BrowserControl.target(preferred: browserInUse) else {
-                return Outcome(result: "No browser is open.")
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
             }
             host.progress("Typing…")
             let submit = text("submit") == "true"
@@ -685,8 +687,8 @@ public final class CommandAgent {
             }
             return Outcome(result: "Typed it\(submit ? " and pressed Return" : "").")
         case "browser_scroll":
-            guard let browser = BrowserControl.target(preferred: browserInUse) else {
-                return Outcome(result: "No browser is open.")
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
             }
             if await canScript(browser) { return Outcome(result: await BrowserControl.scroll(text("direction"), in: browser)) }
             let keys = ["up": "pageup", "top": "cmd+up", "bottom": "cmd+down"][text("direction").lowercased()] ?? "pagedown"
@@ -696,14 +698,14 @@ public final class CommandAgent {
             try? await Task.sleep(nanoseconds: 500_000_000)
             return Outcome(result: "Scrolled \(text("direction")).")
         case "browser_tabs":
-            guard let browser = BrowserControl.target(preferred: browserInUse) else {
-                return Outcome(result: "No browser is open.")
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
             }
             if await canScript(browser) { return Outcome(result: await BrowserControl.tabs(in: browser)) }
             return Outcome(result: "Can't list \(browser.name)'s tabs right now. press_keys cmd+1 … cmd+9 switches to a tab by position.")
         case "browser_switch_tab":
-            guard let browser = BrowserControl.target(preferred: browserInUse) else {
-                return Outcome(result: "No browser is open.")
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
             }
             if await canScript(browser) { return Outcome(result: await BrowserControl.switchTab(text("tab"), in: browser)) }
             if let number = Int(text("tab")), (1...9).contains(number) {
@@ -830,6 +832,14 @@ public final class CommandAgent {
         }
     }
 
+    /// The browser the page tools act in: the one in front, or the one this command opened a page in. Not the
+    /// browser you used last: with another app in front, its old page isn't what you mean.
+    private func browserHere() -> BrowserControl.Browser? {
+        if let front = BrowserControl.inFront() { return front }
+        if openedPage || lastBrowser != nil { return BrowserControl.running(browserInUse) }
+        return nil
+    }
+
     /// Return in a chat app sends what's typed: the user says yes first, unless they already did for this message.
     private func mayPressReturn(_ keys: String) async -> Bool {
         guard ["return", "enter"].contains(keys.lowercased().trimmingCharacters(in: .whitespaces)), !messageApproved,
@@ -846,6 +856,7 @@ public final class CommandAgent {
     /// another app). Nil: nothing there, so the media keys.
     private func mediaWhereYouAre(_ action: String) async -> String? {
         let working = ScreenControl.workingApp()
+        // Finder: the selected video or song. Nothing playable selected: the media keys.
         if working?.bundleIdentifier == "com.apple.finder" {
             if action == "play", let first = MacActions.finderSelection()?.split(separator: "\n").first.map({ String($0) }),
                MacActions.isPlayable(first) {
@@ -853,29 +864,32 @@ public final class CommandAgent {
             }
             return nil
         }
-        if let working, let done = await MacActions.controlPlayer(working, action) { return done }
-        // Another player with a video or song open (its window is named after the file): space plays and pauses.
-        if let working, BrowserControl.browser(for: working) == nil, let title = ScreenControl.frontWindowTitle(),
-           MacActions.isPlayable(title) {
+        // A player in front (QuickTime, IINA, VLC, Music, Spotify, or any app that plays video or audio): it, and
+        // only it. Never a browser in the background.
+        if let working, MacActions.isMediaPlayer(working) {
+            if let done = await MacActions.controlPlayer(working, action) { return done }
             ScreenControl.raiseViewedWindow(of: working)
             working.activate()
             try? await Task.sleep(nanoseconds: 250_000_000)
             _ = ScreenControl.press("space")
-            return "\(action == "play" ? "Played" : "Paused") \(title) in \(working.localizedName ?? "the player")."
+            host.log("command: media → \(working.localizedName ?? "player") (space)")
+            return "\(action == "play" ? "Played" : "Paused") it in \(working.localizedName ?? "the player")."
         }
-        if let browser = BrowserControl.inFront() ?? BrowserControl.target(preferred: browserInUse),
-           await canScript(browser), let done = await BrowserControl.media(action, in: browser) {
-            return done
-        }
-        // A browser in front whose page can't be scripted: the page's own key, in the window you're looking at
-        // (YouTube: k; most players: space). The media key would go to whatever played last, somewhere else.
+        // A browser in front: the video on the page you're looking at; if the page can't be scripted, its own key
+        // in that window (YouTube: k; most players: space). The media key would go to whatever played last.
         if let working, let browser = BrowserControl.browser(for: working) {
+            if await canScript(browser), let done = await BrowserControl.media(action, in: browser) { return done }
             let address = await BrowserControl.currentTab(in: browser)?.url ?? ""
             ScreenControl.raiseViewedWindow(of: working)
             working.activate()
             try? await Task.sleep(nanoseconds: 250_000_000)
             _ = ScreenControl.press(address.contains("youtube.com") ? "k" : "space")
             return "\(action == "play" ? "Played" : "Paused") the video in \(browser.name)."
+        }
+        // Somewhere else (an editor, a chat app): "pause the video" means the one playing in a browser, if any.
+        if let browser = BrowserControl.target(preferred: browserInUse), await canScript(browser),
+           let done = await BrowserControl.media(action, in: browser) {
+            return done
         }
         return nil
     }

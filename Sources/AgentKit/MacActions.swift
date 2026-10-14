@@ -430,6 +430,17 @@ public enum MacActions {
         return "Playing \(url.lastPathComponent)."
     }
 
+    /// An app that plays video or audio: a known player, or any app (not a browser) that opens movies or sound files.
+    static func isMediaPlayer(_ app: NSRunningApplication) -> Bool {
+        guard let id = app.bundleIdentifier, let url = app.bundleURL, BrowserControl.browser(for: app) == nil else { return false }
+        let known: Set<String> = [quickTime, "com.colliderli.iina", "org.videolan.vlc", "io.mpv", "com.apple.Music",
+                                  "com.apple.TV", "com.spotify.client", "com.apple.podcasts", "com.firecore.infuse",
+                                  "com.movist.MovistPro", "com.Eltima.ElmediaPlayer"]
+        if known.contains(id) { return true }
+        let players = NSWorkspace.shared.urlsForApplications(toOpen: .movie) + NSWorkspace.shared.urlsForApplications(toOpen: .audio)
+        return players.contains { $0.standardizedFileURL == url.standardizedFileURL }
+    }
+
     /// Play or pause in the player you're in (QuickTime, IINA, VLC, Music, Spotify, TV), if it's one.
     static func controlPlayer(_ app: NSRunningApplication, _ action: String) async -> String? {
         guard let id = app.bundleIdentifier, action == "play" || action == "pause" else { return nil }
