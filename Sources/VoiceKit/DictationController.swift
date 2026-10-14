@@ -76,6 +76,24 @@ public final class DictationController: ObservableObject {
     private static let whisperDefault = "whisperMode"
 
     /// Whisper Mode: boost quiet speech up to 32 dB instead of 20 dB, for whispering or speaking softly.
+    /// Where the AI pass that fixes misheard words runs (`TranscriptCleanup.fix`). Off by default: the instant fixes
+    /// (fillers, your dictionary) always run.
+    public enum Polish: String, CaseIterable, Sendable {
+        case off, local, cloud
+        public var display: String {
+            switch self {
+            case .off: "Off"
+            case .local: "On this Mac"
+            case .cloud: "With your AI model"
+            }
+        }
+    }
+
+    public var polish: Polish {
+        get { UserDefaults.standard.string(forKey: "dictation.polish").flatMap(Polish.init) ?? .off }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "dictation.polish") }
+    }
+
     public var whisperMode: Bool {
         get { UserDefaults.standard.bool(forKey: Self.whisperDefault) }
         set { UserDefaults.standard.set(newValue, forKey: Self.whisperDefault) }
@@ -376,6 +394,10 @@ public final class DictationController: ObservableObject {
         let pressedSelection = selectionAtPress
         let focus = focusAtPress
         let detect = detectCommands
+        // Where you're typing, read now while it's still in front: context for fixing misheard words, and the
+        // field to look at again later to learn from your corrections.
+        let typingInto = Self.focusedElement()
+        let beforeCursor = polish == .off ? nil : typingInto.flatMap { Self.textBeforeCursor(in: $0) }
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
@@ -383,7 +405,7 @@ public final class DictationController: ObservableObject {
             let started = Date()
             do {
                 let raw = try await transcriber.transcribe(samples)
-                let text = TextCleanup.basic(raw)
+                let text = TranscriptCleanup.quick(TextCleanup.basic(raw), dictionary: PersonalDictionary.shared)
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
                            seconds, text.count, Date().timeIntervalSince(started)))
@@ -421,17 +443,19 @@ public final class DictationController: ObservableObject {
                     if hud.isWorking { hud.hide() }
                     return
                 }
-                lastText = text
-                DictationHistory.shared.add(text, app: frontApp, kind: .dictation)
+                let output = await polished(text, app: frontApp, before: beforeCursor)
+                lastText = output
+                DictationHistory.shared.add(output, app: frontApp, kind: .dictation)
                 if focus == .notText {
                     // Pasting into Finder or the desktop makes a text clipping file: copy it instead.
-                    TextInserter.copy(text)
+                    TextInserter.copy(output)
                     log("dictation: nowhere to type, copied instead")
                     hud.flash("Nowhere to type here · copied to clipboard", seconds: 3)
                     return
                 }
                 hud.hide()
-                report(TextInserter.insert(text))
+                report(TextInserter.insert(output))
+                if let typingInto { learnFromEdits(of: output, in: typingInto) }
             } catch {
                 phase = .idle
                 log("dictation: transcription failed: \(error.localizedDescription)")
@@ -776,6 +800,92 @@ extension DictationController {
         // Web pages and app-drawn views can hold a text field Accessibility doesn't show.
         let unclear: Set<String> = ["AXWebArea", "AXGroup", "AXScrollArea", "AXUnknown", ""]
         return unclear.contains(role_) ? .unknown : .notText
+    }
+
+    // MARK: Getting the words right
+
+    /// The AI pass over a dictation, when it's on: misheard words fixed, nothing rephrased (`TranscriptCleanup.fix`
+    /// throws away an answer that changed more than a few words). The transcript as heard when it's off, slow or
+    /// unfaithful.
+    private func polished(_ text: String, app: String?, before: String?) async -> String {
+        guard polish != .off else { return text }
+        let router: Router
+        if polish == .cloud {
+            router = Routers.current(localModel: agent.routerModel)
+        } else {
+            router = OllamaRouter(model: agent.routerModel)
+        }
+        let started = Date()
+        let fixed = await TranscriptCleanup.fix(text, app: app, before: before, terms: PersonalDictionary.shared.terms,
+                                                router: router, timeout: polish == .cloud ? 2.5 : 2.0)
+        let took = Date().timeIntervalSince(started)
+        guard let fixed else {
+            log(String(format: "polish: kept the transcript as heard (%@, %.2f s)", router.name, took))
+            return text
+        }
+        let changed = TranscriptCleanup.editDistance(TranscriptCleanup.words(text), TranscriptCleanup.words(fixed))
+        log(String(format: "polish: %@ fixed %ld word(s) in %.2f s", router.name, changed, took))
+        return fixed
+    }
+
+    /// Looks at the field again a little after typing into it. Words of the dictation you replaced with look-alikes
+    /// are mishearings to remember (`CorrectionLearner`). Only a misheard non-word is swapped automatically from then
+    /// on ("kopiko" → "Copico"); a real word you changed ("pool" → "pull") depends on context, so the new spelling
+    /// only joins your dictionary as a term for the AI pass, if it's a name or a term at all.
+    private func learnFromEdits(of typed: String, in element: AXUIElement) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard let now = Self.value(of: element) else { return }
+            let dictionary = PersonalDictionary.shared
+            for pair in CorrectionLearner.corrections(typed: typed, now: now) {
+                let caseOnly = pair.heard.lowercased() == pair.written.lowercased()
+                if caseOnly {
+                    guard CorrectionLearner.hasDistinctiveCapitals(pair.written) else { continue }
+                    dictionary.add(pair.written, learned: true)
+                } else if !Self.isRealWord(pair.heard) {
+                    dictionary.learn(heard: pair.heard, written: pair.written)
+                } else if !Self.isRealWord(pair.written) || pair.written.first?.isUppercase == true {
+                    dictionary.add(pair.written, learned: true)
+                } else {
+                    continue
+                }
+                self?.log("dictionary: learned a spelling from your correction")
+            }
+        }
+    }
+
+    /// A word the system spell checker knows.
+    static func isRealWord(_ word: String) -> Bool {
+        let range = NSSpellChecker.shared.checkSpelling(of: word, startingAt: 0)
+        return range.location == NSNotFound
+    }
+
+    static func focusedElement() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        return (focused as! AXUIElement)
+    }
+
+    static func value(of element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    /// Up to `limit` characters before the insertion point: what the dictation continues.
+    static func textBeforeCursor(in element: AXUIElement, limit: Int = 400) -> String? {
+        guard let value = value(of: element) else { return nil }
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeRef, CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) else { return nil }
+        let text = value as NSString
+        let end = min(max(range.location, 0), text.length)
+        let start = max(0, end - limit)
+        return text.substring(with: NSRange(location: start, length: end - start))
     }
 
     /// The text selected in the focused app, through Accessibility (for "make this shorter", "reply to this").

@@ -748,10 +748,83 @@ private struct Fix: View {
 
 // MARK: - Dictation
 
+/// Your words and names, how they're heard, and what Murmur learned from your corrections.
+private struct DictionaryEditor: View {
+    @ObservedObject var dictionary: PersonalDictionary
+    @State private var word = ""
+    @State private var heard = ""
+
+    private var canAdd: Bool { !word.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    private func add() {
+        guard canAdd else { return }
+        dictionary.add(word, heard: heard.split(separator: ",").map(String.init))
+        word = ""
+        heard = ""
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Personal dictionary").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.ink)
+                Text("Names and words to always spell your way. Add what Murmur hears instead and it swaps it in. "
+                     + "It also learns when you fix a word it typed.")
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                TextField("Word or name, e.g. Copico", text: $word)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(add)
+                TextField("Heard as (optional), e.g. kopiko", text: $heard)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(add)
+                Button("Add", action: add)
+                    .buttonStyle(.murmurSecondary)
+                    .disabled(!canAdd)
+            }
+            if dictionary.entries.isEmpty {
+                Text("No words yet.").font(.system(size: 12.5)).foregroundStyle(Theme.ink3)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(dictionary.entries) { entry in
+                        HStack(spacing: 10) {
+                            Text(entry.written).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.ink)
+                            if !entry.heard.isEmpty {
+                                Text("heard as " + entry.heard.joined(separator: ", "))
+                                    .font(.system(size: 12.5)).foregroundStyle(Theme.ink2).lineLimit(1)
+                            }
+                            if entry.learned {
+                                Text("learned").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accentText)
+                            }
+                            Spacer(minLength: 8)
+                            Button {
+                                dictionary.remove(entry)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.ink3)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove \(entry.written)")
+                            .accessibilityLabel("Remove \(entry.written)")
+                        }
+                        .padding(.vertical, 7)
+                        if entry.id != dictionary.entries.last?.id {
+                            Rectangle().fill(Theme.hairline).frame(height: 1)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+}
+
 private struct DictationPage: View {
     let dictation: DictationController
     let state: HomeState
     @ObservedObject private var history = DictationHistory.shared
+    @ObservedObject private var dictionary = PersonalDictionary.shared
 
     var body: some View {
         let _ = state.revision
@@ -792,6 +865,21 @@ private struct DictationPage: View {
                 SettingRow(title: "Last recording", detail: "Save what the microphone heard, to check its quality.") {
                     Button("Save…") { dictation.saveLastRecording() }.buttonStyle(.murmurSecondary)
                 }
+            }
+            SettingsSection("Accuracy") {
+                SettingRow(title: "Fix misheard words with AI",
+                           detail: "Fixes words the speech model got wrong, using the app you're in and your dictionary. "
+                               + "It never rephrases: if a fix would change more than a few words, Murmur types what it "
+                               + "heard. “With your AI model” sends the text, never audio, to Claude or OpenAI.") {
+                    Picker("Fix misheard words with AI",
+                           selection: state.bind(get: { dictation.polish }, set: { dictation.polish = $0 })) {
+                        ForEach(DictationController.Polish.allCases, id: \.self) { Text($0.display).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 220)
+                }
+                RowDivider()
+                DictionaryEditor(dictionary: dictionary)
             }
             SettingsSection("Commands or text") {
                 SettingRow(title: "Tell commands from dictation",
