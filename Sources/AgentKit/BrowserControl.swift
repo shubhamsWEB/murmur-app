@@ -120,10 +120,19 @@ public enum BrowserControl {
 
     private static let runner = #"""
     function run(argv) {
-      const id = argv[0], safari = argv[1] === "safari", code = argv[2];
+      const id = argv[0], safari = argv[1] === "safari", code = argv[2], want = argv[3] || "";
       const app = Application(id);
       if (app.windows.length === 0) throw new Error("no window open");
-      const w = app.windows[0];
+      let w = app.windows[0];
+      if (want) {
+        const [x, y, wd, h] = want.split(",").map(Number);
+        for (const c of app.windows()) {
+          try {
+            const b = c.bounds();
+            if (Math.abs(b.x - x) < 10 && Math.abs(b.y - y) < 10 && Math.abs(b.width - wd) < 10 && Math.abs(b.height - h) < 10) { w = c; break; }
+          } catch (e) {}
+        }
+      }
       if (safari) return String(app.doJavaScript(code, { in: w.currentTab }));
       return String(w.activeTab.execute({ javascript: code }));
     }
@@ -131,7 +140,13 @@ public enum BrowserControl {
 
     /// Runs JavaScript in the browser's current tab and returns what it evaluates to.
     static func evaluate(_ code: String, in browser: Browser) async -> Result<String, Failure> {
-        await jxa(runner, [browser.bundleID, browser.safari ? "safari" : "chromium", code])
+        await jxa(runner, [browser.bundleID, browser.safari ? "safari" : "chromium", code, viewedWindow(browser)])
+    }
+
+    /// The browser window you're looking at, as "x,y,width,height" ("" for its front window).
+    static func viewedWindow(_ browser: Browser) -> String {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first else { return "" }
+        return ScreenControl.viewedWindowArgument(of: app.processIdentifier)
     }
 
     /// A JavaScript string literal for `text`.

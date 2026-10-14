@@ -857,6 +857,7 @@ public final class CommandAgent {
         // Another player with a video or song open (its window is named after the file): space plays and pauses.
         if let working, BrowserControl.browser(for: working) == nil, let title = ScreenControl.frontWindowTitle(),
            MacActions.isPlayable(title) {
+            ScreenControl.raiseViewedWindow(of: working)
             working.activate()
             try? await Task.sleep(nanoseconds: 250_000_000)
             _ = ScreenControl.press("space")
@@ -865,6 +866,16 @@ public final class CommandAgent {
         if let browser = BrowserControl.inFront() ?? BrowserControl.target(preferred: browserInUse),
            await canScript(browser), let done = await BrowserControl.media(action, in: browser) {
             return done
+        }
+        // A browser in front whose page can't be scripted: the page's own key, in the window you're looking at
+        // (YouTube: k; most players: space). The media key would go to whatever played last, somewhere else.
+        if let working, let browser = BrowserControl.browser(for: working) {
+            let address = await BrowserControl.currentTab(in: browser)?.url ?? ""
+            ScreenControl.raiseViewedWindow(of: working)
+            working.activate()
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            _ = ScreenControl.press(address.contains("youtube.com") ? "k" : "space")
+            return "\(action == "play" ? "Played" : "Paused") the video in \(browser.name)."
         }
         return nil
     }

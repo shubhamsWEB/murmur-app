@@ -436,10 +436,32 @@ public enum MacActions {
         let name = app.localizedName ?? "the player"
         switch id {
         case quickTime:
-            guard runs("tell application id \"\(quickTime)\" to \(action) front document") else { return nil }
+            // The document in the window you're looking at, not QuickTime's "front document" (the last one opened).
+            let script = """
+            function run(argv) {
+              const qt = Application(argv[0]), want = argv[1], act = argv[2];
+              const ws = qt.windows();
+              if (ws.length === 0) return "none";
+              let w = ws[0];
+              if (want) {
+                const [x, y, wd, h] = want.split(",").map(Number);
+                for (const c of ws) {
+                  try { const b = c.bounds(); if (Math.abs(b.x - x) < 10 && Math.abs(b.y - y) < 10 && Math.abs(b.width - wd) < 10) { w = c; break; } } catch (e) {}
+                }
+              }
+              const d = w.document();
+              if (act === "pause") qt.pause(d); else qt.play(d);
+              return "ok";
+            }
+            """
+            let output = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, "--", quickTime,
+                                                           ScreenControl.viewedWindowArgument(of: app.processIdentifier), action],
+                                   timeout: 10)
+            guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "ok" else { return nil }
         case "com.apple.Music", "com.spotify.client", "com.apple.TV":
             guard runs("tell application id \"\(id)\" to \(action)") else { return nil }
         case "com.colliderli.iina", "org.videolan.vlc", "io.mpv":
+            ScreenControl.raiseViewedWindow(of: app)
             app.activate()
             try? await Task.sleep(nanoseconds: 250_000_000)
             _ = ScreenControl.press("space")

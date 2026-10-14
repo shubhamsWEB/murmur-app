@@ -56,16 +56,59 @@ public enum ScreenControl {
         return lastOtherApp.flatMap { $0.isTerminated ? nil : $0 }
     }
 
-    /// The title of the working app's front window ("Movies", "interview.mp4", "Inbox – Gmail").
+    /// The title of the window you're looking at in the working app ("Movies", "interview.mp4", "Inbox – Gmail").
     public static func frontWindowTitle() -> String? {
         guard AXIsProcessTrusted(), let app = workingApp() else { return nil }
         let root = AXUIElementCreateApplication(app.processIdentifier)
-        var window: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(root, kAXFocusedWindowAttribute as CFString, &window) == .success,
-              let window else { return nil }
-        var title: CFTypeRef?
-        AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &title)
-        return title as? String
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute) else { return nil }
+        return string(window, kAXTitleAttribute)
+    }
+
+    /// The window you're looking at in an app: of its windows on this desktop, the one under the pointer, else its
+    /// frontmost. (Not "the app's first window": with videos on two desktops or screens, that was the other one.)
+    /// Global coordinates, top-left origin, as Accessibility and AppleScript use.
+    public static func viewedWindowBounds(of pid: pid_t) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+        let mouse = NSEvent.mouseLocation
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let pointer = CGPoint(x: mouse.x, y: top - mouse.y)
+        var frontmost: CGRect?
+        for info in list {
+            guard (info[kCGWindowOwnerPID as String] as? pid_t) == pid, (info[kCGWindowLayer as String] as? Int) == 0,
+                  let dictionary = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: dictionary), rect.width > 200, rect.height > 150 else { continue }
+            if rect.contains(pointer) { return rect }
+            if frontmost == nil { frontmost = rect }
+        }
+        return frontmost
+    }
+
+    /// That window as "x,y,width,height", for scripts that pick the matching window; "" when there's none.
+    public static func viewedWindowArgument(of pid: pid_t) -> String {
+        guard let rect = viewedWindowBounds(of: pid) else { return "" }
+        return "\(Int(rect.minX)),\(Int(rect.minY)),\(Int(rect.width)),\(Int(rect.height))"
+    }
+
+    /// That window, through Accessibility.
+    static func viewedWindow(of app: NSRunningApplication) -> AXUIElement? {
+        guard let rect = viewedWindowBounds(of: app.processIdentifier) else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        return windows.first { window in
+            guard let frame = frame(of: window) else { return false }
+            return abs(frame.minX - rect.minX) < 10 && abs(frame.minY - rect.minY) < 10
+                && abs(frame.width - rect.width) < 10 && abs(frame.height - rect.height) < 10
+        }
+    }
+
+    /// Brings the window you're looking at to the front of its app, so keys go to it.
+    public static func raiseViewedWindow(of app: NSRunningApplication) {
+        guard let window = viewedWindow(of: app) else { return }
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
     }
 
     /// The app whose screen to read: the front one, or the one you were in when Murmur is in front.
@@ -92,7 +135,8 @@ public enum ScreenControl {
         AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
         try? await Task.sleep(nanoseconds: 250_000_000)
-        guard let window = element(root, kAXFocusedWindowAttribute) ?? element(root, kAXMainWindowAttribute) else {
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute)
+                ?? element(root, kAXMainWindowAttribute) else {
             return "\(app.localizedName ?? "The front app") has no window open."
         }
         elements = []
