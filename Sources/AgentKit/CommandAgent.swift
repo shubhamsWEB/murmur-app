@@ -66,6 +66,8 @@ public final class CommandAgent {
     private var openedPage = false
     /// The user said yes to sending a message in this command: Return in a chat app doesn't ask again.
     private var messageApproved = false
+    /// Memory, read once for this command: applied by the actions on every path.
+    private var prefs = CommandMemory.Preferences()
     /// What this command did, for memory: each tool call with its main arguments and result.
     private var did: [CommandMemory.Action] = []
     /// The answer shown for this command, if any (for memory).
@@ -93,7 +95,7 @@ public final class CommandAgent {
         let text = query.lowercased()
         let personal = text.range(of: #"\b(resume|résumé|cv|aadhaa?r|pan( card)?|passport|licen[cs]e|id card|identity|voter|salary|pay ?slip|offer letter|appointment letter|relieving letter|experience letter|bank statement|certificate|marksheet|mark sheet|degree|transcript|itr|form 16|insurance|visa|birth certificate)\b"#,
                                    options: .regularExpression) != nil
-        return personal ? CommandMemory.ownerName() : nil
+        return personal ? CommandMemory.preferences().owner : nil
     }
 
     /// "get me the updates on my last LinkedIn post", "how many stars does it have": the user wants to be told
@@ -178,12 +180,16 @@ public final class CommandAgent {
             return
         }
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
+        prefs = CommandMemory.preferences()
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
             return
         }
-        if let actions = QuickCommands.parseAll(utterance) {
+        // A request about someone or something in memory ("open Mom's photos") goes to the model, which sees it all.
+        let quick = prefs.touches(utterance) ? nil : QuickCommands.parseAll(utterance)
+        if quick == nil, prefs.touches(utterance) { host.log("command: mentions something in memory; the model handles it") }
+        if let actions = quick {
             var results: [String] = []
             for action in actions {
                 // "open chrome and search facebook": after opening a browser, "search" means the web, in it.
@@ -322,7 +328,8 @@ public final class CommandAgent {
         reply with only the result: no preamble, no quotation marks, no notes about what you did. Keep the text's \
         language unless asked to translate. A summary is at most \(max(30, selection.split(separator: " ").count / 4)) \
         words: a few short sentences or bullet points, never longer than the text. An explanation is short and plain.
-        """
+        """ + (prefs.notes.isEmpty ? "" : "\nWhat the user told you about themselves and how they like things (follow it "
+            + "where it applies):\n" + prefs.notes.prefix(20).map { "- \($0)" }.joined(separator: "\n"))
         let turns: [RouterTurn] = [.user("Instruction: \(WakeName.strip(instruction) ?? instruction)\n\n"
             + "Selected text:\n\"\"\"\n\(selection.prefix(12_000))\n\"\"\"")]
         var router = currentRouter()
@@ -565,6 +572,12 @@ public final class CommandAgent {
         var shown = false
     }
 
+    /// No browser named and none in use yet: the one you told Murmur to use for links.
+    private func preferredBrowser() {
+        guard lastBrowser == nil, let name = prefs.browser else { return }
+        useBrowser(.string(name))
+    }
+
     /// "… on chrome": use that browser for this and the next web steps.
     private func useBrowser(_ value: JSONValue?) {
         guard let name = value?.description.trimmingCharacters(in: .whitespaces), !name.isEmpty,
@@ -631,12 +644,14 @@ public final class CommandAgent {
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url":
             useBrowser(args["browser"])
+            preferredBrowser()
             guard let url = MacActions.webAddress(text("url")) else {
                 return Outcome(result: "That doesn't look like a web address.")
             }
             return Outcome(result: await showPage(url, opened: "Opened \(url.host ?? url.absoluteString)"))
         case "web_search":
             useBrowser(args["browser"])
+            preferredBrowser()
             guard let url = MacActions.webSearchAddress(text("query")) else { return Outcome(result: "Couldn't build the search.") }
             return Outcome(result: await showPage(url, opened: "Searching the web for \"\(text("query"))\""))
         case "set_volume": return Outcome(result: MacActions.setVolume(Int(args["percent"]?.number ?? 50)))
@@ -692,6 +707,7 @@ public final class CommandAgent {
         case "open_settings": return Outcome(result: MacActions.openSettings(text("pane")))
         case "site_search":
             useBrowser(args["browser"])
+            preferredBrowser()
             guard let url = MacActions.siteSearchAddress(text("site"), text("query")) else {
                 return Outcome(result: "Couldn't build the search.")
             }
@@ -876,8 +892,11 @@ public final class CommandAgent {
         case "app_dictionary":
             return Outcome(result: await AppData.scriptingDictionary(text("app")))
         case "send_message":
-            let to = text("to"), body = text("text")
-            let app = text("app").isEmpty ? (ScreenControl.workingApp()?.localizedName ?? "Messages") : text("app")
+            let said = text("to"), body = text("text")
+            // "Mom" → Roma; no app named → where Roma is messaged (what you said, else what Murmur noticed).
+            let to = prefs.person(said)
+            let app = !text("app").isEmpty ? text("app")
+                : prefs.chatApp(for: to) ?? ScreenControl.workingApp()?.localizedName ?? "Messages"
             guard !to.isEmpty, !body.isEmpty else { return Outcome(result: "Who should it go to, and what should it say?") }
             guard await host.confirm("Send this to \(to) on \(app)?", "“\(body)”") else {
                 return Outcome(result: "You chose not to send it.", finished: true)
@@ -1126,6 +1145,9 @@ public final class CommandAgent {
                 + "on my latest LinkedIn post\", \"how many…\", \"what's…\") is only done when you call reply with the "
                 + "actual answer: the numbers, names or text. reply ends the command: use it once, for the final "
                 + "answer, never to describe a step.",
+            "- Memory first: before acting, check the memory below. Use the user's name for their own documents, "
+                + "nicknames for people (\"Mom\" is who they said), their chosen browser and apps, and every preference "
+                + "they told you, in every step and every search.",
             "- Work where the user is. The front app below (its window, Finder's selection, the browser tab when a "
                 + "browser is in front, and the screen when the request points at it) is where \"this\", \"that\", "
                 + "\"the first one\", \"play\" and \"open\" happen, unless the user names another app or a website. "

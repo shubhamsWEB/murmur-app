@@ -252,6 +252,141 @@ public enum CommandMemory {
         return Array(items.prefix(8))
     }
 
+    // MARK: Preferences: memory as every command uses it
+
+    /// What memory means for the command at hand, read once per command and applied by the actions themselves, on
+    /// every path (the quick one without a model too): your name for your documents, your browser for links, who
+    /// "Mom" is and where you message each person. What no action can apply on its own is in `notes`, for the
+    /// model, and a request that mentions it goes to the model (`touches`).
+    public struct Preferences: Sendable {
+        /// Your name ("Shubham Agrawal").
+        public var owner: String?
+        /// The browser for links and searches ("Chrome").
+        public var browser: String?
+        /// Nicknames to people: "mom" → "Roma".
+        public var aliases: [String: String] = [:]
+        /// Where each person is messaged: "roma" → "WhatsApp" (what you said first, then what Murmur noticed).
+        public var chatApps: [String: String] = [:]
+        /// Everything you told Murmur, as you said it.
+        public var notes: [String] = []
+        /// Words that point at something in memory.
+        var cues: Set<String> = []
+
+        /// The person a name or nickname means: "Mom" → "Roma".
+        public func person(_ said: String) -> String {
+            let key = said.lowercased().trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"^my "#, with: "",
+                                                                                                options: .regularExpression)
+            return aliases[key] ?? said
+        }
+
+        /// The app a person is messaged on.
+        public func chatApp(for person: String) -> String? {
+            let key = person.lowercased()
+            return chatApps[key] ?? chatApps[String(key.split(separator: " ").first ?? "")]
+        }
+
+        /// Whether the request mentions someone or something in memory (a nickname, a person, a subject you taught
+        /// Murmur): then the model, which sees all of memory, handles it rather than a quick pattern.
+        public func touches(_ utterance: String) -> Bool {
+            let lower = utterance.lowercased()
+            let words = Set(lower.split { !$0.isLetter }.map(String.init))
+            return !cues.isDisjoint(with: words) || aliases.keys.contains { $0.contains(" ") && lower.contains($0) }
+        }
+    }
+
+    private static let chatAppNames = ["whatsapp": "WhatsApp", "slack": "Slack", "telegram": "Telegram", "signal": "Signal",
+                                       "imessage": "Messages", "messages": "Messages", "teams": "Teams", "discord": "Discord"]
+    private static let browserNames = ["chrome": "Chrome", "safari": "Safari", "arc": "Arc", "brave": "Brave",
+                                       "edge": "Edge", "firefox": "Firefox", "opera": "Opera", "vivaldi": "Vivaldi"]
+    private static let plainWords: Set<String> = [
+        "my", "the", "a", "an", "to", "of", "in", "on", "is", "and", "for", "with", "at", "it", "me", "i", "be", "always",
+        "never", "use", "open", "opens", "link", "links", "message", "messages", "style", "short", "name", "browser",
+        "keep", "make", "write", "reply", "replies", "please", "from", "now", "app", "apps",
+    ]
+
+    /// Memory, read for one command.
+    public static func preferences() -> Preferences {
+        lock.lock(); defer { lock.unlock() }
+        var prefs = Preferences()
+        guard let db = open() else { return prefs }
+        for row in rows(db, "SELECT subject, text FROM fact WHERE source = 'told' ORDER BY at DESC", []) {
+            let subject = row[0], text = row[1], lower = text.lowercased()
+            prefs.notes.append(text)
+            if let owner = name(in: text) {
+                if prefs.owner == nil { prefs.owner = owner }
+                continue
+            }
+            // "Open links in Chrome", "browser: Safari".
+            if prefs.browser == nil, subject.contains("browser")
+                || lower.range(of: #"\b(link|links|browser|web|site|sites|page|pages|url|search)\b"#, options: .regularExpression) != nil,
+               let found = browserNames.first(where: { lower.range(of: "\\b\($0.key)\\b", options: .regularExpression) != nil }) {
+                prefs.browser = found.value
+                continue
+            }
+            // "Mom is Roma, on WhatsApp", "my boss is Rahul Mehta", "Roma is my mom".
+            var person: String?
+            if let found = groups(#"^(?i:my )?((?i:[a-z][a-z' ]{0,20}?)) is (?i:my )?([A-Z][\p{L}]+(?: [A-Z][\p{L}]+)?)"#, text) {
+                prefs.aliases[found[0].lowercased()] = found[1]
+                person = found[1]
+            } else if let found = groups(#"^([A-Z][\p{L}]+(?: [A-Z][\p{L}]+)?) is my ((?i:[a-z][a-z ]{0,20}))"#, text) {
+                prefs.aliases[found[1].lowercased().trimmingCharacters(in: .whitespaces)] = found[0]
+                person = found[0]
+            } else if let found = groups(#"([A-Z][\p{L}]+(?: [A-Z][\p{L}]+)?)\b.*\b(?i:on|via|over) (?i:whatsapp|slack|telegram|signal|imessage|messages|teams|discord)\b"#, text) {
+                person = found[0]
+            }
+            // "Message Asha on Slack": the verb isn't part of the name.
+            if let said = person, let first = said.split(separator: " ").first,
+               ["message", "text", "send", "ping", "email", "call", "whatsapp", "dm", "tell"].contains(first.lowercased()) {
+                let rest = said.split(separator: " ").dropFirst().joined(separator: " ")
+                person = rest.isEmpty ? nil : rest
+            }
+            if let person {
+                for word in person.lowercased().split(separator: " ") { prefs.cues.insert(String(word)) }
+                if let app = chatAppNames.first(where: { lower.range(of: "\\b\($0.key)\\b", options: .regularExpression) != nil }) {
+                    prefs.chatApps[person.lowercased()] = app.value
+                }
+            }
+            // Anything else you taught Murmur: its subject words point at it.
+            for word in subject.split(separator: " ").map(String.init) where word.count > 2 && !plainWords.contains(word) {
+                prefs.cues.insert(word)
+            }
+        }
+        for alias in prefs.aliases.keys {
+            for word in alias.split(separator: " ").map(String.init) where !plainWords.contains(word) { prefs.cues.insert(word) }
+        }
+        // Where you've been messaging people, when you didn't say.
+        for (person, app, _, _) in learnedChatApps(db) where prefs.chatApps[person] == nil {
+            prefs.chatApps[person] = app
+        }
+        return prefs
+    }
+
+    /// The first match's capture groups.
+    private static func groups(_ pattern: String, _ text: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
+        return (1..<match.numberOfRanges).compactMap { index in
+            Range(match.range(at: index), in: text).map { String(text[$0]).trimmingCharacters(in: .whitespaces) }
+        }
+    }
+
+    /// Who you've messaged where: (person, app, times on that app, times in all), for a clear habit only.
+    private static func learnedChatApps(_ db: OpaquePointer) -> [(String, String, Int, Int)] {
+        let messages = rows(db, """
+            SELECT lower(json_extract(args, '$.to')), json_extract(args, '$.app'), count(*)
+            FROM action WHERE tool = 'send_message' AND json_extract(args, '$.app') != ''
+            GROUP BY 1, lower(json_extract(args, '$.app')) ORDER BY 1, 3 DESC
+            """, [])
+        var out: [(String, String, Int, Int)] = []
+        for person in Set(messages.map { $0[0] }).sorted() {
+            let forPerson = messages.filter { $0[0] == person }
+            let total = forPerson.reduce(0) { $0 + (Int($1[2]) ?? 0) }
+            guard let top = forPerson.first, let count = Int(top[2]), total >= 3, Double(count) / Double(total) >= 0.8 else { continue }
+            out.append((person, top[1], count, total))
+        }
+        return out
+    }
+
     // MARK: Reading
 
     /// Seconds since the last command finished.
