@@ -166,10 +166,13 @@ struct VoiceCheckView: View {
             recording = leveled
             heard = transcript.heard
             alone = VoiceCheck.compare(said: said, heard: transcript.heard, names: names)
-            let result = VoiceCheck.compare(said: said, heard: dictionary.apply(transcript.text), names: names)
+            let result = VoiceCheck.compare(said: said, heard: dictionary.apply(DictationController.written(transcript)), names: names)
             withDictionary = result
             suggestions = VoiceCheck.suggestions(result.mistakes, isRealWord: { DictationController.isRealWord($0) })
-            picked = Set(suggestions.map(\.id))
+            // Your own names are ticked; names from the sample sentences are offered, unticked, so your dictionary
+            // only gets words you actually say.
+            let own = Set(names.map { $0.lowercased() })
+            picked = Set(suggestions.filter { own.contains($0.written.lowercased()) }.map(\.id))
             after = nil
             stage = .results
         } catch {
@@ -277,7 +280,7 @@ struct VoiceCheckView: View {
         let samples = recording
         Task {
             guard let output = try? await dictation.transcribeForCheck(samples) else { return }
-            after = VoiceCheck.compare(said: said, heard: dictionary.apply(output.transcript.text), names: names)
+            after = VoiceCheck.compare(said: said, heard: dictionary.apply(DictationController.written(output.transcript)), names: names)
         }
     }
 }

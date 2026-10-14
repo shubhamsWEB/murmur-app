@@ -873,6 +873,13 @@ private struct DictationPage: View {
                     Button("Check my voice") { checkingVoice = true }.buttonStyle(.murmurSecondary)
                 }
                 RowDivider()
+                SettingRow(title: "Listen for your words",
+                           detail: "Your dictionary's names are also listened for in the audio, so they come out right. Ordinary words are never swapped.") {
+                    MurmurSwitch(label: "Listen for your words",
+                                 isOn: state.bind(get: { DictationController.listensForDictionary },
+                                                  set: { DictationController.listensForDictionary = $0 }))
+                }
+                RowDivider()
                 DictionaryEditor(dictionary: dictionary)
             }
             .sheet(isPresented: $checkingVoice) { VoiceCheckView(dictation: dictation) }

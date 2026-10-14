@@ -1,4 +1,5 @@
 import FluidAudio
+import Foundation
 
 /// Speech to text with NVIDIA's Parakeet TDT on the Neural Engine (through FluidAudio).
 /// Each model downloads once from Hugging Face (about 600 MB) and is cached by FluidAudio; after that it runs offline.
@@ -35,12 +36,29 @@ public actor ParakeetTranscriber {
         }
     }
 
-    /// One transcription: as Parakeet heard it, and with your vocabulary applied (the same when there's none).
+    /// One transcription: as Parakeet heard it, and where your vocabulary was heard in it.
     public struct Transcript: Sendable {
+        /// A place the listening model heard one of your terms: the words the transcript has there, and your term.
+        public struct Replacement: Sendable {
+            public let original: String
+            public let term: String
+        }
+
         public let heard: String
-        public let text: String
-        /// Your terms that were put in from the audio.
-        public let applied: [String]
+        public let replacements: [Replacement]
+
+        /// The transcript with the replacements `keep` allows put in: whole words only, everything else (punctuation,
+        /// capitals, the other words) exactly as heard.
+        public func text(keeping keep: (Replacement) -> Bool = { _ in true }) -> String {
+            var out = heard
+            for replacement in replacements where keep(replacement) {
+                let pattern = #"(?i)(?<![\p{L}\p{N}])"# + NSRegularExpression.escapedPattern(for: replacement.original)
+                    + #"(?![\p{L}\p{N}])"#
+                guard let range = out.range(of: pattern, options: .regularExpression) else { continue }
+                out.replaceSubrange(range, with: replacement.term)
+            }
+            return out
+        }
     }
 
     public nonisolated let model: Model
@@ -66,7 +84,7 @@ public actor ParakeetTranscriber {
     }
 
     public func transcribe(_ samples: [Float]) async throws -> String {
-        try await transcribeDetailed(samples).text
+        try await transcribeDetailed(samples).text()
     }
 
     /// The words and names to listen for (your personal dictionary). The listening model loads in the background
@@ -82,9 +100,10 @@ public actor ParakeetTranscriber {
         }
     }
 
-    /// Transcribes, then applies the custom vocabulary (when `boost` and there are terms). If the vocabulary can't
-    /// be used (its model failed to load), the transcript is returned as heard.
-    public func transcribeDetailed(_ samples: [Float], boost: Bool = true) async throws -> Transcript {
+    /// Transcribes, then listens for the custom vocabulary (when there are terms). Dictation never waits for the
+    /// listening model: until it has loaded (or if it can't), the transcript comes back as heard. The voice check
+    /// passes `waitForVocabulary` so it measures what dictation will do once it's loaded.
+    public func transcribeDetailed(_ samples: [Float], waitForVocabulary: Bool = false) async throws -> Transcript {
         let manager = try await loadedManager()
         // Parakeet wants at least a second of audio: pad short clips with silence.
         var audio = samples
@@ -92,16 +111,27 @@ public actor ParakeetTranscriber {
         var state = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let result = try await manager.transcribe(audio, decoderState: &state)
         let heard = result.text
-        guard boost, !vocabulary.isEmpty, let booster = try? await loadedBooster(),
-              let timings = result.tokenTimings, !timings.isEmpty else {
-            return Transcript(heard: heard, text: heard, applied: [])
+        let plain = Transcript(heard: heard, replacements: [])
+        guard !vocabulary.isEmpty, let timings = result.tokenTimings, !timings.isEmpty else { return plain }
+        let ready: VocabularyBoostingSession?
+        if let booster {
+            ready = booster
+        } else if waitForVocabulary {
+            ready = try? await loadedBooster()
+        } else {
+            if boosterLoading == nil { Task { _ = try? await self.loadedBooster() } }
+            ready = nil
         }
-        guard let output = await booster.rescore(text: heard, tokenTimings: timings, audioSamples: audio),
-              output.wasModified else {
-            return Transcript(heard: heard, text: heard, applied: [])
+        guard let ready,
+              let output = await ready.rescore(text: heard, tokenTimings: timings, audioSamples: audio),
+              output.wasModified else { return plain }
+        let replacements = output.replacements.compactMap { result -> Transcript.Replacement? in
+            let original = result.originalWord.trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+            guard result.shouldReplace, let term = result.replacementWord, !original.isEmpty,
+                  original.lowercased() != term.lowercased() else { return nil }
+            return Transcript.Replacement(original: original, term: term)
         }
-        let applied = output.replacements.filter(\.shouldReplace).compactMap(\.replacementWord)
-        return Transcript(heard: heard, text: output.text, applied: applied)
+        return Transcript(heard: heard, replacements: replacements)
     }
 
     private func loadedBooster() async throws -> VocabularyBoostingSession? {

@@ -124,7 +124,9 @@ public enum VoiceCheck {
             let written = mistake.expected.trimmingCharacters(in: .punctuationCharacters)
             guard written.count >= 3, seen.insert(written.lowercased()).inserted else { return nil }
             let heard = mistake.heard.lowercased().trimmingCharacters(in: .punctuationCharacters)
-            let risky = heard.isEmpty || (!heard.contains(" ") && isRealWord(heard))
+            // A "heard as" much longer than the name ("some are rain a") is a guess at a phrase, too loose to swap.
+            let tooLong = heard.split(separator: " ").count > written.split(separator: " ").count + 1
+            let risky = heard.isEmpty || tooLong || (!heard.contains(" ") && isRealWord(heard))
             return DictionaryEntry(written: written, heard: risky ? [] : [heard])
         }
     }

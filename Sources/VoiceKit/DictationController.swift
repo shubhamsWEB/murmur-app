@@ -100,9 +100,36 @@ public final class DictationController: ObservableObject {
         Task { [transcriber] in await transcriber.setVocabulary(terms) }
     }
 
+    /// Listen for your dictionary's words in the audio (custom vocabulary). On by default; off, the dictionary
+    /// still swaps the spellings you gave it.
+    public static var listensForDictionary: Bool {
+        get { UserDefaults.standard.object(forKey: "listenForDictionary") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "listenForDictionary") }
+    }
+
     /// The personal dictionary as custom vocabulary: each word, and what it's heard as.
     static func vocabulary() -> [ParakeetTranscriber.VocabularyTerm] {
-        PersonalDictionary.shared.entries.map { ParakeetTranscriber.VocabularyTerm(text: $0.written, aliases: $0.heard) }
+        guard listensForDictionary else { return [] }
+        return PersonalDictionary.shared.entries.map {
+            ParakeetTranscriber.VocabularyTerm(text: $0.written, aliases: $0.heard)
+        }
+    }
+
+    /// The transcript with your words put in only where that can't break an ordinary sentence: what was heard there
+    /// has a word that isn't English ("samai raina" → "Samay Raina"), or is a "heard as" you gave. Ordinary words
+    /// ("summarise this") are never swapped for a name, however close they sound.
+    public static func written(_ transcript: ParakeetTranscriber.Transcript) -> String {
+        let entries = PersonalDictionary.shared.entries
+        return transcript.text { replacement in
+            let original = replacement.original.lowercased()
+            let yours = entries.contains { entry in
+                entry.written.lowercased() == replacement.term.lowercased()
+                    && entry.heard.contains { $0.lowercased() == original }
+            }
+            if yours { return true }
+            let words = original.split(separator: " ").map(String.init)
+            return words.contains { !isRealWord($0) }
+        }
     }
 
     // MARK: Voice check
@@ -132,7 +159,7 @@ public final class DictationController: ObservableObject {
                                                                         samples: [Float]) {
         let leveled = AudioLevel.normalize(samples, maxGainDB: whisperMode ? 32 : 20)
         await transcriber.setVocabulary(Self.vocabulary())
-        return (try await transcriber.transcribeDetailed(leveled.samples), leveled.samples)
+        return (try await transcriber.transcribeDetailed(leveled.samples, waitForVocabulary: true), leveled.samples)
     }
 
     /// Keeps a voice-check sentence on this Mac (a WAV and what it says), so Murmur can learn your voice later.
@@ -448,10 +475,12 @@ public final class DictationController: ObservableObject {
             do {
                 await transcriber.setVocabulary(vocabulary)
                 let transcript = try await transcriber.transcribeDetailed(samples)
-                if !transcript.applied.isEmpty {
-                    log("dictation: custom vocabulary put in \(transcript.applied.count) of your words")
+                let raw = Self.written(transcript)
+                if raw != transcript.heard {
+                    log("dictation: listening for your words changed the transcript")
+                } else if !transcript.replacements.isEmpty {
+                    log("dictation: skipped \(transcript.replacements.count) vocabulary swap(s) of ordinary words")
                 }
-                let raw = transcript.text
                 let text = TranscriptCleanup.quick(TextCleanup.basic(raw), dictionary: PersonalDictionary.shared)
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
