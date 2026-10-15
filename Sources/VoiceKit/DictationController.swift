@@ -536,31 +536,57 @@ public final class DictationController: ObservableObject {
     // MARK: - Setup
 
     private func prepareModel() async {
+        let model = transcriber.model
         modelStatus = "Speech model: getting ready…"
         speechModelState = .preparing(0)
-        log("dictation: preparing \(transcriber.model.engine) (\(transcriber.model.rawValue))")
+        modelInPill = false
+        log("dictation: preparing \(model.engine) (\(model.rawValue))")
         let started = Date()
         do {
             try await transcriber.prepare { [weak self] fraction, downloading in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self, self.transcriber.model == model else { return }
                     let percent = Int((fraction * 100).rounded())
                     if downloading {
                         self.speechModelState = .downloading(fraction)
                         self.modelStatus = "Downloading the speech model · \(percent)%"
+                        // A download takes a while: show it in the pill too, wherever you are.
+                        self.modelInPill = true
+                        self.showModelProgress("Downloading \(model.short) · \(percent)%")
                     } else {
                         self.speechModelState = .preparing(fraction)
                         self.modelStatus = "Preparing the speech model · \(percent)%"
+                        if self.modelInPill {
+                            self.showModelProgress(fraction > 0 && fraction < 1
+                                ? "Preparing \(model.short) · \(percent)%"
+                                : "Preparing \(model.short) for this Mac…")
+                        }
                     }
                 }
             }
-            modelStatus = "Speech model ready (\(transcriber.model.short), on device)"
+            guard transcriber.model == model else { return }
+            modelStatus = "Speech model ready (\(model.short), on device)"
             speechModelState = .ready
-            log(String(format: "dictation: %@ ready in %.1f s", transcriber.model.engine, Date().timeIntervalSince(started)))
+            log(String(format: "dictation: %@ ready in %.1f s", model.engine, Date().timeIntervalSince(started)))
+            if modelInPill, phase == .idle { hud.flash("\(model.short) is ready", tone: .done) }
         } catch {
+            guard transcriber.model == model else { return }
             modelStatus = "Speech model failed to load"
             speechModelState = .failed(error.localizedDescription)
-            log("dictation: \(transcriber.model.engine) failed: \(error.localizedDescription)")
+            log("dictation: \(model.engine) failed: \(error.localizedDescription)")
+            if modelInPill, phase == .idle { hud.flash("Couldn't get \(model.short) ready", seconds: 4, tone: .problem) }
+        }
+        modelInPill = false
+    }
+
+    /// Whether the pill is showing the speech model's download (only for downloads, not the usual quick load).
+    private var modelInPill = false
+
+    /// The model's progress in the pill, unless you're talking (then the pill is yours).
+    private func showModelProgress(_ text: String) {
+        switch phase {
+        case .idle, .transcribing: hud.show(.working(text))
+        case .listening: break
         }
     }
 

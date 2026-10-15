@@ -1,5 +1,5 @@
 import Foundation
-import WhisperKit
+@preconcurrency import WhisperKit
 
 /// Speech to text with a Whisper model on the Neural Engine (through WhisperKit). Murmur uses it for Hinglish: models
 /// fine-tuned to write spoken Hindi in English letters ("main kal meeting mein aaunga"). Each model downloads once
@@ -14,9 +14,15 @@ public actor WhisperTranscriber {
         public let language: String
     }
 
+    /// WhisperKit isn't Sendable; this actor is the only thing that touches it, one call at a time.
+    private final class Loaded: @unchecked Sendable {
+        let kit: WhisperKit
+        init(_ kit: WhisperKit) { self.kit = kit }
+    }
+
     public nonisolated let source: Source
-    private var kit: WhisperKit?
-    private var loading: Task<WhisperKit, Error>?
+    private var kit: Loaded?
+    private var loading: Task<Loaded, Error>?
 
     public init(source: Source) {
         self.source = source
@@ -47,15 +53,15 @@ public actor WhisperTranscriber {
             withoutTimestamps: true,
             chunkingStrategy: .vad
         )
-        let results = try await kit.transcribe(audioArray: samples, decodeOptions: options)
+        let results = try await kit.kit.transcribe(audioArray: samples, decodeOptions: options)
         return results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func loadedKit(progress: (@Sendable (Double, Bool) -> Void)? = nil) async throws -> WhisperKit {
+    private func loadedKit(progress: (@Sendable (Double, Bool) -> Void)? = nil) async throws -> Loaded {
         if let kit { return kit }
         if let loading { return try await loading.value }
         let source = source
-        let task = Task { () throws -> WhisperKit in
+        let task = Task { () throws -> Loaded in
             let base = Self.modelsFolder
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             // Where WhisperKit's downloader keeps the files (models/<repo>/<variant>). Once they're there, load them
@@ -81,7 +87,7 @@ public actor WhisperTranscriber {
             )
             let kit = try await WhisperKit(config)
             progress?(1, false)
-            return kit
+            return Loaded(kit)
         }
         loading = task
         do {
