@@ -76,9 +76,15 @@ public actor WhisperTranscriber {
                 }
             }
             progress?(0, false)
+            // On the GPU, not the Neural Engine: macOS optimises a model this size for the Neural Engine the first
+            // time it loads, which takes minutes (sometimes far longer) with no progress to show. The GPU loads it
+            // in seconds and is still quick enough for a sentence.
+            let compute = ModelComputeOptions(melCompute: .cpuAndGPU, audioEncoderCompute: .cpuAndGPU,
+                                              textDecoderCompute: .cpuAndGPU)
             let config = WhisperKitConfig(
                 modelFolder: folder.path,
                 tokenizerFolder: base,
+                computeOptions: compute,
                 verbose: false,
                 logLevel: .error,
                 prewarm: false,

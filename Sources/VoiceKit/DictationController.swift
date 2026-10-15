@@ -186,6 +186,7 @@ public final class DictationController: ObservableObject {
         guard model != transcriber.model else { return }
         UserDefaults.standard.set(model.rawValue, forKey: Self.modelDefault)
         transcriber = SpeechTranscriber(model: model)
+        stopPreparingClock()
         log("dictation: speech model is now \(model.rawValue)")
         Task { await prepareModel() }
     }
@@ -557,19 +558,23 @@ public final class DictationController: ObservableObject {
                         self.speechModelState = .preparing(fraction)
                         self.modelStatus = "Preparing the speech model · \(percent)%"
                         if self.modelInPill {
-                            self.showModelProgress(fraction > 0 && fraction < 1
-                                ? "Preparing \(model.short) · \(percent)%"
-                                : "Preparing \(model.short) for this Mac…")
+                            if fraction > 0 && fraction < 1 {
+                                self.showModelProgress("Preparing \(model.short) · \(percent)%")
+                            } else {
+                                self.startPreparingClock(for: model)
+                            }
                         }
                     }
                 }
             }
+            stopPreparingClock()
             guard transcriber.model == model else { return }
             modelStatus = "Speech model ready (\(model.short), on device)"
             speechModelState = .ready
             log(String(format: "dictation: %@ ready in %.1f s", model.engine, Date().timeIntervalSince(started)))
             if modelInPill, phase == .idle { hud.flash("\(model.short) is ready", tone: .done) }
         } catch {
+            stopPreparingClock()
             guard transcriber.model == model else { return }
             modelStatus = "Speech model failed to load"
             speechModelState = .failed(error.localizedDescription)
@@ -581,6 +586,27 @@ public final class DictationController: ObservableObject {
 
     /// Whether the pill is showing the speech model's download (only for downloads, not the usual quick load).
     private var modelInPill = false
+    private var preparingClock: Timer?
+
+    /// Loading a model has no progress to report, so the pill counts the time instead: you can see it's working.
+    private func startPreparingClock(for model: SpeechModel) {
+        guard preparingClock == nil else { return }
+        let started = Date()
+        let tick = { [weak self] in
+            guard let self, self.modelInPill, self.transcriber.model == model else { return }
+            let seconds = Int(Date().timeIntervalSince(started))
+            self.showModelProgress(String(format: "Preparing %@ for this Mac · %d:%02d", model.short, seconds / 60, seconds % 60))
+        }
+        tick()
+        preparingClock = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            MainActor.assumeIsolated { tick() }
+        }
+    }
+
+    private func stopPreparingClock() {
+        preparingClock?.invalidate()
+        preparingClock = nil
+    }
 
     /// The model's progress in the pill, unless you're talking (then the pill is yours).
     private func showModelProgress(_ text: String) {
