@@ -494,7 +494,7 @@ struct DownloadStatus: View {
             switch download.phase {
             case .ready:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("Search model ready")
+                Text("File search model ready")
             case .failed(let message):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(message).lineLimit(1)
@@ -504,16 +504,16 @@ struct DownloadStatus: View {
                     .help("Downloaded the model's two files somewhere else? Choose them here.")
             case .needed where download.heldForSpeech:
                 Image(systemName: "pause.circle").foregroundStyle(.secondary)
-                Text("Search model: paused while the speech model downloads").lineLimit(1)
+                Text("File search model: paused while the speech model downloads").lineLimit(1)
             case .needed:
                 Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
-                Text("Search model not downloaded")
+                Text("File search model not downloaded")
                 Button("Download") { download.start() }.controlSize(.small)
             default:
                 ProgressView(value: download.fraction)
                     .progressViewStyle(.circular)
                     .controlSize(.small)
-                Text("Downloading the search model · \(download.progressText)")
+                Text("File search model · downloading \(download.progressText)")
                     .lineLimit(1)
             }
         }
@@ -543,20 +543,43 @@ private struct WelcomeStep: View {
                         example: "“Create a React app with a Hello World page.”")
             }
             .padding(.top, 28)
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "lock")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.ink2)
-                Text("Speech and file search run on this Mac. Murmur downloads its models once (about 1.4 GB); "
-                     + "after that they work offline. Commands use the model you choose.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.ink2)
-                    .lineSpacing(2)
+            // What gets downloaded and when, said up front: the footer's progress later is the first of these.
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Two downloads, once each").font(.system(size: 12.5, weight: .semibold))
+                DownloadLine(symbol: "doc.text.magnifyingglass", title: "File search model · 865 MB",
+                             detail: "Starts when you click Get Started. Its progress shows at the bottom of each step.")
+                DownloadLine(symbol: "waveform", title: "Speech model · about 500–600 MB",
+                             detail: "On the next step, for the language you choose. Nothing downloads until you say so.")
+                Text("Then speech and file search run on this Mac, offline. Commands use the model you choose.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.ink2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.line))
             .padding(.top, 26)
         }
         .frame(maxWidth: 480, alignment: .leading)
+    }
+}
+
+private struct DownloadLine: View {
+    let symbol: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.accentText)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 12.5, weight: .medium))
+                Text(detail).font(.system(size: 12)).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
