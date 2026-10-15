@@ -30,6 +30,7 @@ final class AppController {
     private(set) var onboarding: OnboardingController?
     private var observers: [NSObjectProtocol] = []
     private var speechWatch: AnyCancellable?
+    private var resumeSearchDownload: DispatchWorkItem?
     /// Set while onboarding's shortcut step waits for you to try the hotkey: a press goes there, not to the panel.
     var hotkeyTester: (() -> Void)?
 
@@ -88,10 +89,19 @@ final class AppController {
         dictation.onOpenModelSettings = { [weak self] in self?.showHome(.commands) }
         dictation.onOpenSpeechSettings = { [weak self] in self?.showHome(.dictation) }
         // One download at a time, the speech model first: together both crawled.
+        // A speech download reports "preparing" between its files for a moment: the search model resumes only after
+        // three quiet seconds, so it doesn't stop and start with every file.
         speechWatch = dictation.$speechModelState.receive(on: RunLoop.main).sink { [weak self] state in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if case .downloading = state { self.download.holdForSpeech() } else { self.download.releaseForSpeech() }
+                resumeSearchDownload?.cancel()
+                if case .downloading = state {
+                    download.holdForSpeech()
+                } else {
+                    let work = DispatchWorkItem { [weak self] in self?.download.releaseForSpeech() }
+                    resumeSearchDownload = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+                }
             }
         }
         dictation.onFindFiles = { [weak self] query in await self?.fileCandidates(query) ?? [] }

@@ -265,9 +265,8 @@ struct OnboardingView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            // The search model's download. Not on the Voice step: there the speech model has its own cards, and a second
-            // progress bar read as the speech model downloading.
-            if state.step != .welcome, state.step != .voice {
+            // The file search model's download, named as such (it read as the speech model when it said "the model").
+            if state.step != .welcome {
                 DownloadStatus(download: state.download)
             }
             Spacer(minLength: 8)
