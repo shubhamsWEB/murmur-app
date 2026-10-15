@@ -292,8 +292,8 @@ final class AppController {
         searchWindow.show(query: query, kind: kind)
     }
 
-    /// "Open my resume pdf": opens the file when one clearly matches (its name has every word you said, or it's the
-    /// only good match); otherwise shows the matches on the Search page to pick from.
+    /// "Open my resume pdf": searches with the model's description and opens the top result; with no match, shows the
+    /// Search page.
     func openBestFile(_ spoken: String) async -> String {
         guard model.hasFolders else {
             showSearchWindow(query: spoken)
@@ -306,12 +306,14 @@ final class AppController {
         let rows = ResultSet(hits, query: wanted.text).ranked
         let kindNames = wanted.kinds.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "any"
         log("open file: \"\(spoken)\" → \"\(wanted.text)\" in \(kindNames): \(rows.count) strong, top \(rows.first?.name ?? "none")")
-        if let best = wanted.best(of: rows) {
+        // The search's best match opens: its ranking already weighs the words, the file's text and the kind asked
+        // for. (A second guess from file names alone used to overrule it and open the wrong file.)
+        if let best = rows.first {
             engine.open(best)
             return "Opened \(best.name)."
         }
         showSearchWindow(query: wanted.text)
-        return rows.isEmpty ? "Nothing matched “\(wanted.text)”." : "Which one? Showing \(rows.count) matches."
+        return "Nothing matched “\(wanted.text)”."
     }
 
     func showHome(_ section: HomeSection? = nil) {
@@ -385,8 +387,6 @@ final class AppController {
 struct SpokenFile {
     let text: String
     let kinds: Set<FileKind>?
-    /// The words that tell one file from another (not "pdf", "document", "my"): what a name has to match.
-    let distinctive: [String]
     /// The user's own name (from memory), for "my resume", "my Aadhaar card": it's searched for, and between files
     /// that match it picks the one with their name, but a file isn't chosen for having their name alone (that would
     /// open their resume for "my Aadhaar card").
@@ -430,60 +430,10 @@ struct SpokenFile {
         if rest.contains(where: { ["cv", "resume", "résumé"].contains($0) }) {
             rest = rest.filter { !["cv", "resume", "résumé"].contains($0) } + ["resume", "cv"]
         }
-        distinctive = rest
         let base = rest.isEmpty ? spoken : rest.joined(separator: " ")
         text = owner.isEmpty ? base : base + " " + owner.joined(separator: " ")
         // A photo can be a screenshot and the other way round; "file" says nothing.
         if kinds.contains(.image) { kinds.insert(.screenshot) }
         self.kinds = kinds.isEmpty ? nil : kinds
-    }
-
-    /// The one to open: the best-ranked file whose name (or folder) has every word you said, else most of them.
-    /// A file with none of your words in its name opens only when it's the one file that matched and has the words
-    /// inside it. Otherwise nil, and the results are shown to choose from. (It used to open the only strong match
-    /// whatever its name, so one big document that loosely matches everything opened for every request.)
-    func best(of rows: [ResultRow]) -> ResultRow? {
-        // Spelling-tolerant: case and accents folded, and letters said twice read once, so "Aadhaar" finds
-        // "Aadhar.pdf" and "PAN" finds "PanCard" (Hindi words are spelled many ways in English letters).
-        let fold: (String) -> String = { text in
-            var out = ""
-            for ch in text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) where out.last != ch {
-                out.append(ch)
-            }
-            return out
-        }
-        let minor: Set<String> = ["for", "about", "with", "from", "and", "in", "on", "to", "at", "my", "of", "the",
-                                  "latest", "last", "new", "old", "one"]
-        // Only the words that tell files apart: "open the pdf" has none, and "pdf" matched every PDF's name (its
-        // extension), so the same top PDF opened every time.
-        let words = distinctive.map(fold).filter { $0.count > 1 && !minor.contains($0) }
-        var files: [ResultRow] = []
-        var seen = Set<String>()
-        for row in rows where seen.insert(row.id).inserted { files.append(row) }
-        guard !words.isEmpty else { return nil }   // nothing to tell them apart: show the matches
-        func found(_ row: ResultRow) -> Int {
-            let name = fold((row.name as NSString).deletingPathExtension + " " + row.folder)
-            return words.filter { word in
-                ["resume", "cv"].contains(word) ? (name.contains("resume") || name.contains("cv")) : name.contains(word)
-            }.count
-        }
-        // Among the files that match, the user's own (their name in it) first.
-        func theirs(_ row: ResultRow) -> Bool {
-            let name = fold(row.name + " " + row.folder)
-            return !owner.isEmpty && owner.allSatisfy { name.contains(fold($0)) }
-        }
-        let complete = files.filter { found($0) == words.count }
-        if let named = complete.first(where: theirs) ?? complete.first { return named }
-        let enough = max(1, (words.count + 1) / 2)
-        var best: (row: ResultRow, count: Int, theirs: Bool)?
-        for file in files {
-            let count = found(file)
-            let own = theirs(file)
-            if count >= enough, count > (best?.count ?? 0) || (count == best?.count && own && best?.theirs == false) {
-                best = (file, count, own)
-            }
-        }
-        if let best { return best.row }
-        return files.count == 1 && files[0].matchedWords ? files[0] : nil
     }
 }
