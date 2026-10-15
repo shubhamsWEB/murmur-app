@@ -1,10 +1,10 @@
-import XCTest
+import Testing
 @testable import AgentKit
 
 /// Opening a file by what was said. Every case is a real request from Murmur's log (English and Hinglish) and the
 /// file names on the Mac it was said on. This has broken four times, each time in a different place; these keep the
 /// fixes fixed. Run: swift test --filter AgentKitTests
-final class OpeningFilesTests: XCTestCase {
+struct OpeningFilesTests {
     let files = [
         "PanCard.pdf", "Aadhar.pdf", "IMG_5473.heic", "llm-full.txt", "Frido-Product-Handover.pdf",
         "2015.126740.The-Study-Of-Palmistry-For-Professional-Purposes_text.pdf", "Resume_Shubham_Agrawal_.pdf",
@@ -18,57 +18,57 @@ final class OpeningFilesTests: XCTestCase {
             .sorted { $0.1 > $1.1 }.map(\.0)
     }
 
-    func testCardsAreFoundByName() {
-        XCTAssertEqual(named("PAN card").first, "PanCard.pdf")
-        XCTAssertEqual(named("my pan card").first, "PanCard.pdf")
-        XCTAssertEqual(named("pen card").first, "PanCard.pdf", "how speech recognition hears “PAN card”")
-        XCTAssertEqual(named("pancard").first, "PanCard.pdf")
-        XCTAssertEqual(named("aadhaar card"), ["Aadhar.pdf"], "spelled differently in the name")
-        XCTAssertEqual(named("Aadhaar"), ["Aadhar.pdf"])
-        XCTAssertFalse(named("PAN card").contains("Company_Panel.pdf"))
+    @Test func cardsAreFoundByName() {
+        #expect(named("PAN card").first == "PanCard.pdf")
+        #expect(named("my pan card").first == "PanCard.pdf")
+        #expect(named("pen card").first == "PanCard.pdf", "how speech recognition hears “PAN card”")
+        #expect(named("pancard").first == "PanCard.pdf")
+        #expect(named("aadhaar card") == ["Aadhar.pdf"], "spelled differently in the name")
+        #expect(named("Aadhaar") == ["Aadhar.pdf"])
+        #expect(!named("PAN card").contains("Company_Panel.pdf"))
     }
 
-    func testPeopleAndResumes() {
-        XCTAssertEqual(Set(named("Roma Patel CV")), ["Roma_Patel_CV.pdf", "Roma Patel CV.docx"])
-        XCTAssertEqual(Set(named("roma patel resume cv")), ["Roma_Patel_CV.pdf", "Roma Patel CV.docx"])
-        XCTAssertTrue(named("resume cv").contains("Resume_Shubham_Agrawal_.pdf"))
+    @Test func peopleAndResumes() {
+        #expect(Set(named("Roma Patel CV")) == ["Roma_Patel_CV.pdf", "Roma Patel CV.docx"])
+        #expect(Set(named("roma patel resume cv")) == ["Roma_Patel_CV.pdf", "Roma Patel CV.docx"])
+        #expect(named("resume cv").contains("Resume_Shubham_Agrawal_.pdf"))
     }
 
-    func testDescriptionsAreLeftToTheSearch() {
+    @Test func descriptionsAreLeftToTheSearch() {
         // Nothing in a name says which one: the search (and the model) decide.
-        XCTAssertEqual(named("pdf"), [])
-        XCTAssertEqual(named("the PDF"), [])
-        XCTAssertEqual(named("driving license"), [], "the license is a photo, IMG_5473.heic: only the search finds it")
-        XCTAssertEqual(named("the clause about pets in the lease"), [])
-        XCTAssertEqual(named("lease"), ["Lease 2025.pdf"])
+        #expect(named("pdf") == [])
+        #expect(named("the PDF") == [])
+        #expect(named("driving license") == [], "the license is a photo, IMG_5473.heic: only the search finds it")
+        #expect(named("the clause about pets in the lease") == [])
+        #expect(named("lease") == ["Lease 2025.pdf"])
     }
 
-    func testTheModelsDescriptionIsNotReplaced() {
+    @Test func theModelsDescriptionIsNotReplaced() {
         // "Open my driving license and PAN card": the model asked for "PAN card", which is PanCard.pdf from before.
         // It used to be swapped for the whole sentence, which found a palmistry book.
-        XCTAssertFalse(CommandAgent.namesAFile("PAN card"))
-        XCTAssertFalse(CommandAgent.namesAFile("Roma Patel CV"))
-        XCTAssertFalse(CommandAgent.namesAFile("Shubham Agrawal Aadhaar card"))
-        XCTAssertTrue(CommandAgent.namesAFile("/Users/shubhamagr/Downloads/Aadhar.pdf"))
-        XCTAssertTrue(CommandAgent.namesAFile("Aadhar.pdf"))
-        XCTAssertTrue(CommandAgent.namesAFile("~/Downloads/Roma Patel CV.docx"))
+        #expect(!CommandAgent.namesAFile("PAN card"))
+        #expect(!CommandAgent.namesAFile("Roma Patel CV"))
+        #expect(!CommandAgent.namesAFile("Shubham Agrawal Aadhaar card"))
+        #expect(CommandAgent.namesAFile("/Users/shubhamagr/Downloads/Aadhar.pdf"))
+        #expect(CommandAgent.namesAFile("Aadhar.pdf"))
+        #expect(CommandAgent.namesAFile("~/Downloads/Roma Patel CV.docx"))
     }
 
-    func testTheFileFromBefore() {
+    @Test func theFileFromBefore() {
         // Asked for by name: it's the file from before, and that's fine.
-        XCTAssertTrue(CommandAgent.pointsBack("Open my driving license and PAN card.", to: "PanCard.pdf"))
-        XCTAssertTrue(CommandAgent.pointsBack("Open my pan card.", to: "PanCard.pdf"))
-        XCTAssertTrue(CommandAgent.pointsBack("Mera aadhaar card kholo.", to: "Aadhar.pdf"))
-        XCTAssertTrue(CommandAgent.pointsBack("open it again", to: "Lease 2025.pdf"))
-        XCTAssertTrue(CommandAgent.pointsBack("wahi PDF kholo", to: "Lease 2025.pdf"))
+        #expect(CommandAgent.pointsBack("Open my driving license and PAN card.", to: "PanCard.pdf"))
+        #expect(CommandAgent.pointsBack("Open my pan card.", to: "PanCard.pdf"))
+        #expect(CommandAgent.pointsBack("Mera aadhaar card kholo.", to: "Aadhar.pdf"))
+        #expect(CommandAgent.pointsBack("open it again", to: "Lease 2025.pdf"))
+        #expect(CommandAgent.pointsBack("wahi PDF kholo", to: "Lease 2025.pdf"))
         // A new request: not the file from before, whatever the model hands back.
-        XCTAssertFalse(CommandAgent.pointsBack("mujhe PDF kholkar do", to: "Aadhar.pdf"))
-        XCTAssertFalse(CommandAgent.pointsBack("Open the PDF.", to: "Lease 2025.pdf"))
-        XCTAssertFalse(CommandAgent.pointsBack("Mera driving license kholo.", to: "Aadhar.pdf"))
+        #expect(!CommandAgent.pointsBack("mujhe PDF kholkar do", to: "Aadhar.pdf"))
+        #expect(!CommandAgent.pointsBack("Open the PDF.", to: "Lease 2025.pdf"))
+        #expect(!CommandAgent.pointsBack("Mera driving license kholo.", to: "Aadhar.pdf"))
     }
 
-    func testWhatASentenceAsksFor() {
-        XCTAssertEqual(CommandAgent.fileWords("mujhe PDF kholkar do"), "pdf")
-        XCTAssertEqual(CommandAgent.fileWords("Mera aadhaar card kholo."), "aadhaar card")
+    @Test func whatASentenceAsksFor() {
+        #expect(CommandAgent.fileWords("mujhe PDF kholkar do") == "pdf")
+        #expect(CommandAgent.fileWords("Mera aadhaar card kholo.") == "aadhaar card")
     }
 }
