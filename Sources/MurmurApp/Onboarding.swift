@@ -265,7 +265,9 @@ struct OnboardingView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            if state.step != .welcome {
+            // The search model's download. Not on the Voice step: there the speech model has its own cards, and a second
+            // progress bar read as the speech model downloading.
+            if state.step != .welcome, state.step != .voice {
                 DownloadStatus(download: state.download)
             }
             Spacer(minLength: 8)
@@ -482,7 +484,8 @@ private struct StepArt: View {
     }
 }
 
-/// The model download, small: "Downloading the model · 42% · about 1 min left", then "Model ready".
+/// The search model's download, small: "Downloading the search model · 42% · about 1 min left", then "Search model
+/// ready". (Named, so it isn't taken for the speech model.)
 struct DownloadStatus: View {
     let download: ModelDownload
 
@@ -491,7 +494,7 @@ struct DownloadStatus: View {
             switch download.phase {
             case .ready:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("Model ready")
+                Text("Search model ready")
             case .failed(let message):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(message).lineLimit(1)
@@ -499,15 +502,18 @@ struct DownloadStatus: View {
                 Button("Use Files…") { download.chooseFiles(for: NSApp.keyWindow) }
                     .controlSize(.small)
                     .help("Downloaded the model's two files somewhere else? Choose them here.")
+            case .needed where download.heldForSpeech:
+                Image(systemName: "pause.circle").foregroundStyle(.secondary)
+                Text("Search model: paused while the speech model downloads").lineLimit(1)
             case .needed:
                 Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
-                Text("Model not downloaded")
+                Text("Search model not downloaded")
                 Button("Download") { download.start() }.controlSize(.small)
             default:
                 ProgressView(value: download.fraction)
                     .progressViewStyle(.circular)
                     .controlSize(.small)
-                Text("Downloading the model · \(download.progressText)")
+                Text("Downloading the search model · \(download.progressText)")
                     .lineLimit(1)
             }
         }
@@ -777,6 +783,7 @@ struct LanguageChoice: View {
     var body: some View {
         let current = dictation.speechModel
         VStack(alignment: .leading, spacing: 10) {
+            // Nothing chosen yet (a fresh install): English, the default, is offered with its Download button showing.
             Text("Which language will you speak?").font(.system(size: 13.5, weight: .semibold))
             HStack(alignment: .top, spacing: 10) {
                 ForEach(SpeechModel.allCases, id: \.self) { model in
@@ -807,6 +814,9 @@ struct LanguageChoice: View {
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentTint))
             }
+        }
+        .onAppear {
+            if !dictation.speechModelChosen, asking == nil { asking = current }
         }
     }
 

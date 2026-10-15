@@ -67,11 +67,12 @@ final class AppModel {
     private var downloadLine: String? {
         switch download.phase {
         case .ready: nil
-        case .downloading: "Downloading the model · \(Int(download.fraction * 100))%"
-        case .verifying: "Checking the model download…"
-        case .retrying: "Model download: waiting for the network"
-        case .failed: "⚠︎ The model download stopped"
-        case .needed: status.pending > 0 ? "The model isn't downloaded yet" : nil
+        case .downloading: "Downloading the search model · \(Int(download.fraction * 100))%"
+        case .verifying: "Checking the search model download…"
+        case .retrying: "Search model download: waiting for the network"
+        case .failed: "⚠︎ The search model download stopped"
+        case .needed where download.heldForSpeech: "Search model: paused while the speech model downloads"
+        case .needed: status.pending > 0 ? "The search model isn't downloaded yet" : nil
         }
     }
 
