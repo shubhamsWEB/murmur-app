@@ -780,7 +780,8 @@ struct LanguageChoice: View {
             Text("Which language will you speak?").font(.system(size: 13.5, weight: .semibold))
             HStack(alignment: .top, spacing: 10) {
                 ForEach(SpeechModel.allCases, id: \.self) { model in
-                    card(model, chosen: model == current, asked: model == asking)
+                    // On a fresh install nothing is chosen yet (English is only the default): no tick until you pick.
+                    card(model, chosen: model == current && dictation.speechModelChosen, asked: model == asking)
                 }
             }
             if let asking {
@@ -885,6 +886,9 @@ extension VoiceStep {
         } else if !mic || !(dictation.canPaste && dictation.isListeningForKey) {
             Text("Allow the microphone and Accessibility above, then try it.")
                 .foregroundStyle(.secondary)
+        } else if !dictation.speechModelChosen {
+            Text("Choose the language you'll speak above; its model downloads once you say so.")
+                .foregroundStyle(.secondary)
         } else {
             switch dictation.speechModelState {
             case .ready:
@@ -963,6 +967,7 @@ private struct ShortcutStep: View {
         switch dictation.speechModelState {
         case .ready: "Try it: hold \(key) and say “Hello, Murmur”."
         case .downloading(let fraction): "The speech model is downloading (\(Int(fraction * 100))%). Try it when it's ready."
+        case .waiting where !dictation.speechModelChosen: "Choose a language on the Voice step first."
         case .waiting, .preparing: "The speech model is getting ready. Try it in a moment."
         case .failed: "The speech model didn't load. Retry on the Voice step or in Settings."
         }

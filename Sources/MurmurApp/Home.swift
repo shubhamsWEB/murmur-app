@@ -466,7 +466,7 @@ private struct HomePage: View {
 
     private var speechState: ModelCard.State {
         switch dictation.speechModelState {
-        case .waiting: .working("Waiting", nil)
+        case .waiting: dictation.speechModelChosen ? .working("Waiting", nil) : .working("Choose a language", nil)
         case .downloading(let f): .working("Downloading \(Int(f * 100))%", f)
         case .preparing(let f): .working("Preparing", f > 0 ? f : nil)
         case .ready: .done("On device")

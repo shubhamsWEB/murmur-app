@@ -216,7 +216,15 @@ public final class DictationController: ObservableObject {
         startMonitor(prompt: true)
         hud.prewarm()
         Task.detached(priority: .background) { WhisperTranscriber.removeDroppedModels() }
-        Task { await prepareModel() }
+        // Only a model that's here, or one you chose to download: a fresh install used to start a 500 MB download of
+        // English before you'd picked a language, alongside the search model (both slow, and not asked for).
+        if speechModelChosen {
+            Task { await prepareModel() }
+        } else {
+            modelStatus = "Choose a speech model to download"
+            speechModelState = .waiting
+            log("dictation: no speech model yet; waiting for a choice")
+        }
         // Load the local router model now, so the first command or decision doesn't wait for it.
         if RouterChoice.current == .local {
             let router = agent.routerModel
@@ -234,8 +242,22 @@ public final class DictationController: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Whether a speech model can be loaded without asking: one is on this Mac, or you chose one to download.
+    public var speechModelChosen: Bool {
+        transcriber.model.isOnThisMac || UserDefaults.standard.bool(forKey: "speechModel.chosen")
+    }
+
+    /// The model to use, chosen by you (a language card's Download, Settings, the menu). Choosing the one already set
+    /// that isn't loaded yet (English, on a fresh install) starts it.
     public func setModel(_ model: SpeechModel) {
-        guard model != transcriber.model else { return }
+        UserDefaults.standard.set(true, forKey: "speechModel.chosen")
+        guard model != transcriber.model else {
+            switch speechModelState {
+            case .waiting, .failed: Task { await prepareModel() }
+            default: break
+            }
+            return
+        }
         UserDefaults.standard.set(model.rawValue, forKey: Self.modelDefault)
         transcriber = SpeechTranscriber(model: model)
         stopPreparingClock()
@@ -404,6 +426,12 @@ public final class DictationController: ObservableObject {
         case .listening(handsFree: true):
             finish()                       // a tap ends hands-free dictation
         case .idle:
+            // Nothing to hear you with yet: say so, and show where to choose one.
+            guard speechModelChosen else {
+                hud.flash("Choose a speech model first", seconds: 3)
+                onOpenModelSettings?()
+                return
+            }
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(commandModifier.appKitFlag)
