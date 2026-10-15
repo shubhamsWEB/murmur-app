@@ -21,7 +21,39 @@ final class DictationHUD {
     private let state = HUDState()
     private var hideWork: DispatchWorkItem?
 
-    private lazy var panel: NSPanel = {
+    private var panelStorage: NSPanel?
+    private var panel: NSPanel {
+        if let panelStorage { return panelStorage }
+        let made = Self.makePanel(state: state)
+        panelStorage = made
+        return made
+    }
+
+    init() {
+        // After a display change or waking from sleep the pill's window can be left stranded (on a screen or Space
+        // that's gone): build a fresh one the next time it's needed.
+        let reset: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { self?.reset() }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main, using: reset)
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
+                                                          object: nil, queue: .main, using: reset)
+    }
+
+    /// Builds the window ahead of time, so the first press of the key shows the pill at once.
+    func prewarm() {
+        _ = panel
+    }
+
+    private func reset() {
+        guard let old = panelStorage else { return }
+        if old.isVisible { place(); return }
+        old.close()
+        panelStorage = nil
+    }
+
+    private static func makePanel(state: HUDState) -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 48),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: true)
@@ -41,7 +73,7 @@ final class DictationHUD {
         host.autoresizingMask = [.width, .height]
         panel.contentView = host
         return panel
-    }()
+    }
 
     func show(_ mode: Mode) {
         hideWork?.cancel()
@@ -49,6 +81,13 @@ final class DictationHUD {
         state.level = 0
         place()
         panel.orderFrontRegardless()
+        if !panel.isVisible || !panel.isOnActiveSpace {
+            // The old window didn't come back: replace it.
+            panelStorage?.close()
+            panelStorage = nil
+            place()
+            panel.orderFrontRegardless()
+        }
     }
 
     /// Showing a "working" line (cleared when the command finishes).

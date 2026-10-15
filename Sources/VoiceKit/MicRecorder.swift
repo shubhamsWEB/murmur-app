@@ -17,11 +17,27 @@ public final class MicRecorder: @unchecked Sendable {
     /// Called on the audio thread with the loudness of each buffer, 0…1 (for the HUD's meter).
     public var onLevel: ((Float) -> Void)?
 
+    /// Starting the microphone can take a second or more (Bluetooth headsets, right after waking), so it happens
+    /// here, off the main thread, and stopping waits for it in order.
+    private let queue = DispatchQueue(label: "murmur.microphone", qos: .userInteractive)
+
     public init() {}
 
-    public var isRunning: Bool { running }
+    public var isRunning: Bool { queue.sync { running } }
 
-    public func start() throws {
+    /// Starts recording without holding up the caller. `done` runs on the main thread with the error, if any, and
+    /// how long the microphone took to start.
+    public func start(_ done: @escaping @MainActor (Error?, TimeInterval) -> Void) {
+        queue.async { [self] in
+            let started = Date()
+            let failure: Error?
+            do { try startNow(); failure = nil } catch { failure = error }
+            let took = Date().timeIntervalSince(started)
+            Task { @MainActor in done(failure, took) }
+        }
+    }
+
+    private func startNow() throws {
         guard !running else { return }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -46,6 +62,10 @@ public final class MicRecorder: @unchecked Sendable {
 
     /// Stops recording and returns what was heard, resampled to 16 kHz mono.
     public func stop() -> [Float] {
+        queue.sync { stopNow() }
+    }
+
+    private func stopNow() -> [Float] {
         guard running else { return [] }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()

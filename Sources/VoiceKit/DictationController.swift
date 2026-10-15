@@ -165,6 +165,7 @@ public final class DictationController: ObservableObject {
             DispatchQueue.main.async { self?.log("dictation: microphone \(granted ? "allowed" : "denied")") }
         }
         startMonitor(prompt: true)
+        hud.prewarm()
         Task { await prepareModel() }
         // Load the local router model now, so the first command or decision doesn't wait for it.
         if RouterChoice.current == .local {
@@ -395,13 +396,20 @@ public final class DictationController: ObservableObject {
             Self.openPrivacyPane("Privacy_Microphone")
             return
         }
-        do {
-            try recorder.start()
-            phase = .listening(handsFree: handsFree)
-            hud.show(commandRequested ? .command : .listening(handsFree: handsFree))
-        } catch {
-            log("dictation: can't start the microphone: \(error.localizedDescription)")
-            hud.flash("Can't start the microphone")
+        // The pill first, so you see Murmur listening the moment you press the key; the microphone starts off the
+        // main thread (it can take a second with a Bluetooth headset) and keeps everything from the start.
+        phase = .listening(handsFree: handsFree)
+        hud.show(commandRequested ? .command : .listening(handsFree: handsFree))
+        recorder.start { [weak self] error, took in
+            guard let self else { return }
+            if let error {
+                log("dictation: can't start the microphone: \(error.localizedDescription)")
+                guard case .listening = phase else { return }
+                phase = .idle
+                hud.flash("Can't start the microphone")
+                return
+            }
+            if took > 0.4 { log(String(format: "dictation: the microphone took %.1f s to start", took)) }
         }
     }
 
