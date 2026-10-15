@@ -19,6 +19,10 @@ files from a description, and does small jobs for you. Speech is recognised on y
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
+<p align="center">
+  <a href="https://www.producthunt.com/products/murmur-18?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-murmur-27023602-121b-4eab-968c-bfa99febae2b" target="_blank" rel="noopener noreferrer"><img alt="Murmur - Talk to your Mac. A free, private voice assistant | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1280346&amp;theme=light&amp;t=1792047746820"></a>
+</p>
+
 ---
 
 ## What it does
