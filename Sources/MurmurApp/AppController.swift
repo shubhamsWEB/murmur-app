@@ -94,12 +94,12 @@ final class AppController {
         speechWatch = dictation.$speechModelState.receive(on: RunLoop.main).sink { [weak self] state in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                resumeSearchDownload?.cancel()
+                self.resumeSearchDownload?.cancel()
                 if case .downloading = state {
-                    download.holdForSpeech()
+                    self.download.holdForSpeech()
                 } else {
                     let work = DispatchWorkItem { [weak self] in self?.download.releaseForSpeech() }
-                    resumeSearchDownload = work
+                    self.resumeSearchDownload = work
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
                 }
             }
