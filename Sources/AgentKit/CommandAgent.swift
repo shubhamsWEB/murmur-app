@@ -43,6 +43,9 @@ public struct CommandHost {
     public var log: (String) -> Void
     /// Open the settings where a model for commands is chosen (Commands & AI).
     public var openModelSettings: () -> Void = {}
+    /// Ask before an action, with the choice to allow it for the rest of the task or always (that kind). Nil kind: a
+    /// question that can only be answered once (a payment), or the task as a whole (`.task` lets it run on its own).
+    public var approve: (_ kind: Permission?, _ title: String, _ detail: String) async -> Approval = { _, _, _ in .no }
     /// The search's best matches for a description of a file (the same search the Search page runs), best first.
     public var findFiles: (String) async -> [FileCandidate] = { _ in [] }
 
@@ -122,6 +125,11 @@ public final class CommandAgent {
     private var routing = false
     /// Files offered to the model to pick from in this command: opening one of them is its choice, not a stale memory.
     private var offered: Set<String> = []
+    /// The user let this task run on its own ("Allow for This Task"): no more questions until it ends (payments
+    /// still ask).
+    private var taskApproved = false
+    /// Asked at the start of a big task already (when its plan was first written).
+    private var askedForTask = false
     /// Matches were offered and nothing has opened yet: the model owes a pick (or a reply that none fits).
     private var awaitingPick = false
     /// What the user said for the command running now.
@@ -223,6 +231,8 @@ public final class CommandAgent {
         awaitingPick = false
         plan = []
         notes = []
+        taskApproved = false
+        askedForTask = false
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -387,8 +397,7 @@ public final class CommandAgent {
         let folder = AssistantCLI.newProjectFolder(for: task, name: folderName.isEmpty ? nil : folderName)
         let place = folder.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
         // "Start without asking" (Commands & AI → Helpers) skips the dialog.
-        let approved = AssistantCLI.autoApprove ? true
-            : await host.confirm("Build this with \(helper.display)?",
+        let approved = await allow(.coding, "Build this with \(helper.display)?",
                                  "“\(task)”\n\nIn a new folder: \(place)\n\n\(helper.display) opens in Terminal and works "
                                  + "there with your subscription. It edits files in that folder on its own and asks "
                                  + "you before running commands.")
@@ -706,6 +715,44 @@ public final class CommandAgent {
         await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
     }
 
+    /// Money moving: always asked, whatever was allowed.
+    private static let moneyWords = #"(?i)\b(pay|payment|buy|purchase|place order|checkout|check out|transfer|send money|donate|subscribe)\b"#
+
+    /// Whether to go ahead with an action of this kind: always allowed, allowed for this task, or the user's answer
+    /// (which can allow it for the task or for good). Anything about money asks every time.
+    private func allow(_ kind: Permission, _ title: String, _ detail: String) async -> Bool {
+        let money = (title + " " + detail).range(of: Self.moneyWords, options: .regularExpression) != nil
+        if !money, kind.alwaysAllowed {
+            host.log("command: \(title) → allowed (always: \(kind.rawValue))")
+            return true
+        }
+        if !money, taskApproved {
+            host.log("command: \(title) → allowed (for this task)")
+            return true
+        }
+        let answer = await host.approve(money ? nil : kind, title, detail)
+        host.log("command: \(title) → \(answer)")
+        switch answer {
+        case .no: return false
+        case .once: return true
+        case .task: taskApproved = true; return true
+        case .always: kind.alwaysAllowed = true; return true
+        }
+    }
+
+    /// The start of a big task (its first plan): one question for the whole of it, so it can run on its own.
+    private func askForTask() async {
+        guard !askedForTask, !taskApproved else { return }
+        askedForTask = true
+        guard !Permission.allCases.allSatisfy(\.alwaysAllowed) else { return }
+        let steps = plan.prefix(8).map { "• \($0.text)" }.joined(separator: "\n")
+        let answer = await host.approve(nil, "Let Murmur do this on its own?",
+            "\(steps)\n\nIt will click, type and use your apps without asking again until it's done. "
+            + "Anything that pays or buys still asks.")
+        host.log("command: run the task on its own → \(answer)")
+        if answer == .task || answer == .always { taskApproved = true }
+    }
+
     /// Moving through pages and lists: the same call again is progress (the next screenful), not a loop.
     private static let browsingTools: Set<String> = [
         "browser_scroll", "browser_read", "browser_back", "read_screen", "wait", "note", "plan",
@@ -862,7 +909,7 @@ public final class CommandAgent {
             let name = text("name")
             guard let app = MacActions.running(name) else { return Outcome(result: "\"\(name)\" isn't running.") }
             let title = "Quit \(app.localizedName ?? name)?"
-            guard await host.confirm(title, "It will ask about any unsaved work, as ⌘Q does.") else {
+            guard await allow(.quitting, title, "It will ask about any unsaved work, as ⌘Q does.") else {
                 return Outcome(result: "You cancelled quitting \(name).", finished: true)
             }
             return Outcome(result: MacActions.quitApp(name))
@@ -961,7 +1008,7 @@ public final class CommandAgent {
         case "list_shortcuts": return Outcome(result: await MacActions.listShortcuts())
         case "run_shortcut":
             let name = text("name")
-            guard await host.confirm("Run the shortcut \"\(name)\"?", "Shortcuts can change things on your Mac.") else {
+            guard await allow(.shortcuts, "Run the shortcut \"\(name)\"?", "Shortcuts can change things on your Mac.") else {
                 return Outcome(result: "You cancelled the shortcut.", finished: true)
             }
             host.progress("Running \(name)…")
@@ -970,8 +1017,7 @@ public final class CommandAgent {
             let helper: AssistantCLI = tool == "ask_claude" ? .claude : .codex
             let task = text("task")
             guard helper.isAllowed else { return Outcome(result: "\(helper.display) isn't allowed in Murmur's menu.") }
-            let approved = AssistantCLI.autoApprove ? true
-                : await host.confirm("Ask \(helper.display)?",
+            let approved = await allow(.coding, "Ask \(helper.display)?",
                                      "Murmur will send this to \(helper.display) (uses your subscription):\n\n\(task.prefix(600))")
             guard approved else { return Outcome(result: "You declined asking \(helper.display).", finished: true) }
             host.progress("Asking \(helper.display)…")
@@ -1008,7 +1054,7 @@ public final class CommandAgent {
             }
             let words = text("text")
             if words.range(of: Self.riskyWords, options: .regularExpression) != nil {
-                guard await host.confirm("Click “\(words)”?", "This may send, buy, post or delete something.") else {
+                guard await allow(.clicks, "Click “\(words)”?", "This may send, post or delete something.") else {
                     return Outcome(result: "You said no to clicking \(words).", finished: true)
                 }
             }
@@ -1071,7 +1117,7 @@ public final class CommandAgent {
             if MacActions.scriptIsRisky(script) {
                 let purpose = text("purpose")
                 let title = purpose.isEmpty ? "Run this script?" : purpose.capitalizedFirst + "?"
-                guard await host.confirm(title, String(script.prefix(1200))) else {
+                guard await allow(.scripts, title, String(script.prefix(1200))) else {
                     return Outcome(result: "The user chose not to run it.", finished: true)
                 }
             }
@@ -1095,7 +1141,7 @@ public final class CommandAgent {
             let id = Int(args["id"]?.number ?? 0)
             let what = ScreenControl.name(of: id) ?? "[\(id)]"
             if what.range(of: Self.riskyWords, options: .regularExpression) != nil {
-                guard await host.confirm("Click \(what)?", "This may send, buy, post or delete something.") else {
+                guard await allow(.clicks, "Click \(what)?", "This may send, post or delete something.") else {
                     return Outcome(result: "You said no to clicking \(what).", finished: true)
                 }
             }
@@ -1198,7 +1244,7 @@ public final class CommandAgent {
             let app = !text("app").isEmpty ? text("app")
                 : prefs.chatApp(for: to) ?? ScreenControl.workingApp()?.localizedName ?? "Messages"
             guard !to.isEmpty, !body.isEmpty else { return Outcome(result: "Who should it go to, and what should it say?") }
-            guard await host.confirm("Send this to \(to) on \(app)?", "“\(body)”") else {
+            guard await allow(.messages, "Send this to \(to) on \(app)?", "“\(body)”") else {
                 return Outcome(result: "You chose not to send it.", finished: true)
             }
             messageApproved = true
@@ -1214,6 +1260,7 @@ public final class CommandAgent {
             plan = Array(steps.prefix(25))
             let open = plan.filter { !$0.done }.count
             host.log("command: plan \(before == 0 ? "made" : "updated"): \(plan.count) steps, \(open) open")
+            if before == 0, plan.count >= 3 { await askForTask() }
             if let current = plan.firstIndex(where: { !$0.done }) {
                 host.progress("Step \(current + 1) of \(plan.count): \(plan[current].text.prefix(60))…")
             }
@@ -1256,7 +1303,7 @@ public final class CommandAgent {
               let app = ScreenControl.workingApp(), let id = app.bundleIdentifier, Messaging.apps.contains(id) else {
             return true
         }
-        let yes = await host.confirm("Send this message?", "Pressing Return in \(app.localizedName ?? "this app") sends what's typed.")
+        let yes = await allow(.messages, "Send this message?", "Pressing Return in \(app.localizedName ?? "this app") sends what's typed.")
         if yes { messageApproved = true }
         return yes
     }
@@ -1386,7 +1433,7 @@ public final class CommandAgent {
         }
         if !ShellCommand.isReadOnly(command) {
             let detail = (purpose.isEmpty ? "" : purpose + "\n\n") + command
-            guard await host.confirm("Run this command?", detail) else {
+            guard await allow(.commands, "Run this command?", detail) else {
                 return Outcome(result: "The user chose not to run it.", finished: true)
             }
         }

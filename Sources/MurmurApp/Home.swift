@@ -807,6 +807,22 @@ private struct SettingsPage: View {
                     Button("Open…") { state.section = .memory }.buttonStyle(.murmurSecondary)
                 }
             }
+            SettingsSection("Permissions") {
+                // "Always Allow …" in a Go Ahead? panel turns these on; this is where to take it back.
+                ForEach(Array(Permission.allCases.enumerated()), id: \.element) { index, kind in
+                    if index > 0 { RowDivider() }
+                    SettingRow(title: kind.display,
+                               detail: kind.alwaysAllowed ? "Goes ahead without asking." : "Asks first (or once per task).") {
+                        MurmurSwitch(label: kind.display,
+                                     isOn: state.bind(get: { kind.alwaysAllowed }, set: { kind.alwaysAllowed = $0 }))
+                    }
+                }
+                RowDivider()
+                Text("Anything that pays, buys or transfers money always asks.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.ink2)
+                    .padding(.horizontal, 18).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             SettingsSection("Indexing") {
                 SettingRow(title: "Folders",
                            detail: settings.roots.isEmpty ? "No folders yet."

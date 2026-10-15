@@ -702,6 +702,7 @@ extension DictationController {
             }
         )
         host.openModelSettings = { [weak self] in self?.onOpenModelSettings?() }
+        host.approve = { [weak self] kind, title, detail in self?.approve(kind, title, detail) ?? .no }
         host.findFiles = { [weak self] query in await self?.onFindFiles?(query) ?? [] }
         return host
     }
@@ -843,6 +844,17 @@ extension DictationController {
         let answer = ConfirmPanel.run(title: title, detail: detail, confirm: action,
                                       symbol: ConfirmPanel.symbol(for: title))
         log("command: \(title) → \(answer ? "yes" : "no")")
+        return answer
+    }
+
+    /// "Go ahead?" with the choice to allow it for the rest of the task, or always for this kind of action.
+    private func approve(_ kind: Permission?, _ title: String, _ detail: String) -> Approval {
+        hud.hide()
+        let action = title.hasPrefix("Build") ? "Start Building" : title.hasPrefix("Quit") ? "Quit"
+            : title.hasPrefix("Click") ? "Click" : title.hasPrefix("Send") ? "Send" : "Go Ahead"
+        let answer = ConfirmPanel.ask(kind: kind, title: title, detail: detail, confirm: action,
+                                      symbol: ConfirmPanel.symbol(for: title))
+        log("command: \(title) → \(answer)")
         return answer
     }
 

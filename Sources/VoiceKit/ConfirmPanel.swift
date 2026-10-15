@@ -1,3 +1,4 @@
+import AgentKit
 import AppKit
 import SwiftUI
 
@@ -5,7 +6,35 @@ import SwiftUI
 /// clicking Send…): a small cream panel above every window, with the action in charcoal. ↩ confirms, Esc cancels.
 @MainActor
 enum ConfirmPanel {
+    /// One choice under the question.
+    struct Choice {
+        let label: String
+        let answer: Approval
+        var primary = false
+    }
+
+    /// "Go ahead?" with Claude-style choices: once, for the rest of this task, or always for this kind of action.
+    /// Nil kind: a payment (once only), or the start of a task ("let it run").
+    static func ask(kind: Permission?, title: String, detail: String, confirm: String, symbol: String) -> Approval {
+        let choices: [Choice]
+        if title.hasPrefix("Let Murmur do this") {
+            choices = [Choice(label: "Ask Me Each Time", answer: .once), Choice(label: "Let It Run", answer: .task, primary: true)]
+        } else if let kind {
+            choices = [Choice(label: "Cancel", answer: .no), Choice(label: confirm, answer: .once, primary: true),
+                       Choice(label: "Allow for This Task", answer: .task),
+                       Choice(label: "Always Allow \(kind.short)", answer: .always)]
+        } else {
+            choices = [Choice(label: "Cancel", answer: .no), Choice(label: confirm, answer: .once, primary: true)]
+        }
+        return present(title: title, detail: detail, symbol: symbol, choices: choices)
+    }
+
     static func run(title: String, detail: String, confirm: String, symbol: String) -> Bool {
+        present(title: title, detail: detail, symbol: symbol,
+                choices: [Choice(label: "Cancel", answer: .no), Choice(label: confirm, answer: .once, primary: true)]) != .no
+    }
+
+    private static func present(title: String, detail: String, symbol: String, choices: [Choice]) -> Approval {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
                             styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
@@ -24,9 +53,9 @@ enum ConfirmPanel {
                 ? NSColor(srgbRed: 0.118, green: 0.106, blue: 0.102, alpha: 1)
                 : NSColor(srgbRed: 0.984, green: 0.973, blue: 0.957, alpha: 1)
         }
-        var answer = false
-        let view = ConfirmView(title: title, detail: detail, confirm: confirm, symbol: symbol) { ok in
-            answer = ok
+        var answer = Approval.no
+        let view = ConfirmView(title: title, detail: detail, symbol: symbol, choices: choices) { picked in
+            answer = picked
             NSApp.stopModal()
         }
         let hosting = NSHostingView(rootView: view)
@@ -59,6 +88,8 @@ enum ConfirmPanel {
         if lower.hasPrefix("click") { return "cursorarrow.click" }
         if lower.contains("shortcut") { return "square.stack" }
         if lower.hasPrefix("ask") { return "sparkles" }
+        if lower.hasPrefix("let murmur") { return "play.fill" }
+        if lower.hasPrefix("send") { return "paperplane" }
         return "questionmark"
     }
 }
@@ -66,9 +97,9 @@ enum ConfirmPanel {
 private struct ConfirmView: View {
     let title: String
     let detail: String
-    let confirm: String
     let symbol: String
-    let done: (Bool) -> Void
+    let choices: [ConfirmPanel.Choice]
+    let done: (Approval) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -79,36 +110,50 @@ private struct ConfirmView: View {
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.ink))
             VStack(alignment: .leading, spacing: 6) {
                 Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.text)
-                Text(detail)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Palette.clay)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+                ScrollView {
+                    Text(detail)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Palette.clay)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
             }
-            HStack(spacing: 8) {
-                Button { done(false) } label: {
-                    Text("Cancel").font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.text)
-                        .frame(maxWidth: .infinity).frame(height: 34)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Palette.card))
-                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Palette.control))
-                        .contentShape(Rectangle())
+            // Two to a row: Cancel and the main answer first, then "for this task" and "always".
+            VStack(spacing: 8) {
+                ForEach(Array(stride(from: 0, to: choices.count, by: 2)), id: \.self) { start in
+                    HStack(spacing: 8) {
+                        ForEach(choices[start..<min(start + 2, choices.count)], id: \.label) { choice in
+                            button(choice)
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.cancelAction)
-                Button { done(true) } label: {
-                    Text(confirm).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.onPrimary)
-                        .frame(maxWidth: .infinity).frame(height: 34)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Palette.text))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.defaultAction)
             }
             .padding(.top, 4)
         }
         .padding(22)
         .padding(.top, 6)
-        .frame(width: 400, alignment: .leading)
+        .frame(width: 420, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func button(_ choice: ConfirmPanel.Choice) -> some View {
+        let label = Text(choice.label).font(.system(size: 13, weight: choice.primary ? .semibold : .medium))
+            .foregroundStyle(choice.primary ? Palette.onPrimary : Palette.text)
+            .lineLimit(1).minimumScaleFactor(0.85)
+            .frame(maxWidth: .infinity).frame(height: 34)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(choice.primary ? Palette.text : Palette.card))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(choice.primary ? Color.clear : Palette.control))
+            .contentShape(Rectangle())
+        if choice.primary {
+            Button { done(choice.answer) } label: { label }.buttonStyle(.plain).keyboardShortcut(.defaultAction)
+        } else if choice.answer == .no || (choice.answer == .once && choices.first?.label == choice.label) {
+            Button { done(choice.answer) } label: { label }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
+        } else {
+            Button { done(choice.answer) } label: { label }.buttonStyle(.plain)
+        }
     }
 }
