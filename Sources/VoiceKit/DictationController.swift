@@ -194,6 +194,11 @@ public final class DictationController: ObservableObject {
         Task { await prepareModel() }
     }
 
+    /// Tries loading the speech model again (after a failed download).
+    public func retryModel() {
+        Task { await prepareModel() }
+    }
+
     /// Writes the last recording (16 kHz mono, exactly what the model heard) to a WAV file and shows it in Finder.
     public func saveLastRecording() {
         guard !lastSamples.isEmpty else { return }

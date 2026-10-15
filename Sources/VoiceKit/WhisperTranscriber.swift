@@ -30,6 +30,14 @@ public actor WhisperTranscriber {
 
     public var isReady: Bool { kit != nil }
 
+    /// Whether the model's files are already on this Mac (picking it then needs no download).
+    public static func isDownloaded(_ source: Source) -> Bool {
+        let folder = modelsFolder.appendingPathComponent("models/\(source.repo)/\(source.variant)")
+        return ["AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "MelSpectrogram.mlmodelc"].allSatisfy {
+            FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path)
+        }
+    }
+
     /// Frees the disk space of models Murmur no longer offers (Hinglish Prime, ~890 MB).
     public static func removeDroppedModels() {
         let dropped = modelsFolder.appendingPathComponent("models/nitinh/whisperkit-hinglish-coreml")

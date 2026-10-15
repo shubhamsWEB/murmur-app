@@ -40,8 +40,25 @@ public enum SpeechModel: String, CaseIterable, Sendable {
     public var languageDetail: String {
         switch self {
         case .english: return "Only English. The most accurate for it, accents included."
-        case .hinglishApex: return "Hindi and English, mixed as you like. Typed in English letters. Extra 590 MB."
+        case .hinglishApex: return "Hindi and English, mixed as you like. Typed in English letters."
         case .multilingual: return "Spanish, French, German and 22 more European languages, detected as you speak."
+        }
+    }
+
+    /// Whether it's downloaded already: picking it is then instant.
+    public var isOnThisMac: Bool {
+        switch self {
+        case .english: return ParakeetTranscriber.isDownloaded(.english)
+        case .multilingual: return ParakeetTranscriber.isDownloaded(.multilingual)
+        case .hinglishApex: return whisperSource.map(WhisperTranscriber.isDownloaded) ?? false
+        }
+    }
+
+    /// The one-time download it needs.
+    public var downloadSize: String {
+        switch self {
+        case .english, .multilingual: return "about 600 MB"
+        case .hinglishApex: return "about 590 MB"
         }
     }
 

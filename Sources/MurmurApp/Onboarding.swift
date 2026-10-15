@@ -774,48 +774,108 @@ private struct VoiceStep: View {
     }
 }
 
-/// Which language you'll speak: each is its own speech model (English, Hinglish, or the other languages). Also on the
-/// Settings page.
+/// Which language you'll speak: each is its own speech model (English, Hinglish, or the other languages). Picking one
+/// that's on this Mac switches at once; one that isn't asks first, with its size, before anything downloads. Also on
+/// the Settings page.
 struct LanguageChoice: View {
-    let dictation: DictationController
-    @State private var chosen: SpeechModel?
+    @ObservedObject var dictation: DictationController
+    /// A model picked that needs a download, waiting for the go-ahead.
+    @State private var asking: SpeechModel?
 
     var body: some View {
-        let current = chosen ?? dictation.speechModel
-        VStack(alignment: .leading, spacing: 8) {
+        let current = dictation.speechModel
+        VStack(alignment: .leading, spacing: 10) {
             Text("Which language will you speak?").font(.system(size: 13.5, weight: .semibold))
             HStack(alignment: .top, spacing: 10) {
                 ForEach(SpeechModel.allCases, id: \.self) { model in
-                    Button {
-                        chosen = model
-                        dictation.setModel(model)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                Text(model.language).font(.system(size: 13.5, weight: .semibold))
-                                Spacer(minLength: 0)
-                                if model == current {
-                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
-                                }
-                            }
-                            Text(model.languageDetail)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Theme.ink2)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(model == current ? Theme.accentTint : Theme.card))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(model == current ? Theme.accent : Theme.line, lineWidth: model == current ? 1.5 : 1))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(model.language): \(model.languageDetail)")
-                    .accessibilityAddTraits(model == current ? .isSelected : [])
+                    card(model, chosen: model == current, asked: model == asking)
                 }
             }
+            if let asking {
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Theme.accentText)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(asking.language) needs a one-time download, \(asking.downloadSize).")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text("From Hugging Face, then it runs offline on this Mac. Dictation waits while it downloads.")
+                            .font(.system(size: 12)).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Not now") { self.asking = nil }.buttonStyle(.murmurSecondaryCompact)
+                    Button("Download") {
+                        dictation.setModel(asking)
+                        self.asking = nil
+                    }
+                    .buttonStyle(.murmurPrimaryCompact)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentTint))
+            }
+        }
+    }
+
+    private func card(_ model: SpeechModel, chosen: Bool, asked: Bool) -> some View {
+        Button {
+            guard !chosen else {
+                asking = nil
+                if case .failed = dictation.speechModelState { dictation.retryModel() }
+                return
+            }
+            if model.isOnThisMac {
+                asking = nil
+                dictation.setModel(model)
+            } else {
+                asking = model
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(model.language).font(.system(size: 13.5, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if chosen {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
+                    }
+                }
+                Text(model.languageDetail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 6)
+                status(model, chosen: chosen)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 118, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(chosen ? Theme.accentTint : Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(chosen || asked ? Theme.accent : Theme.line, lineWidth: chosen || asked ? 1.5 : 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(model.language): \(model.languageDetail)")
+        .accessibilityAddTraits(chosen ? .isSelected : [])
+    }
+
+    /// Where the model is: downloading or getting ready (the chosen one), on this Mac, or a download away.
+    @ViewBuilder
+    private func status(_ model: SpeechModel, chosen: Bool) -> some View {
+        if chosen, case .downloading(let fraction) = dictation.speechModelState {
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: fraction).tint(Theme.accent)
+                Text("Downloading · \(Int(fraction * 100))%").font(.system(size: 11)).foregroundStyle(Theme.ink2)
+            }
+        } else if chosen, case .preparing = dictation.speechModelState {
+            Text("Getting ready…").font(.system(size: 11)).foregroundStyle(Theme.ink2)
+        } else if chosen, case .failed = dictation.speechModelState {
+            Text("Couldn't load. Pick it again to retry.").font(.system(size: 11)).foregroundStyle(Theme.danger)
+        } else if model.isOnThisMac || (chosen && dictation.speechModelState == .ready) {
+            Label("On this Mac", systemImage: "checkmark").font(.system(size: 11)).foregroundStyle(Theme.good)
+        } else {
+            Label("\(model.downloadSize) download", systemImage: "arrow.down.circle")
+                .font(.system(size: 11)).foregroundStyle(Theme.ink3)
         }
     }
 }

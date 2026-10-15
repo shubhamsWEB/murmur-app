@@ -25,6 +25,11 @@ public actor ParakeetTranscriber {
     }
 
     public nonisolated let model: Model
+
+    /// Whether the model's files are already on this Mac (picking it then needs no download).
+    public static func isDownloaded(_ model: Model) -> Bool {
+        AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: model.version), version: model.version)
+    }
     private var manager: AsrManager?
     private var loading: Task<AsrManager, Error>?
 
