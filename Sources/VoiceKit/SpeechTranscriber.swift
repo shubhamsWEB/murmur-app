@@ -5,20 +5,43 @@ import Foundation
 public enum SpeechModel: String, CaseIterable, Sendable {
     /// Parakeet TDT 0.6B v2: English only, the most accurate for English (accents included).
     case english
+    /// Oriserve Whisper-Hindi2Hinglish-Apex (Whisper large-v3-turbo, fine-tuned on ~700 h of Indian Hindi), 6-bit:
+    /// Hindi and English, written in English letters. (Prime, on Whisper large-v3, was tried and dropped: Apex did
+    /// better.)
+    case hinglishApex
     /// Parakeet TDT 0.6B v3: 25 European languages, detected automatically.
     case multilingual
-    /// Oriserve Whisper-Hindi2Hinglish-Apex (Whisper large-v3-turbo, fine-tuned on ~700 h of Indian Hindi), 6-bit.
-    case hinglishApex
-    /// Oriserve Whisper-Hindi2Hinglish-Prime (Whisper large-v3, fine-tuned on ~550 h of Indian Hindi), 4-bit.
-    case hinglishPrime
+
+    /// A saved setting, including models that were dropped (Prime is now Apex).
+    public init?(saved: String) {
+        if saved == "hinglishPrime" { self = .hinglishApex; return }
+        self.init(rawValue: saved)
+    }
 
     /// In the pickers.
     public var display: String {
         switch self {
         case .english: return "English (most accurate)"
-        case .multilingual: return "Multilingual (25 European languages)"
-        case .hinglishApex: return "Hinglish · Apex (590 MB)"
-        case .hinglishPrime: return "Hinglish · Prime (890 MB)"
+        case .multilingual: return "Other languages (25 European)"
+        case .hinglishApex: return "Hinglish (Hindi in English letters)"
+        }
+    }
+
+    /// The language choice, in onboarding and settings.
+    public var language: String {
+        switch self {
+        case .english: return "English"
+        case .hinglishApex: return "Hinglish"
+        case .multilingual: return "Other languages"
+        }
+    }
+
+    /// What the language choice means.
+    public var languageDetail: String {
+        switch self {
+        case .english: return "Only English. The most accurate for it, accents included."
+        case .hinglishApex: return "Hindi and English, mixed as you like. Typed in English letters. Extra 590 MB."
+        case .multilingual: return "Spanish, French, German and 22 more European languages, detected as you speak."
         }
     }
 
@@ -27,8 +50,7 @@ public enum SpeechModel: String, CaseIterable, Sendable {
         switch self {
         case .english: return "Parakeet · English"
         case .multilingual: return "Parakeet · 25 languages"
-        case .hinglishApex: return "Whisper · Hinglish Apex"
-        case .hinglishPrime: return "Whisper · Hinglish Prime"
+        case .hinglishApex: return "Whisper · Hinglish"
         }
     }
 
@@ -37,8 +59,7 @@ public enum SpeechModel: String, CaseIterable, Sendable {
         switch self {
         case .english: return "English"
         case .multilingual: return "multilingual"
-        case .hinglishApex: return "Hinglish Apex"
-        case .hinglishPrime: return "Hinglish Prime"
+        case .hinglishApex: return "Hinglish"
         }
     }
 
@@ -46,7 +67,7 @@ public enum SpeechModel: String, CaseIterable, Sendable {
     public var engine: String {
         switch self {
         case .english, .multilingual: return "Parakeet"
-        case .hinglishApex, .hinglishPrime: return "Whisper"
+        case .hinglishApex: return "Whisper"
         }
     }
 
@@ -56,9 +77,6 @@ public enum SpeechModel: String, CaseIterable, Sendable {
         case .hinglishApex:
             return .init(repo: "raghuramr14/whisperkit-hinglish-w6",
                          variant: "Oriserve_Whisper-Hindi2Hinglish-Apex-w6", language: "en")
-        case .hinglishPrime:
-            return .init(repo: "nitinh/whisperkit-hinglish-coreml",
-                         variant: "Oriserve_Whisper-Hindi2Hinglish-Prime_889MB", language: "en")
         }
     }
 }
@@ -76,7 +94,7 @@ public actor SpeechTranscriber {
             parakeet = ParakeetTranscriber(model: .english); whisper = nil
         case .multilingual:
             parakeet = ParakeetTranscriber(model: .multilingual); whisper = nil
-        case .hinglishApex, .hinglishPrime:
+        case .hinglishApex:
             parakeet = nil; whisper = model.whisperSource.map(WhisperTranscriber.init(source:))
         }
     }

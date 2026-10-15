@@ -127,7 +127,7 @@ public final class DictationController: ObservableObject {
     }
 
     public init() {
-        let model = UserDefaults.standard.string(forKey: Self.modelDefault).flatMap(SpeechModel.init)
+        let model = UserDefaults.standard.string(forKey: Self.modelDefault).flatMap(SpeechModel.init(saved:))
         transcriber = SpeechTranscriber(model: model ?? .english)
         let saved = UserDefaults.standard.string(forKey: Self.keyDefault).flatMap(DictationKeyMonitor.Key.init)
         monitor = DictationKeyMonitor(key: saved ?? .fn)
@@ -166,6 +166,7 @@ public final class DictationController: ObservableObject {
         }
         startMonitor(prompt: true)
         hud.prewarm()
+        Task.detached(priority: .background) { WhisperTranscriber.removeDroppedModels() }
         Task { await prepareModel() }
         // Load the local router model now, so the first command or decision doesn't wait for it.
         if RouterChoice.current == .local {

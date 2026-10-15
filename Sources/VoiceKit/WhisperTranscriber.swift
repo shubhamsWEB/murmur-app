@@ -30,6 +30,12 @@ public actor WhisperTranscriber {
 
     public var isReady: Bool { kit != nil }
 
+    /// Frees the disk space of models Murmur no longer offers (Hinglish Prime, ~890 MB).
+    public static func removeDroppedModels() {
+        let dropped = modelsFolder.appendingPathComponent("models/nitinh/whisperkit-hinglish-coreml")
+        if FileManager.default.fileExists(atPath: dropped.path) { try? FileManager.default.removeItem(at: dropped) }
+    }
+
     static var modelsFolder: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Murmur/Speech Models")

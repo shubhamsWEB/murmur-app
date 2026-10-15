@@ -1,6 +1,7 @@
 import AgentKit
 import AppKit
 import AVFoundation
+import MurmurIndex
 import Observation
 import Quartz
 import SwiftUI
@@ -16,7 +17,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "Home"
         case .search: "Search"
-        case .dictation: "Dictation"
+        case .dictation: "Settings"
         case .commands: "Commands & AI"
         case .memory: "Memory"
         case .folders: "Folders"
@@ -28,7 +29,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "house"
         case .search: "magnifyingglass"
-        case .dictation: "waveform"
+        case .dictation: "gearshape"
         case .commands: "sparkles"
         case .memory: "brain"
         case .folders: "folder"
@@ -149,7 +150,7 @@ private struct HomeView: View {
         switch state.section {
         case .home: HomePage(app: app, state: state)
         case .search: EmptyView()   // drawn full-size above
-        case .dictation: DictationPage(dictation: app.dictation, state: state)
+        case .dictation: SettingsPage(app: app, state: state)
         case .commands: CommandsPage(dictation: app.dictation, state: state)
         case .memory: MemoryPage(state: state)
         case .folders: FoldersPage(app: app, state: state)
@@ -241,15 +242,15 @@ private struct Sidebar: View {
                         .foregroundStyle(Theme.ink3)))
             }
             .padding(.horizontal, 10)
-            SectionLabel("Settings")
+            SectionLabel("Make it yours")
                 .padding(.horizontal, 16)
                 .padding(.top, 22)
                 .padding(.bottom, 8)
             VStack(spacing: 2) {
-                item(.dictation)
                 item(.commands, accessory: commandsBadge)
                 item(.memory)
                 item(.folders, accessory: foldersBadge)
+                item(.dictation)
             }
             .padding(.horizontal, 10)
             Spacer(minLength: 16)
@@ -752,17 +753,26 @@ private struct Fix: View {
 
 // MARK: - Dictation
 
-private struct DictationPage: View {
-    let dictation: DictationController
+/// All of Murmur's settings on one page: the language you speak, the talk key, commands, indexing, the app, and what's
+/// kept. Folders, the AI for commands, and memory have their own pages, linked from here.
+private struct SettingsPage: View {
+    let app: AppController
     let state: HomeState
     @ObservedObject private var history = DictationHistory.shared
 
+    private var dictation: DictationController { app.dictation }
+
     var body: some View {
         let _ = state.revision
+        let settings = app.model.settings
         VStack(alignment: .leading, spacing: 26) {
-            PageHeader(title: "Dictation",
-                       subtitle: "How you talk to Murmur, and what it hears. Speech never leaves this Mac.")
-            SettingsSection("Talk key") {
+            PageHeader(title: "Settings",
+                       subtitle: "Speech, commands and indexing. Everything runs on this Mac unless you add an AI key.")
+            SettingsSection("Speech") {
+                LanguageChoice(dictation: dictation)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                RowDivider()
                 SettingRow(title: "Hold to talk",
                            detail: "If fn opens the emoji picker, set Keyboard → “Press 🌐 key to” → Do Nothing, or use Right ⌥.") {
                     Picker("Talk key", selection: state.bind(get: { dictation.key }, set: { dictation.setKey($0) })) {
@@ -776,25 +786,76 @@ private struct DictationPage: View {
                 SettingRow(title: "Hands-free", detail: "Double-tap to talk as long as you like; tap again to finish. Esc cancels.") {
                     HStack(spacing: 4) { KeyCap(dictation.key == .fn ? "fn" : "⌥"); KeyCap(dictation.key == .fn ? "fn" : "⌥") }
                 }
-            }
-            SettingsSection("Recognition") {
-                SettingRow(title: "Speech model",
-                           detail: "English is the most accurate. Multilingual understands 25 languages. Hinglish writes Hindi in English letters.") {
-                    Picker("Speech model",
-                           selection: state.bind(get: { dictation.speechModel }, set: { dictation.setModel($0) })) {
-                        ForEach(SpeechModel.allCases, id: \.self) { Text($0.display).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 220)
-                }
                 RowDivider()
                 SettingRow(title: "Quiet voice", detail: "Boosts soft speech, for open offices and late nights. Still on this Mac.") {
                     MurmurSwitch(label: "Quiet voice",
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
+            }
+            SettingsSection("Commands") {
+                SettingRow(title: "Tell commands from dictation",
+                           detail: "“Open Slack” or “PDF kholo” runs; “see you at 5” is typed. Off: only the key with ⌃ runs commands.") {
+                    MurmurSwitch(label: "Tell commands from dictation",
+                                 isOn: state.bind(get: { dictation.detectCommands }, set: { dictation.detectCommands = $0 }))
+                }
                 RowDivider()
-                SettingRow(title: "Last recording", detail: "Save what the microphone heard, to check its quality.") {
-                    Button("Save…") { dictation.saveLastRecording() }.buttonStyle(.murmurSecondary)
+                SettingRow(title: "AI for commands", detail: RouterChoice.current.display) {
+                    Button("Change…") { state.section = .commands }.buttonStyle(.murmurSecondary)
+                }
+                RowDivider()
+                SettingRow(title: "Memory", detail: "What you've told Murmur, and what it noticed from your commands.") {
+                    Button("Open…") { state.section = .memory }.buttonStyle(.murmurSecondary)
+                }
+            }
+            SettingsSection("Indexing") {
+                SettingRow(title: "Folders",
+                           detail: settings.roots.isEmpty ? "No folders yet."
+                               : "\(settings.roots.count) folder\(settings.roots.count == 1 ? "" : "s") searched.") {
+                    Button("Manage…") { state.section = .folders }.buttonStyle(.murmurSecondary)
+                }
+                RowDivider()
+                SettingRow(title: "Pause indexing", detail: "Search keeps working; new and changed files wait until you resume.") {
+                    MurmurSwitch(label: "Pause indexing",
+                                 isOn: state.bind(get: { app.model.status.paused }, set: { app.engine.setPaused($0) }))
+                }
+                RowDivider()
+                SettingRow(title: AppSettings.batteryTitle, detail: AppSettings.batteryDetail) {
+                    MurmurSwitch(label: AppSettings.batteryTitle,
+                                 isOn: state.bind(get: { app.model.settings.indexOnBattery },
+                                                  set: { app.setIndexOnBattery($0) }))
+                }
+                RowDivider()
+                SettingRow(title: "Index only at set hours",
+                           detail: "Files are read only between these times. Search works all day.") {
+                    HStack(spacing: 8) {
+                        if settings.indexHoursOn {
+                            DatePicker("From", selection: time(\.start), displayedComponents: .hourAndMinute)
+                                .labelsHidden()
+                            Text("to").foregroundStyle(Theme.ink2)
+                            DatePicker("To", selection: time(\.end), displayedComponents: .hourAndMinute)
+                                .labelsHidden()
+                        }
+                        MurmurSwitch(label: "Index only at set hours",
+                                     isOn: state.bind(get: { app.model.settings.indexHoursOn }, set: { on in
+                                         app.setIndexHours(on: on, hours: app.model.settings.indexHours)
+                                     }))
+                    }
+                }
+            }
+            SettingsSection("App") {
+                SettingsPane(tab: .general, state: app.settingsWindow.state, embedded: true)
+                    .task { await app.settingsWindow.state.refresh() }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            SettingsSection("Recordings and history") {
+                SettingRow(title: "Keep a history", detail: "Used for “This week” on Home. Stays on this Mac.") {
+                    HStack(spacing: 12) {
+                        Button("Clear History") { history.clear() }
+                            .buttonStyle(.murmurDestructive)
+                            .disabled(history.items.isEmpty)
+                        MurmurSwitch(label: "Keep a history",
+                                     isOn: state.bind(get: { history.isEnabled }, set: { history.isEnabled = $0 }))
+                    }
                 }
                 RowDivider()
                 SettingRow(title: "Keep recordings",
@@ -805,23 +866,9 @@ private struct DictationPage: View {
                                      isOn: state.bind(get: { dictation.keepRecordings }, set: { dictation.keepRecordings = $0 }))
                     }
                 }
-            }
-            SettingsSection("Commands or text") {
-                SettingRow(title: "Tell commands from dictation",
-                           detail: "“Open Slack” runs; “see you at 5” is typed. Off: only the key with ⌃ runs commands.") {
-                    MurmurSwitch(label: "Tell commands from dictation",
-                                 isOn: state.bind(get: { dictation.detectCommands }, set: { dictation.detectCommands = $0 }))
-                }
-            }
-            SettingsSection("Privacy") {
-                SettingRow(title: "Keep a history", detail: "Used for “This week” on Home. Stays on this Mac.") {
-                    HStack(spacing: 12) {
-                        Button("Clear History") { history.clear() }
-                            .buttonStyle(.murmurDestructive)
-                            .disabled(history.items.isEmpty)
-                        MurmurSwitch(label: "Keep a history",
-                                     isOn: state.bind(get: { history.isEnabled }, set: { history.isEnabled = $0 }))
-                    }
+                RowDivider()
+                SettingRow(title: "Last recording", detail: "Save what the microphone heard, to check its quality.") {
+                    Button("Save…") { dictation.saveLastRecording() }.buttonStyle(.murmurSecondary)
                 }
                 RowDivider()
                 HStack(spacing: 10) {
@@ -847,6 +894,21 @@ private struct DictationPage: View {
         } else {
             Button("Allow…", action: fix).buttonStyle(.murmurPrimaryCompact)
         }
+    }
+
+    /// One end of the set hours, as a time of day for a date picker.
+    private func time(_ end: KeyPath<IndexHours, Int>) -> Binding<Date> {
+        Binding(get: {
+            let minute = app.model.settings.indexHours[keyPath: end]
+            return Calendar.current.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: Date()) ?? Date()
+        }, set: { date in
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+            let minute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+            let hours = app.model.settings.indexHours
+            app.setIndexHours(on: true, hours: end == \IndexHours.start ? IndexHours(start: minute, end: hours.end)
+                                                                        : IndexHours(start: hours.start, end: minute))
+            state.revision += 1
+        })
     }
 }
 
@@ -1223,7 +1285,8 @@ private struct FoldersPage: View {
             }
             IndexingCard(model: app.model)
             Picker("", selection: $state.foldersTab) {
-                ForEach(SettingsTab.allCases, id: \.self) { Text($0.title).tag($0) }
+                // General (the shortcut, login, updates) is on the Settings page.
+            ForEach(SettingsTab.allCases.filter { $0 != .general }, id: \.self) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()

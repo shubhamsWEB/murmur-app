@@ -9,9 +9,9 @@ the on-device speech recognition runtime (NVIDIA Parakeet on Core ML).
 WhisperKit (https://github.com/argmaxinc/WhisperKit), MIT License, Copyright (c)
 2024 Argmax, Inc., the runtime for the Whisper speech models on Core ML.
 
-The Hinglish speech models, downloaded on first use: Oriserve Whisper-Hindi2Hinglish
-Apex and Prime (https://huggingface.co/Oriserve), Apache License 2.0, fine-tunes of
-OpenAI Whisper (MIT); Core ML conversions by raghuramr14 and nitinh on Hugging Face.
+The Hinglish speech model, downloaded on first use: Oriserve Whisper-Hindi2Hinglish-Apex
+(https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex), Apache License 2.0, a
+fine-tune of OpenAI Whisper (MIT); Core ML conversion by raghuramr14 on Hugging Face.
 
 ================================================================================
 llama.cpp and ggml (https://github.com/ggml-org/llama.cpp), the embedding runtime,

@@ -738,6 +738,9 @@ private struct VoiceStep: View {
             VStack(alignment: .leading, spacing: 0) {
                 StepTitle(title: "Talk to your Mac",
                           subtitle: "Hold Fn, speak, and let go. Murmur types it wherever your cursor is.")
+                LanguageChoice(dictation: dictation)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .padding(.top, 20)
                 VStack(alignment: .leading, spacing: 10) {
                     PermissionRow(ok: mic, title: "Microphone", detail: "So Murmur can hear you",
                                   button: "Allow…") { dictation.openMicrophoneSettings() }
@@ -748,7 +751,7 @@ private struct VoiceStep: View {
                                   detail: dictation.modelStatus, button: nil) {}
                 }
                 .frame(maxWidth: 520, alignment: .leading)
-                .padding(.top, 24)
+                .padding(.top, 16)
                 Group {
                     if let heard {
                         Label("Heard: “\(heard.text)”", systemImage: "checkmark.circle.fill")
@@ -766,6 +769,52 @@ private struct VoiceStep: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 520, alignment: .leading)
                     .padding(.top, 14)
+            }
+        }
+    }
+}
+
+/// Which language you'll speak: each is its own speech model (English, Hinglish, or the other languages). Also on the
+/// Settings page.
+struct LanguageChoice: View {
+    let dictation: DictationController
+    @State private var chosen: SpeechModel?
+
+    var body: some View {
+        let current = chosen ?? dictation.speechModel
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Which language will you speak?").font(.system(size: 13.5, weight: .semibold))
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(SpeechModel.allCases, id: \.self) { model in
+                    Button {
+                        chosen = model
+                        dictation.setModel(model)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Text(model.language).font(.system(size: 13.5, weight: .semibold))
+                                Spacer(minLength: 0)
+                                if model == current {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
+                                }
+                            }
+                            Text(model.languageDetail)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Theme.ink2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(model == current ? Theme.accentTint : Theme.card))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(model == current ? Theme.accent : Theme.line, lineWidth: model == current ? 1.5 : 1))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(model.language): \(model.languageDetail)")
+                    .accessibilityAddTraits(model == current ? .isSelected : [])
+                }
             }
         }
     }

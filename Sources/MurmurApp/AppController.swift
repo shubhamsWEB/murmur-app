@@ -319,6 +319,8 @@ final class AppController {
 
     /// The old Settings window's tabs live on the Murmur window's Folders page now.
     func showSettings(_ tab: SettingsTab = .general) {
+        // General's settings (the shortcut, login, updates) are on the Settings page; the rest on Folders.
+        if tab == .general { home.show(.dictation); return }
         home.state.foldersTab = tab
         home.show(.folders)
     }
@@ -411,7 +413,10 @@ struct SpokenFile {
         for word in words {
             if let found = Self.typeWords[word] { kinds.formUnion(found) } else { rest.append(word) }
         }
-        let filler: Set<String> = ["my", "the", "a", "an", "that", "this", "our", "of", "called", "named"]
+        let filler: Set<String> = ["my", "the", "a", "an", "that", "this", "our", "of", "called", "named",
+                                   // Hinglish: "meri resume wali PDF", "mujhe bank statement ki file"
+                                   "mujhe", "meri", "mera", "mere", "apni", "apna", "apne", "wala", "wali", "wale",
+                                   "vala", "vali", "vale", "ki", "ka", "ke", "ko", "se"]
         rest = rest.filter { !filler.contains($0) }
         // A CV is a résumé: look for both.
         if rest.contains(where: { ["cv", "resume", "résumé"].contains($0) }) {
