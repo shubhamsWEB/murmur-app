@@ -77,7 +77,24 @@ public final class CommandAgent {
     }
 
     private let host: CommandHost
+    /// Steps for a plain command; a task list raises it (a few steps per item), up to `stepCap`.
     private let maxSteps = 24
+    private let stepCap = 90
+    /// The longest a command may run, however many steps are left.
+    private let timeCap: TimeInterval = 8 * 60
+
+    /// One line of the model's task list.
+    struct PlanStep: Equatable {
+        var text: String
+        var done: Bool
+    }
+
+    /// The model's task list for this command: written when it starts a big request and rewritten as it learns
+    /// (more emails to open, a step that isn't needed, a sign-in in the way). It and the notes are shown to the model
+    /// on every step, so they survive older page text being cut.
+    private var plan: [PlanStep] = []
+    /// What the model found along the way, for the final answer ("HDFC: card bill ₹12,340 due 20 Oct").
+    private var notes: [String] = []
     /// A browser opened earlier in this command: web searches and addresses open there.
     private var lastBrowser: AppCatalog.App?
     /// The browser this command opened a page in (a named one, else the default browser), so later steps act in
@@ -118,7 +135,7 @@ public final class CommandAgent {
     /// Tools that only bring something up: on their own, they rarely finish a request with more than one part.
     private static let openingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "read_screen", "wait",
-        "browser_read", "browser_tabs", "browser_scroll",
+        "browser_read", "browser_tabs", "browser_scroll", "browser_back", "plan",
     ]
 
     /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
@@ -170,6 +187,7 @@ public final class CommandAgent {
     private static let screenChangingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "click", "press_keys",
         "type_text", "write_in_app", "browser_click", "browser_type", "browser_scroll", "browser_switch_tab",
+        "browser_back",
     ]
     /// A click on one of these asks you first.
     private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
@@ -203,6 +221,8 @@ public final class CommandAgent {
         routing = false
         offered = []
         awaitingPick = false
+        plan = []
+        notes = []
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -522,14 +542,25 @@ public final class CommandAgent {
         // done when the page is open, however soon the model says so.
         var didMoreThanOpen = false
         var checksBeforeDone = 0
+        var planChecks = 0
         var nudgedForTools = false
         let hasMoreSteps = Self.hasMoreThanOneStep(utterance)
         let wantsAnswer = Self.asksForInformation(utterance)
-        for step in 0..<maxSteps {
+        let began = Date()
+        var budget = maxSteps
+        for step in 0..<stepCap {
+            // A task list buys a few steps per item; nothing runs past the time cap.
+            if !plan.isEmpty { budget = min(stepCap, max(maxSteps, plan.count * 6 + 10)) }
+            if step >= budget || Date().timeIntervalSince(began) > timeCap {
+                host.log("command: stopped at step \(step + 1) (budget \(budget), \(Int(Date().timeIntervalSince(began))) s)")
+                await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
+                return
+            }
             var answer: RouterReply?
             let asked = Date()
+            let stepSystem = system + taskState
             do {
-                answer = try await router.chat(system: system, turns: Self.compacted(turns), tools: tools)
+                answer = try await router.chat(system: stepSystem, turns: Self.compacted(turns), tools: tools)
                 host.log(String(format: "command: %@ step %d took %.2f s", router.name, step + 1,
                                 Date().timeIntervalSince(asked)))
             } catch {
@@ -538,13 +569,13 @@ public final class CommandAgent {
                 // Too slow, or the connection dropped: ask the same model once more before giving up on it.
                 if let failure = error as? RouterError, case .unreachable = failure {
                     host.progress("Still working… (step \(step + 1))")
-                    answer = try? await router.chat(system: system, turns: Self.compacted(turns), tools: tools)
+                    answer = try? await router.chat(system: stepSystem, turns: Self.compacted(turns), tools: tools)
                 }
                 // A cloud model that still fails (offline, bad key) hands over to the local model.
                 if answer == nil, !(router is OllamaRouter) {
                     router = OllamaRouter(model: routerModel)
                     host.progress("\(error.localizedDescription) Using the local model…")
-                    answer = try? await router.chat(system: system, turns: Self.compacted(turns), tools: tools)
+                    answer = try? await router.chat(system: stepSystem, turns: Self.compacted(turns), tools: tools)
                 }
                 if answer == nil {
                     if step == 0, searchInstead(utterance) { return }
@@ -573,7 +604,7 @@ public final class CommandAgent {
                 let text = ModelOutput.answer(reply.text)
                 if !text.isEmpty { host.showAnswer(text); return }
                 // Nothing at all: ask once more rather than stop silently half-way.
-                if nudgedForTools { await wrapUp(router: router, system: system, turns: turns, tools: tools); return }
+                if nudgedForTools { await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools); return }
                 nudgedForTools = true
                 turns.append(.user("Continue the request with tool calls: the next step, reply with the answer, or done."))
                 continue
@@ -585,6 +616,17 @@ public final class CommandAgent {
             var looked = false
             for (index, call) in reply.calls.enumerated() {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
+                // The task list still has open steps: done, or a final reply, would leave the request half done.
+                if call.name == "done" || call.name == "reply", planChecks < 3, plan.contains(where: { !$0.done }) {
+                    planChecks += 1
+                    let open = plan.filter { !$0.done }.map { "[ ] \($0.text)" }.joined(separator: "\n")
+                    host.log("command: \(call.name) with \(plan.filter { !$0.done }.count) steps open; going on")
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Not finished: your task list still has open steps:\n\(open)\nDo them now. If one turned out "
+                        + "unnecessary or impossible, call plan with the updated list (mark it [x] and say why in a note). "
+                        + "Then give the final answer from your notes."))
+                    continue
+                }
                 if call.name == "done", awaitingPick {
                     // "open_file" and "done" in one response: the matches came back, nothing has opened yet.
                     host.log("command: done before picking from the matches; asking for the pick")
@@ -646,17 +688,65 @@ public final class CommandAgent {
             let signature = reply.calls.map { call in
                 call.name + call.arguments.keys.sorted().map { "\($0)=\(call.arguments[$0]?.description ?? "")" }.joined(separator: ",")
             }.joined(separator: "|")
-            repeats = signature == lastSignature ? repeats + 1 : 0
+            let browsing = reply.calls.allSatisfy { Self.browsingTools.contains($0.name) }
+            repeats = signature == lastSignature && !browsing ? repeats + 1 : 0
             lastSignature = signature
             if repeats >= 2 {
                 host.log("command: the same step three times; stopping")
-                await wrapUp(router: router, system: system, turns: turns, tools: tools)
+                await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
                 return
             }
-            host.progress("Working… (step \(step + 2))")
+            if let current = plan.firstIndex(where: { !$0.done }) {
+                host.progress("Step \(current + 1) of \(plan.count): \(plan[current].text.prefix(60))…")
+            } else {
+                host.progress("Working… (step \(step + 2))")
+            }
         }
-        host.log("command: stopped after \(maxSteps) steps")
-        await wrapUp(router: router, system: system, turns: turns, tools: tools)
+        host.log("command: stopped after \(stepCap) steps")
+        await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
+    }
+
+    /// Moving through pages and lists: the same call again is progress (the next screenful), not a loop.
+    private static let browsingTools: Set<String> = [
+        "browser_scroll", "browser_read", "browser_back", "read_screen", "wait", "note", "plan",
+    ]
+
+    /// The task list and notes, added to the instructions on every step.
+    private var taskState: String {
+        guard !plan.isEmpty || !notes.isEmpty else { return "" }
+        var lines: [String] = []
+        if !plan.isEmpty {
+            lines.append("\nYour task list (keep it current with plan; [x] done, [ ] to do):")
+            lines += plan.map { "\($0.done ? "[x]" : "[ ]") \($0.text)" }
+        }
+        if !notes.isEmpty {
+            lines.append("\nYour notes so far (the final answer comes from these):")
+            var total = 0
+            for note in notes.reversed() {
+                total += note.count
+                if total > 9000 { lines.append("- … earlier notes cut"); break }
+                lines.append("- \(note)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// "[x] open the inbox\n[ ] open the HDFC email": the model's list as steps.
+    nonisolated static func parsePlan(_ text: String) -> [PlanStep] {
+        text.split(whereSeparator: \.isNewline).compactMap { raw in
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            line = line.replacingOccurrences(of: #"^([-*•]|\d+[.)])\s*"#, with: "", options: .regularExpression)
+            var done = false
+            if let range = line.range(of: #"^\[(x|X|✓|✔)\]\s*"#, options: .regularExpression) {
+                done = true; line.removeSubrange(range)
+            } else if let range = line.range(of: #"^\[ ?\]\s*"#, options: .regularExpression) {
+                line.removeSubrange(range)
+            } else if line.hasPrefix("✓ ") || line.hasPrefix("✔ ") {
+                done = true; line.removeFirst(2)
+            }
+            line = line.trimmingCharacters(in: .whitespaces)
+            return line.isEmpty ? nil : PlanStep(text: String(line.prefix(160)), done: done)
+        }
     }
 
     /// Why a command the model calls done isn't done yet, if it isn't: the model sees this and the screen, then goes
@@ -1117,6 +1207,36 @@ public final class CommandAgent {
         case "reply":
             host.showAnswer(text("text"))
             return Outcome(result: "Shown.", finished: true, shown: true)
+        case "plan":
+            let steps = Self.parsePlan(text("steps"))
+            guard !steps.isEmpty else { return Outcome(result: "Write one step per line, [x] for done and [ ] for to do.") }
+            let before = plan.count
+            plan = Array(steps.prefix(25))
+            let open = plan.filter { !$0.done }.count
+            host.log("command: plan \(before == 0 ? "made" : "updated"): \(plan.count) steps, \(open) open")
+            if let current = plan.firstIndex(where: { !$0.done }) {
+                host.progress("Step \(current + 1) of \(plan.count): \(plan[current].text.prefix(60))…")
+            }
+            return Outcome(result: "Task list saved: \(plan.count) steps, \(open) to do. It's shown to you on every step.")
+        case "note":
+            let note = text("text").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !note.isEmpty else { return Outcome(result: "Nothing to note.") }
+            notes.append(String(note.prefix(700)))
+            if notes.count > 60 { notes.removeFirst(notes.count - 60) }
+            return Outcome(result: "Noted (\(notes.count) notes).")
+        case "browser_back":
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front: use press_keys cmd+[ in the app, or open the page again.")
+            }
+            if await canScript(browser) {
+                _ = await BrowserControl.evaluate("history.back(); 'ok'", in: browser)
+            } else {
+                NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first?.activate()
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                _ = ScreenControl.press("cmd+[")
+            }
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return Outcome(result: "Went back to the previous page.")
         default:
             return Outcome(result: "Unknown tool \(tool).")
         }
@@ -1407,6 +1527,14 @@ public final class CommandAgent {
             "- Documents: open_file with the user's own distinctive words (\"Q3 sales report\", \"lease 2025\"), never "
                 + "a generic word like \"document\". If it says it's showing matches, the user picks; don't open "
                 + "something else instead.",
+            "- Big requests, done the way a person would (\"summarise my emails\", \"go through my unread messages\", "
+                + "\"compare these three laptops\", \"check every tab\"): call plan first with the steps you can see, "
+                + "then work through them one at a time. Open the list, read it, scroll for more; open each item that "
+                + "matters (important, unread, from a person, about money or dates), read it, note what matters with "
+                + "note, go back (browser_back), then the next. Rewrite the plan as you learn: add the items you "
+                + "found, drop what isn't needed, add a step when something blocks you (a sign-in, a pop-up). Mark "
+                + "steps [x] as you finish them. When every step is done, reply with the answer built from your "
+                + "notes: grouped, most important first. Never answer from the first screen alone.",
             "- Long pages: browser_read gives the text from where the page is scrolled to. To understand a whole page "
                 + "(a long post, its comments, a feed, an article), browser_scroll down and read on until the page says "
                 + "it's the end or you have what's needed; click \"see more\", \"load more comments\" and similar to "
@@ -1543,6 +1671,14 @@ public final class CommandAgent {
                  ["app": ("string", "WhatsApp, Messages, Slack… (empty: the chat app in front)"),
                   "to": ("string", "the person, group or channel, as the user said it"),
                   "text": ("string", "the message, in the user's words")], required: ["to", "text"]),
+            tool("plan", "Write or rewrite your task list for a request with several parts (going through emails, "
+                 + "comparing things, a chain of steps): one step per line, [x] for done, [ ] for to do. Call it first, "
+                 + "then again whenever you learn something (more items to go through, a step not needed, something "
+                 + "in the way) so it always shows what's left. It's shown to you on every step.",
+                 ["steps": ("string", "the steps, one per line, each starting with [x] or [ ]")]),
+            tool("note", "Keep a finding for the final answer: it stays with you even when older page text is cut "
+                 + "(\"HDFC: card bill ₹12,340 due 20 Oct\")", ["text": ("string", "the finding, short")]),
+            tool("browser_back", "Go back to the previous page in the browser (from an opened email back to the inbox)"),
             tool("done", "Finish when nothing more is needed"),
         ]
         if helpers.contains(.claude) {
