@@ -33,7 +33,7 @@ public final class DictationController: ObservableObject {
     public var log: (String) -> Void = { print($0) }
 
     private let recorder = MicRecorder()
-    private var transcriber: ParakeetTranscriber
+    private var transcriber: SpeechTranscriber
     private var lastSamples: [Float] = []
     private let hud = DictationHUD()
     private let monitor: DictationKeyMonitor
@@ -74,6 +74,50 @@ public final class DictationController: ObservableObject {
     private static let keyDefault = "dictationKey"
     private static let modelDefault = "speechModel"
     private static let whisperDefault = "whisperMode"
+    private static let keepDefault = "keepRecordings"
+
+    /// Keep every recording and what the speech model heard (Documents/Murmur Recordings), to compare speech models on
+    /// the same clips. Off by default; nothing leaves this Mac.
+    public var keepRecordings: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.keepDefault) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.keepDefault) }
+    }
+
+    public static var recordingsFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Murmur Recordings")
+    }
+
+    /// Opens the kept recordings in Finder.
+    public func showRecordings() {
+        try? FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Self.recordingsFolder)
+    }
+
+    /// Saves one recording as a 16 kHz WAV and adds a line to clips.tsv: file, model, seconds of audio, seconds to
+    /// transcribe, text.
+    private func keep(_ samples: [Float], text: String, model: SpeechModel, took: TimeInterval) {
+        let folder = Self.recordingsFolder
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        let name = "\(stamp.string(from: Date())).wav"
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try WAV.write(samples, sampleRate: 16_000, to: folder.appendingPathComponent(name))
+            let index = folder.appendingPathComponent("clips.tsv")
+            if !FileManager.default.fileExists(atPath: index.path) {
+                try Data("file\tmodel\taudio_s\ttook_s\ttext\n".utf8).write(to: index)
+            }
+            let clean = text.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
+            let line = String(format: "%@\t%@\t%.1f\t%.2f\t%@\n", name, model.rawValue,
+                              Double(samples.count) / 16_000, took, clean)
+            let handle = try FileHandle(forWritingTo: index)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(line.utf8))
+        } catch {
+            log("dictation: can't keep the recording: \(error.localizedDescription)")
+        }
+    }
 
     /// Quiet Voice: boost soft speech up to 40 dB instead of 30 dB, for whispering or speaking softly. (Named for
     /// your voice, not OpenAI's Whisper: speech is always recognised on this Mac. The setting keeps its old key.)
@@ -83,8 +127,8 @@ public final class DictationController: ObservableObject {
     }
 
     public init() {
-        let model = UserDefaults.standard.string(forKey: Self.modelDefault).flatMap(ParakeetTranscriber.Model.init)
-        transcriber = ParakeetTranscriber(model: model ?? .english)
+        let model = UserDefaults.standard.string(forKey: Self.modelDefault).flatMap(SpeechModel.init)
+        transcriber = SpeechTranscriber(model: model ?? .english)
         let saved = UserDefaults.standard.string(forKey: Self.keyDefault).flatMap(DictationKeyMonitor.Key.init)
         monitor = DictationKeyMonitor(key: saved ?? .fn)
         monitor.onDown = { [weak self] in self?.keyDown() }
@@ -101,7 +145,7 @@ public final class DictationController: ObservableObject {
 
     public var key: DictationKeyMonitor.Key { monitor.key }
     /// The speech model in use.
-    public var speechModel: ParakeetTranscriber.Model { transcriber.model }
+    public var speechModel: SpeechModel { transcriber.model }
     /// Whether the dictation key is being watched (needs Accessibility).
     public var isListeningForKey: Bool { monitor.isRunning }
     /// Whether Murmur may paste into other apps (Accessibility).
@@ -137,10 +181,10 @@ public final class DictationController: ObservableObject {
         log("dictation: key is now \(key.display)")
     }
 
-    public func setModel(_ model: ParakeetTranscriber.Model) {
+    public func setModel(_ model: SpeechModel) {
         guard model != transcriber.model else { return }
         UserDefaults.standard.set(model.rawValue, forKey: Self.modelDefault)
-        transcriber = ParakeetTranscriber(model: model)
+        transcriber = SpeechTranscriber(model: model)
         log("dictation: speech model is now \(model.rawValue)")
         Task { await prepareModel() }
     }
@@ -213,7 +257,7 @@ public final class DictationController: ObservableObject {
         keyItem.submenu = keyMenu
         items.append(keyItem)
         let modelMenu = NSMenu()
-        for model in ParakeetTranscriber.Model.allCases {
+        for model in SpeechModel.allCases {
             modelMenu.addItem(ClosureMenuItem(model.display, checked: model == transcriber.model) { [weak self] in
                 self?.setModel(model)
             })
@@ -407,6 +451,9 @@ public final class DictationController: ObservableObject {
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
                            seconds, text.count, Date().timeIntervalSince(started)))
+                if keepRecordings {
+                    keep(samples, text: text, model: transcriber.model, took: Date().timeIntervalSince(started))
+                }
                 phase = .idle
                 guard !text.isEmpty else {
                     hud.flash("Didn't catch that")
@@ -483,7 +530,7 @@ public final class DictationController: ObservableObject {
     private func prepareModel() async {
         modelStatus = "Speech model: getting ready…"
         speechModelState = .preparing(0)
-        log("dictation: preparing Parakeet (\(transcriber.model.rawValue))")
+        log("dictation: preparing \(transcriber.model.engine) (\(transcriber.model.rawValue))")
         let started = Date()
         do {
             try await transcriber.prepare { [weak self] fraction, downloading in
@@ -499,13 +546,13 @@ public final class DictationController: ObservableObject {
                     }
                 }
             }
-            modelStatus = "Speech model ready (\(transcriber.model == .english ? "English" : "multilingual"), on device)"
+            modelStatus = "Speech model ready (\(transcriber.model.short), on device)"
             speechModelState = .ready
-            log(String(format: "dictation: Parakeet ready in %.1f s", Date().timeIntervalSince(started)))
+            log(String(format: "dictation: %@ ready in %.1f s", transcriber.model.engine, Date().timeIntervalSince(started)))
         } catch {
             modelStatus = "Speech model failed to load"
             speechModelState = .failed(error.localizedDescription)
-            log("dictation: Parakeet failed: \(error.localizedDescription)")
+            log("dictation: \(transcriber.model.engine) failed: \(error.localizedDescription)")
         }
     }
 

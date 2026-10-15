@@ -449,7 +449,7 @@ private struct HomePage: View {
             Text("On this Mac").font(.system(size: 15, weight: .semibold))
             HStack(alignment: .top, spacing: 12) {
                 ModelCard(name: "Speech",
-                          detail: dictation.speechModel == .english ? "Parakeet · English" : "Parakeet · 25 languages",
+                          detail: dictation.speechModel.card,
                           state: speechState)
                 ModelCard(name: "File search", detail: "EmbeddingGemma 2", state: searchState) {
                     state.section = .folders
@@ -779,10 +779,10 @@ private struct DictationPage: View {
             }
             SettingsSection("Recognition") {
                 SettingRow(title: "Speech model",
-                           detail: "English is the most accurate. Multilingual understands 25 languages.") {
+                           detail: "English is the most accurate. Multilingual understands 25 languages. Hinglish writes Hindi in English letters.") {
                     Picker("Speech model",
                            selection: state.bind(get: { dictation.speechModel }, set: { dictation.setModel($0) })) {
-                        ForEach(ParakeetTranscriber.Model.allCases, id: \.self) { Text($0.display).tag($0) }
+                        ForEach(SpeechModel.allCases, id: \.self) { Text($0.display).tag($0) }
                     }
                     .labelsHidden()
                     .frame(width: 220)
@@ -795,6 +795,15 @@ private struct DictationPage: View {
                 RowDivider()
                 SettingRow(title: "Last recording", detail: "Save what the microphone heard, to check its quality.") {
                     Button("Save…") { dictation.saveLastRecording() }.buttonStyle(.murmurSecondary)
+                }
+                RowDivider()
+                SettingRow(title: "Keep recordings",
+                           detail: "Saves every recording and what Murmur heard to Documents › Murmur Recordings, to compare speech models.") {
+                    HStack(spacing: 10) {
+                        Button("Show") { dictation.showRecordings() }.buttonStyle(.murmurSecondary)
+                        MurmurSwitch(label: "Keep recordings",
+                                     isOn: state.bind(get: { dictation.keepRecordings }, set: { dictation.keepRecordings = $0 }))
+                    }
                 }
             }
             SettingsSection("Commands or text") {

@@ -6,6 +6,13 @@ Rahim. Murmur is built on DigUp: its file index, search and much of the app.
 FluidAudio (https://github.com/FluidInference/FluidAudio), Apache License 2.0,
 the on-device speech recognition runtime (NVIDIA Parakeet on Core ML).
 
+WhisperKit (https://github.com/argmaxinc/WhisperKit), MIT License, Copyright (c)
+2024 Argmax, Inc., the runtime for the Whisper speech models on Core ML.
+
+The Hinglish speech models, downloaded on first use: Oriserve Whisper-Hindi2Hinglish
+Apex and Prime (https://huggingface.co/Oriserve), Apache License 2.0, fine-tunes of
+OpenAI Whisper (MIT); Core ML conversions by raghuramr14 and nitinh on Hugging Face.
+
 ================================================================================
 llama.cpp and ggml (https://github.com/ggml-org/llama.cpp), the embedding runtime,
 linked into Murmur's helper (with one small change, in scripts/llama.cpp-no-logits.patch)

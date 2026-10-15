@@ -1,0 +1,10 @@
+torch
+torchaudio
+transformers==4.57.6
+accelerate
+librosa
+soundfile
+sentencepiece
+huggingface_hub
+onnx-asr[cpu,hub]
+qwen-asr

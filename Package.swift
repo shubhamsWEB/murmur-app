@@ -56,14 +56,17 @@ let appDependencies: [Package.Dependency] = [
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     // Murmur: on-device speech to text (Parakeet on the Neural Engine). Its text-normalization trait is off: unused.
     .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7", traits: []),
+    // Murmur: Whisper models on the Neural Engine (the Hinglish speech models).
+    .package(url: "https://github.com/argmaxinc/WhisperKit.git", exact: "1.1.1"),
 ]
 let appTargets: [Target] = [
     // Murmur's commands: the quick patterns, the Ollama router, Mac actions, Claude Code / Codex as helpers.
     .target(name: "AgentKit", swiftSettings: [.swiftLanguageMode(.v5)]),
-    // Murmur's dictation: microphone, Parakeet, the dictation key, pasting into the focused app, the HUD.
+    // Murmur's dictation: microphone, Parakeet and Whisper, the dictation key, pasting into the focused app, the HUD.
     .target(
         name: "VoiceKit",
-        dependencies: ["AgentKit", .product(name: "FluidAudio", package: "FluidAudio")],
+        dependencies: ["AgentKit", .product(name: "FluidAudio", package: "FluidAudio"),
+                       .product(name: "WhisperKit", package: "WhisperKit")],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
     // The menubar + hotkey app. build.sh wraps it into build.noindex/Murmur.app. (The product can't be called
