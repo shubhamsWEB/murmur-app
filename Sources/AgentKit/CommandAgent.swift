@@ -79,6 +79,8 @@ public final class CommandAgent {
     private var prefs = CommandMemory.Preferences()
     /// What this command did, for memory: each tool call with its main arguments and result.
     private var did: [CommandMemory.Action] = []
+    /// What the user said for the command running now.
+    private var utterance = ""
     /// The answer shown for this command, if any (for memory).
     private let shown: Shown
     private final class Shown { var answer: String? }
@@ -169,6 +171,7 @@ public final class CommandAgent {
         let selection = ScreenControl.workingApp()?.bundleIdentifier == "com.apple.finder" ? nil : selection
         // Where the command happens, for the log: the app and the window you're looking at.
         host.log("command: in \(ScreenControl.workingApp()?.localizedName ?? "?"), window \"\(ScreenControl.frontWindowTitle() ?? "")\"")
+        self.utterance = utterance
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -219,6 +222,46 @@ public final class CommandAgent {
         }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
+    }
+
+    /// The earlier file a query names: its path or exact name, or every word of the query found in the name.
+    nonisolated static func earlierFile(_ query: String, recent: [String]) -> String? {
+        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let asked = fold((query as NSString).lastPathComponent)
+        let words = asked.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { $0.count > 2 }
+        return recent.first { name in
+            let file = fold(name)
+            return file == asked || (!words.isEmpty && words.allSatisfy { file.contains($0) })
+        }
+    }
+
+    /// The user means the file from before: "it", "that", "again", "wahi", "phir se", or a word from its name.
+    nonisolated static func pointsBack(_ utterance: String, to name: String) -> Bool {
+        let text = QuickCommands.clean(utterance)
+        if text.range(of: #"\b(it|that|this|same|again|previous|last|earlier|wahi|wohi|vahi|wo|woh|vo|voh|usko|use|usse|isko|ise|yahi|phir se|fir se|dobara|pichl[ia]|abhi wal[ia])\b"#,
+                      options: .regularExpression) != nil { return true }
+        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let generic: Set<String> = ["pdf", "pdfs", "doc", "docx", "file", "document", "copy", "final", "new", "untitled"]
+        let nameWords = fold((name as NSString).deletingPathExtension)
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+            .filter { $0.count > 2 && !generic.contains($0) }
+        let said = Set(fold(text).split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
+        return nameWords.contains { said.contains($0) }
+    }
+
+    /// The words that describe the file in what was said: "mujhe PDF kholkar do" → "PDF", "open my lease pdf" →
+    /// "my lease pdf" (the file search drops "my" and reads "pdf" as the kind).
+    nonisolated static func fileWords(_ utterance: String) -> String {
+        let drop: Set<String> = [
+            "open", "opens", "launch", "show", "find", "get", "bring", "up", "pull", "me", "please", "pls", "for", "can",
+            "you", "could", "would", "murmur", "hey", "the", "a", "an", "mujhe", "muje", "mujhko", "humein", "hume",
+            "ko", "do", "de", "dena", "dijiye", "dijie", "karo", "kar", "kare", "karein", "karna", "kholo", "khol",
+            "kholkar", "kholke", "kholiye", "kholna", "kholdo", "dikhao", "dikha", "dikhaiye", "dhundo", "dhoondo",
+            "dhundho", "dhoondho", "zara", "jara", "ek", "toh", "to", "na",
+        ]
+        let words = QuickCommands.clean(utterance).split(separator: " ").map(String.init)
+        let kept = words.filter { !drop.contains($0.lowercased()) }
+        return kept.isEmpty ? utterance : kept.joined(separator: " ")
     }
 
     /// No model to ask, but it sounds like a search ("search my resume", "find the lease"): search your files rather
@@ -655,6 +698,16 @@ public final class CommandAgent {
         case "list_running_apps": return Outcome(result: MacActions.runningApps())
         case "open_folder": return Outcome(result: MacActions.openFolder(text("name")))
         case "open_file":
+            // The file from an earlier command (memory lists it as in play) only when the user points back at it
+            // ("open it again", "that PDF", its name). "Open the PDF" or "mujhe PDF kholkar do" is a new request: the
+            // model used to hand back the remembered file, so every PDF request opened the same one.
+            if let earlier = Self.earlierFile(text("query"), recent: CommandMemory.recentFiles()),
+               !Self.pointsBack(utterance, to: earlier) {
+                let words = Self.fileWords(utterance)
+                host.log("command: \(earlier) is the file from before, but this asks for one afresh: finding “\(words)”")
+                host.progress("Finding “\(words)”…")
+                return Outcome(result: await host.openFile(words), finished: true)
+            }
             // A file seen on the screen or selected in Finder: open that one (by its path, or its exact name), not a
             // search's best guess. play: start a video or song.
             var path = (text("query") as NSString).expandingTildeInPath
@@ -1139,7 +1192,14 @@ public final class CommandAgent {
                 + "When everything the user asked for is done, call done. If one response does it all (\"open "
                 + "Slack\"), put done at the end of that same response.",
             "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said.",
-            "- Opening a file (\"open my resume pdf\"): open_file with the description.",
+            "- Opening a file (\"open my resume pdf\"): open_file with the description in the user's words. A file "
+                + "from memory (\"In play\") only when the user points back to it (\"open it again\", \"that PDF\"); "
+                + "\"open the PDF\" is a new request, not the last file opened.",
+            "- The user may speak Hinglish (Hindi in English letters) or Hindi. Understand it like English: kholo / "
+                + "kholkar do / khol do = open; band karo = close or quit; chalao / bajao / play karo = play; bhejo = "
+                + "send; dhundo / search karo = find; dikhao = show; batao = tell; badhao / kam karo = turn up / down; "
+                + "mujhe = for me. \"Mujhe PDF kholkar do\" → open_file \"PDF\". Messages keep the user's own words "
+                + "and language.",
             "- Files: \"search\", \"find\" or \"look for\" means the user's own files on this Mac: search_files. "
                 + "open_folder for standard folders.",
             "- Web: web_search only when the user says web, online, internet or Google, or after opening a browser; "

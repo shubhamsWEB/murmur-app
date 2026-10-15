@@ -474,6 +474,14 @@ public enum CommandMemory {
                           options: .regularExpression) != nil
     }
 
+    /// The files opened in the last day, newest first (their names).
+    public static func recentFiles() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return [] }
+        return rows(db, "SELECT name FROM entity WHERE type = 'file' AND last_seen > ? ORDER BY last_seen DESC LIMIT 10",
+                    [Date().timeIntervalSince1970 - 24 * 3600]).map { $0[0] }
+    }
+
     /// "forget that", "forget the last command": .last. "clear your memory", "forget everything": .all.
     public static func forgetRequest(_ utterance: String) -> Bool? {
         let text = QuickCommands.clean(utterance)

@@ -59,6 +59,13 @@ public enum IntentClassifier {
     /// the team on Slack…": an errand for Murmur, not words for the box you're in.
     static let messageToSend = #"^(send|write|drop|shoot) (a |an )?(quick |short )?(message|msg|text|whatsapp|dm|reply|note|email|mail)\b.*\bto\b|^(message|text|whatsapp|ping|dm|email|mail) (?!(me|us|you|him|her|them)\b)[a-z]+.*\b(on|in|via|over|through) (whatsapp|slack|telegram|signal|messages|imessage|teams|discord)\b|^(message|text|whatsapp|ping|dm) (?!(me|us|you|him|her|them)\b)[a-z]+( [a-z]+)? (saying|that|to say|and say|asking|telling|to tell)\b|^(send|tell) .+\b(on|in|via|over|through) (whatsapp|slack|telegram|signal|imessage|teams|discord)\b"#
 
+    /// Hinglish instructions put the verb last: "mujhe PDF kholkar do", "Spotify pe gaana chalao", "Chrome band
+    /// karo", "volume kam karo", "Rahul ko message bhejo".
+    static let hinglishInstruction = #"\b(khol|chala|baja|bhej|dhund|dhoond|dhundh|dhoondh|dikha|bata|suna|hata|mita|badha|ghata|laga|bula|rok)(o|iye|ie|na|kar|ke|\s?(do|de|dijiye|dena|kar(o|iye|na| do| dijiye| dena| de)?|ke( do| dijiye| dena| de)?))\b|\b(open|start|launch|play|pause|search|mute|unmute|on|off|save|copy|paste|delete|translate|summari[sz]e|call|set|chalu|kam|zyada|jyada|tez|dheema|dheere|full|clear|install|update|close|share|send|check|show|band|bandh|record|scroll|refresh|reload|minimi[sz]e|maximi[sz]e|type|likh)\s+(kar(o|iye|na|ke do|kar do| do| dijiye| dena| de)?|kijiye|kijie|do)\b"#
+
+    /// Things on the Mac a Hinglish instruction can be about.
+    static let macThings = #"\b(pdf|file|files|folder|document|doc|docs|photo|photos|tasveer|video|videos|song|gaana|gana|gaane|music|app|chrome|safari|youtube|spotify|whatsapp|slack|volume|awaaz|awaz|aawaz|brightness|wifi|wi-fi|bluetooth|screen|screenshot|calendar|mail|email|notes|finder|downloads|desktop|browser|tab|settings?|mac|laptop|computer|system|resume|cv|card|aadhaar|aadhar|passport|statement|invoice|bill|receipt|ticket|certificate)\b"#
+
     /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.
     static let aboutTheMac = #"\b(on|for|of|in) (my|this|the) (mac|macbook|laptop|computer|system|screen|desktop)\b"#
 
@@ -126,13 +133,19 @@ public enum IntentClassifier {
         }
         // Somewhere you can't type (the desktop, a Finder window, a player): whatever you said is for Murmur.
         if focus == .notText { return Decision(intent: .command, reason: "nowhere to type") }
+        // Hinglish: "mujhe PDF kholkar do", "Spotify pe gaana chalao". About something on the Mac and not in a text
+        // field, it's for Murmur; in a text field it could be a message ("kal file bhej dena"), so the model decides.
+        let hinglish = cleaned.range(of: hinglishInstruction, options: .regularExpression) != nil
+        if hinglish, focus != .textField, cleaned.range(of: macThings, options: .regularExpression) != nil {
+            return Decision(intent: .command, reason: "Hinglish instruction about the Mac")
+        }
         let first = cleaned.split(separator: " ").first.map(String.init) ?? ""
         let mentionsMac = cleaned.range(of: aboutTheMac, options: .regularExpression) != nil
         // "What's on my screen?", "how much space is left on my Mac?", "open the Downloads folder on my Mac".
         if mentionsMac, commandOpeners.contains(first) || questionOpeners.contains(first) {
             return Decision(intent: .command, reason: "about this Mac")
         }
-        guard commandOpeners.contains(first) || mentionsMac else {
+        guard commandOpeners.contains(first) || mentionsMac || hinglish else {
             return Decision(intent: .dictation, reason: "reads as text")
         }
         if focus == .notText { return Decision(intent: .command, reason: "instruction, and nowhere to type") }
@@ -142,6 +155,8 @@ public enum IntentClassifier {
         COMMAND to carry out (open or quit apps, search, change settings, ask Murmur a question, rewrite or \
         summarise the selected text, write something for them, teach Murmur a preference), or they are DICTATING words to be typed as-is into \
         the text field they are in (a message, an email body, notes), even if those words contain verbs or questions. \
+        The user may speak Hinglish (Hindi in English letters): "mujhe PDF kholkar do" (open the PDF for me) and \
+        "Spotify pe gaana chalao" are commands; "kal milte hain, file bhej dena" in a chat is dictation. \
         Answer "command" or "dictation".
         """
         let user = """
