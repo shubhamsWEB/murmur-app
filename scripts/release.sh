@@ -40,10 +40,15 @@ Download **Murmur.dmg** below, open it, and drag Murmur to Applications.
 
 Needs a Mac with Apple silicon on macOS 14 or later. On first launch Murmur asks for the microphone and
 Accessibility, then downloads its speech and search models.
+TXT
+# A notarized DMG opens without a warning; only an unnotarized one needs the Open Anyway note.
+if ! spctl -a -t open --context context:primary-signature "$DMG" >/dev/null 2>&1; then
+  cat >> "$NOTES" <<TXT
 
 If macOS says it can't verify the developer: open System Settings → Privacy & Security, scroll down and click
 Open Anyway next to Murmur. You only need to do this once.
 TXT
+fi
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "› Release $TAG exists: replacing its DMGs"
