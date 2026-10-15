@@ -130,6 +130,9 @@ public final class CommandAgent {
     /// The user let this task run on its own ("Allow for This Task"): no more questions until it ends (payments
     /// still ask).
     private var taskApproved = false
+    /// Skills given in full in this command's instructions, and ones the model loaded since with use_skill.
+    private var skillsInFull: [String] = []
+    private var loadedSkills: [String] = []
     /// Asked at the start of a big task already (when its plan was first written).
     private var askedForTask = false
     /// Matches were offered and nothing has opened yet: the model owes a pick (or a reply that none fits).
@@ -145,7 +148,7 @@ public final class CommandAgent {
     /// Tools that only bring something up: on their own, they rarely finish a request with more than one part.
     private static let openingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "read_screen", "wait",
-        "browser_read", "browser_tabs", "browser_scroll", "browser_back", "plan",
+        "browser_read", "browser_tabs", "browser_scroll", "browser_back", "plan", "use_skill", "read_skill_file",
     ]
 
     /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
@@ -235,6 +238,8 @@ public final class CommandAgent {
         notes = []
         taskApproved = false
         askedForTask = false
+        skillsInFull = []
+        loadedSkills = []
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -543,7 +548,11 @@ public final class CommandAgent {
             context += "\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n\(selection.prefix(8000))\n\"\"\""
         }
         let helpers = AssistantCLI.allCases.filter(\.isAllowed)
-        let system = Self.systemPrompt(helpers: helpers) + "\n\n" + context
+        // Skills: how the user wants things done. "Always" ones and ones the request names in full, the rest listed.
+        let skills = SkillLibrary.shared.prompt(for: utterance)
+        skillsInFull = skills.inFull
+        if !skills.inFull.isEmpty { host.log("command: skills \(skills.inFull.joined(separator: ", "))") }
+        let system = Self.systemPrompt(helpers: helpers) + skills.text + "\n\n" + context
         let tools = Self.tools(helpers: helpers)
         var turns: [RouterTurn] = [.user(utterance)]
         var router = currentRouter()
@@ -759,12 +768,19 @@ public final class CommandAgent {
     /// Moving through pages and lists: the same call again is progress (the next screenful), not a loop.
     private static let browsingTools: Set<String> = [
         "browser_scroll", "browser_read", "browser_back", "read_screen", "wait", "note", "plan",
+        "use_skill", "read_skill_file",
     ]
 
     /// The task list and notes, added to the instructions on every step.
     private var taskState: String {
-        guard !plan.isEmpty || !notes.isEmpty else { return "" }
+        guard !plan.isEmpty || !notes.isEmpty || !loadedSkills.isEmpty else { return "" }
         var lines: [String] = []
+        let library = SkillLibrary.shared
+        for name in loadedSkills {
+            guard let skill = library.skill(named: name) else { continue }
+            lines.append("\n" + library.heading(skill, "loaded with use_skill: follow it"))
+            lines.append(library.instructions(skill))
+        }
         if !plan.isEmpty {
             lines.append("\nYour task list (keep it current with plan; [x] done, [ ] to do):")
             lines += plan.map { "\($0.done ? "[x]" : "[ ]") \($0.text)" }
@@ -1296,6 +1312,27 @@ public final class CommandAgent {
             }
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             return Outcome(result: "Went back to the previous page.")
+        case "use_skill":
+            let library = SkillLibrary.shared
+            guard let skill = library.skill(named: text("name")) else {
+                let names = library.skills.filter { library.mode(of: $0) != .off }.map(\.name)
+                return Outcome(result: "No skill called \"\(text("name"))\". Skills: \(names.joined(separator: ", ")).")
+            }
+            guard library.mode(of: skill) != .off else {
+                return Outcome(result: "The user turned the \(skill.name) skill off. Work without it.")
+            }
+            guard library.isAvailable(skill) else { return Outcome(result: library.unavailableReason(skill)) }
+            host.log("command: use_skill \(skill.name)")
+            if skillsInFull.contains(skill.name) || loadedSkills.contains(skill.name) {
+                return Outcome(result: "The \(skill.name) skill is already in your instructions. Follow it.")
+            }
+            loadedSkills.append(skill.name)
+            host.progress("Using the \(skill.name) skill…")
+            return Outcome(result: "Loaded the \(skill.name) skill: its instructions are now with yours on every "
+                + "step. Follow them from here.")
+        case "read_skill_file":
+            host.log("command: read_skill_file \(text("name"))/\(text("file"))")
+            return Outcome(result: SkillLibrary.shared.read(text("name"), file: text("file")))
         default:
             return Outcome(result: "Unknown tool \(tool).")
         }
@@ -1738,6 +1775,12 @@ public final class CommandAgent {
             tool("note", "Keep a finding for the final answer: it stays with you even when older page text is cut "
                  + "(\"HDFC: card bill ₹12,340 due 20 Oct\")", ["text": ("string", "the finding, short")]),
             tool("browser_back", "Go back to the previous page in the browser (from an opened email back to the inbox)"),
+            tool("use_skill", "Load a skill (the user's instructions for a kind of task, listed under Skills) before "
+                 + "starting a task it fits", ["name": ("string", "the skill's name")]),
+            tool("read_skill_file", "Read one of a skill's files that its instructions point to (a reference, an "
+                 + "example, a script)",
+                 ["name": ("string", "the skill's name"),
+                  "file": ("string", "the file's path inside the skill, e.g. references/setup.md")]),
             tool("done", "Finish when nothing more is needed"),
         ]
         if helpers.contains(.claude) {

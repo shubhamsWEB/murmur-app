@@ -35,8 +35,12 @@ if ask "Remove the saved API keys (Anthropic, OpenAI) from the Keychain?" n; the
 fi
 
 if [[ -d "$SUPPORT" ]] && ask "Remove the file index and dictation history (keeps downloaded models)?" y; then
-  find "$SUPPORT" -mindepth 1 -maxdepth 1 ! -name Models ! -name "Speech Models" -exec rm -rf {} +
+  find "$SUPPORT" -mindepth 1 -maxdepth 1 ! -name Models ! -name "Speech Models" ! -name Skills -exec rm -rf {} +
   echo "  index and history removed"
+fi
+
+if [[ -d "$SUPPORT/Skills" ]] && ask "Remove the skills you added (Settings → Skills)?" n; then
+  rm -rf "$SUPPORT/Skills" && echo "  your skills removed"
 fi
 
 if ask "Also remove the downloaded models (search ~865 MB, speech ~500 MB, Hinglish ~590 MB; they download again)?" n; then

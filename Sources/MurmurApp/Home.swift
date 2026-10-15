@@ -823,6 +823,7 @@ private struct SettingsPage: View {
                     .padding(.horizontal, 18).padding(.vertical, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            SkillsSettings()
             SettingsSection("Indexing") {
                 SettingRow(title: "Folders",
                            detail: settings.roots.isEmpty ? "No folders yet."
@@ -925,6 +926,110 @@ private struct SettingsPage: View {
                                                                         : IndexHours(start: hours.start, end: minute))
             state.revision += 1
         })
+    }
+}
+
+// MARK: - Skills
+
+/// The agent's skills: what each is for, whether it's on (always, when the task fits, or off), and adding one from
+/// a GitHub link or the Skills folder.
+private struct SkillsSettings: View {
+    @ObservedObject private var library = SkillLibrary.shared
+    @State private var link = ""
+    @State private var adding = false
+    @State private var status: (text: String, good: Bool)?
+
+    var body: some View {
+        let _ = library.revision
+        SettingsSection("Skills") {
+            ForEach(Array(library.skills.enumerated()), id: \.element.id) { index, skill in
+                if index > 0 { RowDivider() }
+                row(skill)
+            }
+            if !library.skills.isEmpty { RowDivider() }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    TextField("Skill link", text: $link,
+                              prompt: Text("GitHub link to a skill's folder or SKILL.md"))
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(add)
+                    Button(adding ? "Adding…" : "Add Skill", action: add)
+                        .buttonStyle(.murmurPrimaryCompact)
+                        .disabled(adding || link.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                HStack(spacing: 8) {
+                    if let status {
+                        Text(status.text).font(.system(size: 12))
+                            .foregroundStyle(status.good ? Theme.good : Theme.accentText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Open Skills Folder") { library.openFolder() }.buttonStyle(.murmurSecondaryCompact)
+                    Button("Reload") { library.reload() }.buttonStyle(.murmurSecondaryCompact)
+                }
+                Text("Skills are instructions the agent follows, in the same format as Claude's: a folder with a SKILL.md. "
+                     + "“Always” ones shape every command; “When it fits” ones are used when a task matches. "
+                     + "Put your own in the Skills folder and press Reload.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private func row(_ skill: Skill) -> some View {
+        SettingRow(title: skill.name, detail: detail(skill)) {
+            HStack(spacing: 10) {
+                if let tool = skill.requires, SkillLibrary.toolPath(tool) == nil {
+                    if let install = skill.install, let url = URL(string: install) {
+                        Button("Get \(tool)…") { NSWorkspace.shared.open(url) }.buttonStyle(.murmurSecondaryCompact)
+                    } else {
+                        Pill(text: "Needs \(tool)", tone: .attention)
+                    }
+                }
+                if !skill.builtIn {
+                    Button("Remove") {
+                        library.remove(skill)
+                        status = ("Removed \(skill.name) (it's in the Trash).", true)
+                    }
+                    .buttonStyle(.murmurDestructive)
+                }
+                Picker(skill.name, selection: Binding(get: { library.mode(of: skill) },
+                                                      set: { library.setMode($0, for: skill) })) {
+                    ForEach(Skill.Mode.allCases, id: \.self) { Text($0.display).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 250)
+            }
+        }
+    }
+
+    private func detail(_ skill: Skill) -> String {
+        var text = skill.description.count > 220 ? String(skill.description.prefix(217)) + "…" : skill.description
+        if let tool = skill.requires, SkillLibrary.toolPath(tool) == nil {
+            text += "\nNeeds \(tool), which isn't installed on this Mac: it turns on by itself once it is."
+        }
+        text += skill.builtIn ? "\nComes with Murmur." : "\nYours" + (skill.source.map { ", from \($0)" } ?? "") + "."
+        return text
+    }
+
+    private func add() {
+        let wanted = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty, !adding else { return }
+        adding = true
+        status = ("Downloading…", true)
+        Task {
+            do {
+                let skill = try await library.add(from: wanted)
+                status = ("Added \(skill.name). It's set to “\(library.mode(of: skill).display)”.", true)
+                link = ""
+            } catch {
+                status = (error.localizedDescription, false)
+            }
+            adding = false
+        }
     }
 }
 

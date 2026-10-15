@@ -60,6 +60,8 @@ xcrun actool --compile "$APP/Contents/Resources" --platform macosx --target-devi
   "$PWD/Resources/Assets.xcassets" "$PWD/Resources/AppIcon/AppIcon.icon" > /dev/null
 cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"   # over actool's plainer fallback: ours has simplified 16 and 32 px
 cp Resources/Acknowledgements.txt "$APP/Contents/Resources/Acknowledgements.txt"
+# The skills that come with Murmur (Settings → Skills); yours live in Application Support/Murmur/Skills.
+ditto Resources/Skills "$APP/Contents/Resources/Skills"
 
 # Sparkle (in-app updates): the framework in Frameworks/, where the app's runpath looks. Its XPC services are for
 # sandboxed apps and its headers for building against it: left out.
