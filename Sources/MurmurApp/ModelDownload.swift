@@ -69,7 +69,7 @@ final class ModelDownload {
     /// "42% · about 1 min left", "Checking the download…", "Waiting for the network…"
     var progressText: String {
         switch phase {
-        case .needed: return "Not downloaded yet"
+        case .needed: return heldForSpeech && wasStarted ? "Paused while the speech model downloads" : "Not downloaded yet"
         case .downloading:
             let percent = "\(Int((fraction * 100).rounded(.down)))%"
             guard let left = secondsLeft else { return percent }
@@ -81,8 +81,39 @@ final class ModelDownload {
         }
     }
 
+    /// Paused while a speech model downloads: dictation needs its model first, and the two at once made both crawl
+    /// (21 MB/s alone, 1.5–3.5 MB/s together). The `.partial` stays, so it carries on from where it stopped.
+    private(set) var heldForSpeech = false
+
+    func holdForSpeech() {
+        guard !heldForSpeech else { return }
+        heldForSpeech = true
+        guard case .downloading = phase, let fetcher else { return }
+        attempt += 1            // the cancelled fetch's callbacks are ignored
+        fetcher.cancel()
+        self.fetcher = nil
+        retryWork?.cancel()
+        received = bytesOnDisk()
+        phase = .needed
+        log("model: paused while the speech model downloads")
+    }
+
+    func releaseForSpeech() {
+        guard heldForSpeech else { return }
+        heldForSpeech = false
+        if phase == .needed, fetcher == nil, wasStarted {
+            log("model: carrying on now the speech model is here")
+            start()
+        }
+    }
+
+    /// Whether the download had been asked for (onboarding's go-ahead, or a set-up app), so a release resumes it.
+    @ObservationIgnored private var wasStarted = false
+
     /// Starts, resumes or retries; does nothing while it runs (waiting for the network included) or once it's done.
     func start() {
+        wasStarted = true
+        if heldForSpeech { log("model: waiting for the speech model to finish first"); return }
         switch phase {
         case .ready, .downloading, .verifying: return
         default: break

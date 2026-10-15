@@ -67,6 +67,8 @@ public final class DictationController: ObservableObject {
     public var onOpenFile: ((String) async -> String)?
     /// Opens the settings for the commands' model (set by the app).
     public var onOpenModelSettings: (() -> Void)?
+    /// Opens Settings at the speech languages (no speech model chosen yet).
+    public var onOpenSpeechSettings: (() -> Void)?
     /// The search's best matches for a description of a file (set by the app).
     public var onFindFiles: ((String) async -> [FileCandidate])?
 
@@ -429,7 +431,7 @@ public final class DictationController: ObservableObject {
             // Nothing to hear you with yet: say so, and show where to choose one.
             guard speechModelChosen else {
                 hud.flash("Choose a speech model first", seconds: 3)
-                onOpenModelSettings?()
+                onOpenSpeechSettings?()
                 return
             }
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
@@ -638,6 +640,8 @@ public final class DictationController: ObservableObject {
 
     // MARK: - Setup
 
+    private var lastDownloadLog = Date.distantPast
+
     private func prepareModel() async {
         let model = transcriber.model
         modelStatus = "Speech model: getting ready…"
@@ -651,6 +655,11 @@ public final class DictationController: ObservableObject {
                     guard let self, self.transcriber.model == model else { return }
                     let percent = Int((fraction * 100).rounded())
                     if downloading {
+                        if Date().timeIntervalSince(self.lastDownloadLog) >= 10 {
+                            self.lastDownloadLog = Date()
+                            self.log(String(format: "dictation: downloading %@ · %d%% after %.0f s", model.short, percent,
+                                            Date().timeIntervalSince(started)))
+                        }
                         self.speechModelState = .downloading(fraction)
                         self.modelStatus = "Downloading the speech model · \(percent)%"
                         // A download takes a while: show it in the pill too, wherever you are.

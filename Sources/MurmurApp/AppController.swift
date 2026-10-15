@@ -1,5 +1,6 @@
 import AgentKit
 import AppKit
+import Combine
 import MurmurIndex
 import ServiceManagement
 import VoiceKit
@@ -28,6 +29,7 @@ final class AppController {
     private(set) var statusMenu: StatusMenuController!
     private(set) var onboarding: OnboardingController?
     private var observers: [NSObjectProtocol] = []
+    private var speechWatch: AnyCancellable?
     /// Set while onboarding's shortcut step waits for you to try the hotkey: a press goes there, not to the panel.
     var hotkeyTester: (() -> Void)?
 
@@ -84,6 +86,14 @@ final class AppController {
         dictation.onSearchFiles = { [weak self] query in self?.showSearchWindow(query: query) }
         dictation.onOpenFile = { [weak self] query in await self?.openBestFile(query) ?? "" }
         dictation.onOpenModelSettings = { [weak self] in self?.showHome(.commands) }
+        dictation.onOpenSpeechSettings = { [weak self] in self?.showHome(.dictation) }
+        // One download at a time, the speech model first: together both crawled.
+        speechWatch = dictation.$speechModelState.receive(on: RunLoop.main).sink { [weak self] state in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if case .downloading = state { self.download.holdForSpeech() } else { self.download.releaseForSpeech() }
+            }
+        }
         dictation.onFindFiles = { [weak self] query in await self?.fileCandidates(query) ?? [] }
         statusMenu.dictationItems = { [weak self] in self?.dictation.compactMenuItems() ?? [] }
         statusMenu.dictation = dictation
