@@ -405,9 +405,16 @@ struct SpokenFile {
 
     init(_ spoken: String, owner ownerName: String? = nil) {
         let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
-        let owner = (ownerName ?? "").split(separator: " ").map { fold(String($0)) }.filter { $0.count > 1 }
+        var owner = (ownerName ?? "").split(separator: " ").map { fold(String($0)) }.filter { $0.count > 1 }
+        let said = spoken.lowercased().split(separator: " ").map(String.init)
+        // "Shubham Agrawal Aadhaar" when memory only knows "Shubham": the word after the user's name is their surname,
+        // not what the file is about (it matched their resume's name, so the resume opened for "my Aadhaar card").
+        for (index, word) in said.enumerated() where index > 0 && owner.contains(fold(said[index - 1])) {
+            let next = fold(word)
+            if next.count > 2, Self.typeWords[next] == nil, !owner.contains(next) { owner.append(next) }
+        }
         self.owner = owner
-        let words = spoken.lowercased().split(separator: " ").map(String.init)
+        let words = said
             .filter { word in !owner.contains(fold(word.trimmingCharacters(in: CharacterSet(charactersIn: "'’s")))) }
         var kinds = Set<FileKind>()
         var rest: [String] = []
@@ -436,7 +443,15 @@ struct SpokenFile {
     /// inside it. Otherwise nil, and the results are shown to choose from. (It used to open the only strong match
     /// whatever its name, so one big document that loosely matches everything opened for every request.)
     func best(of rows: [ResultRow]) -> ResultRow? {
-        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        // Spelling-tolerant: case and accents folded, and letters said twice read once, so "Aadhaar" finds
+        // "Aadhar.pdf" and "PAN" finds "PanCard" (Hindi words are spelled many ways in English letters).
+        let fold: (String) -> String = { text in
+            var out = ""
+            for ch in text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) where out.last != ch {
+                out.append(ch)
+            }
+            return out
+        }
         let minor: Set<String> = ["for", "about", "with", "from", "and", "in", "on", "to", "at", "my", "of", "the",
                                   "latest", "last", "new", "old", "one"]
         // Only the words that tell files apart: "open the pdf" has none, and "pdf" matched every PDF's name (its
@@ -455,7 +470,7 @@ struct SpokenFile {
         // Among the files that match, the user's own (their name in it) first.
         func theirs(_ row: ResultRow) -> Bool {
             let name = fold(row.name + " " + row.folder)
-            return !owner.isEmpty && owner.allSatisfy { name.contains($0) }
+            return !owner.isEmpty && owner.allSatisfy { name.contains(fold($0)) }
         }
         let complete = files.filter { found($0) == words.count }
         if let named = complete.first(where: theirs) ?? complete.first { return named }
