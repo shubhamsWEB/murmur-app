@@ -752,18 +752,10 @@ private struct VoiceStep: View {
                 }
                 .frame(maxWidth: 520, alignment: .leading)
                 .padding(.top, 16)
-                Group {
-                    if let heard {
-                        Label("Heard: “\(heard.text)”", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(Theme.good)
-                    } else {
-                        Text("Try it now: hold fn and say “Hello, Murmur”.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.system(size: 14, weight: .medium))
-                .lineLimit(2)
-                .padding(.top, 22)
+                tryIt(heard: heard, mic: mic, dictation: dictation)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .padding(.top, 22)
                 Text("If Fn opens the emoji picker, set System Settings → Keyboard → “Press 🌐 key to” → Do Nothing.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -880,6 +872,52 @@ struct LanguageChoice: View {
     }
 }
 
+extension VoiceStep {
+    /// "Try it now" only once Murmur can hear you, type, and has its speech model; until then, what it's waiting for.
+    /// Continue never waits: the model keeps downloading and you can try it later.
+    @ViewBuilder
+    func tryIt(heard: DictationHistory.Item?, mic: Bool, dictation: DictationController) -> some View {
+        let key = dictation.key == .fn ? "fn" : "Right ⌥"
+        if let heard {
+            Label("Heard: “\(heard.text)”", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Theme.good)
+                .lineLimit(2)
+        } else if !mic || !(dictation.canPaste && dictation.isListeningForKey) {
+            Text("Allow the microphone and Accessibility above, then try it.")
+                .foregroundStyle(.secondary)
+        } else {
+            switch dictation.speechModelState {
+            case .ready:
+                Text("Try it now: hold \(key) and say “Hello, Murmur”.")
+                    .foregroundStyle(.secondary)
+            case .downloading(let fraction):
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: fraction).tint(Theme.accent).frame(maxWidth: 320)
+                    Text("Downloading the speech model · \(Int(fraction * 100))%. You can try it when it's ready, or "
+                         + "continue: it keeps downloading and you can try it later.")
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            case .waiting, .preparing:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Getting the speech model ready. Try it in a moment, or continue and try it later.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            case .failed(let message):
+                HStack(spacing: 10) {
+                    Text("The speech model didn't load: \(message)")
+                        .foregroundStyle(Theme.danger)
+                        .lineLimit(2)
+                    Button("Try Again") { dictation.retryModel() }.buttonStyle(.murmurSecondaryCompact)
+                }
+            }
+        }
+    }
+}
+
 private struct PermissionRow: View {
     let ok: Bool
     let title: String
@@ -920,7 +958,23 @@ private struct ShortcutStep: View {
     @ObservedObject private var history = DictationHistory.shared
     @State private var appeared = Date()
 
+    /// "Try it" only once the speech model is ready; until then, how far along it is.
+    private func talkTest(_ dictation: DictationController, key: String) -> String {
+        switch dictation.speechModelState {
+        case .ready: "Try it: hold \(key) and say “Hello, Murmur”."
+        case .downloading(let fraction): "The speech model is downloading (\(Int(fraction * 100))%). Try it when it's ready."
+        case .waiting, .preparing: "The speech model is getting ready. Try it in a moment."
+        case .failed: "The speech model didn't load. Retry on the Voice step or in Settings."
+        }
+    }
+
     var body: some View {
+        // Redraws every second, so the speech model's progress shows.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in content }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         let dictation = state.app.dictation
         let talkKey = dictation.key == .fn ? "fn" : "Right ⌥"
         let heard = history.items.first { $0.date > appeared }
@@ -931,7 +985,7 @@ private struct ShortcutStep: View {
                 ShortcutCard(number: "1", title: "Talk", detail: "Hold \(talkKey) and speak; let go and it's typed or done. "
                                  + "Double-tap for hands-free. Add ⌃ to force a command.",
                              tested: heard != nil,
-                             test: heard.map { "Heard: “\($0.text)”" } ?? "Try it: hold \(talkKey) and say “Hello, Murmur”.") {
+                             test: heard.map { "Heard: “\($0.text)”" } ?? talkTest(dictation, key: talkKey)) {
                     HStack(spacing: 4) {
                         KeyCap(talkKey)
                         Text("hold").font(.system(size: 11)).foregroundStyle(Theme.ink3)
