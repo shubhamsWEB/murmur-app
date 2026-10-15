@@ -35,13 +35,19 @@ if ask "Remove the saved API keys (Anthropic, OpenAI) from the Keychain?" n; the
 fi
 
 if [[ -d "$SUPPORT" ]] && ask "Remove the file index and dictation history (keeps downloaded models)?" y; then
-  find "$SUPPORT" -mindepth 1 -maxdepth 1 ! -name Models -exec rm -rf {} +
+  find "$SUPPORT" -mindepth 1 -maxdepth 1 ! -name Models ! -name "Speech Models" -exec rm -rf {} +
   echo "  index and history removed"
 fi
 
-if ask "Also remove the downloaded models (search ~865 MB, speech ~500 MB; they download again)?" n; then
+if ask "Also remove the downloaded models (search ~865 MB, speech ~500 MB, Hinglish ~590 MB; they download again)?" n; then
   rm -rf "$SUPPORT/Models" && echo "  search model removed"
-  [[ -d "$FLUID" ]] && rm -rf "$FLUID" && echo "  speech model removed"
+  [[ -d "$FLUID" ]] && rm -rf "$FLUID" && echo "  speech models (English, other languages) removed"
+  [[ -d "$SUPPORT/Speech Models" ]] && rm -rf "$SUPPORT/Speech Models" && echo "  Hinglish model removed"
+fi
+
+RECORDINGS="$HOME/Documents/Murmur Recordings"
+if [[ -d "$RECORDINGS" ]] && ask "Remove the kept recordings in Documents/Murmur Recordings?" n; then
+  rm -rf "$RECORDINGS" && echo "  recordings removed"
 fi
 
 # Caches and saved window positions.
