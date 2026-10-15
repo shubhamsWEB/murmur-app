@@ -66,6 +66,10 @@ public enum IntentClassifier {
     /// Things on the Mac a Hinglish instruction can be about.
     static let macThings = #"\b(pdf|file|files|folder|document|doc|docs|photo|photos|tasveer|video|videos|song|gaana|gana|gaane|music|app|chrome|safari|youtube|spotify|whatsapp|slack|volume|awaaz|awaz|aawaz|brightness|wifi|wi-fi|bluetooth|screen|screenshot|calendar|mail|email|notes|finder|downloads|desktop|browser|tab|settings?|mac|laptop|computer|system|resume|cv|card|aadhaar|aadhar|passport|statement|invoice|bill|receipt|ticket|certificate)\b"#
 
+    /// More ways to ask for a message: "message Mama hi", "send Mama a message", "send hi to Roma on WhatsApp", and in
+    /// Hinglish "Mama ko message karo ki…", "Roma ko WhatsApp pe hi bhejo", "WhatsApp pe Rahul ko bolo…".
+    static let messageRequest = #"^(send|text|message|msg|whatsapp|ping|dm) (?!(me|us|you|him|her|them|it|this|that)\b)[a-z]+( [a-z]+)? (a |an )?(quick |short )?(message|msg|text|whatsapp|note)\b|^(send|text|message|msg|whatsapp|ping|dm) .+\b(on|via|over|in|through) (whatsapp|slack|telegram|signal|imessage|messages|teams|discord)\b|\b[a-z]+ (ko|se) .*\b(message|msg|whatsapp|text|sms|mail|email)\b.*\b(karo|kar do|kar de|kardo|kar dijiye|bhejo|bhej do|bhej de|bhejdo|bhej dijiye|bolo|bol do|keh do|kaho|likh do|likho)\b|\b(whatsapp|message|msg|slack|telegram) (pe|par|me|mein) .*\b[a-z]+ ko\b.*\b(bhejo|bhej do|bhej de|bolo|bol do|keh do|kaho|likh do|likho|karo|kar do)\b|\b[a-z]+ ko .*\b(bhejo|bhej do|bhej de|bhejdo|bhej dijiye)\b.*\b(whatsapp|message|msg)\b"#
+
     /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.
     static let aboutTheMac = #"\b(on|for|of|in) (my|this|the) (mac|macbook|laptop|computer|system|screen|desktop)\b"#
 
@@ -102,7 +106,8 @@ public enum IntentClassifier {
         if CommandMemory.isFollowUp(utterance) || CommandMemory.forgetRequest(utterance) != nil {
             return Decision(intent: .command, reason: "follows on from the last command")
         }
-        if cleaned.range(of: messageToSend, options: .regularExpression) != nil {
+        if cleaned.range(of: messageToSend, options: .regularExpression) != nil
+            || cleaned.range(of: messageRequest, options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "a message to send")
         }
         if let quick = QuickCommands.parseAll(utterance), cleaned.split(separator: " ").count <= 14 {

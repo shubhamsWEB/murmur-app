@@ -491,6 +491,10 @@ public final class DictationController: ObservableObject {
                     : IntentClassifier.Decision(intent: forcedCommand ? .command : .dictation,
                                                 reason: forcedCommand ? "⌃ held" : "detection off")
                 log("intent: \(decision.intent.rawValue) (\(decision.reason))")
+                if decision.intent == .dictation,
+                   text.range(of: #"(?i)\b(whatsapp|message|msg|bhej|send|text|slack|mail)\b"#, options: .regularExpression) != nil {
+                    log("intent: typed, though it mentions a message: \"\(text.prefix(80))\"")
+                }
                 if RouterDiagnostics.isKeyProblem(decision.reason), !warnedAboutKey {
                     // Say it once per launch; the words are still typed below.
                     warnedAboutKey = true

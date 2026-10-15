@@ -108,6 +108,8 @@ public final class CommandAgent {
     private var openedPage = false
     /// The user said yes to sending a message in this command: Return in a chat app doesn't ask again.
     private var messageApproved = false
+    /// Messages already sent in this command (what send_message sent): the same words aren't sent again.
+    private var sentMessages: [String] = []
     /// Where you were typing when you spoke: the app, the field, and in a browser the tab. A command that goes off to
     /// another page or app to copy something comes back here to paste it.
     private struct InputTarget {
@@ -238,6 +240,7 @@ public final class CommandAgent {
         openedIn = nil
         openedPage = false
         messageApproved = false
+        sentMessages = []
         did = []
         shown.answer = nil
         let app = ScreenControl.workingApp()?.localizedName ?? frontApp
@@ -1149,6 +1152,12 @@ public final class CommandAgent {
             return Outcome(result: await ScreenControl.click(id))
         case "type_text":
             let words = text("text")
+            // Already sent by send_message: typing it again would send it twice.
+            if text("submit") == "true",
+               sentMessages.contains(where: { $0.trimmingCharacters(in: .whitespaces) == words.trimmingCharacters(in: .whitespaces) }) {
+                host.log("command: not sending the same message twice")
+                return Outcome(result: "That message was already sent. Don't send it again; call done.")
+            }
             if let id = args["into"]?.number, id > 0 {
                 _ = await ScreenControl.focus(Int(id))
             }
@@ -1249,7 +1258,10 @@ public final class CommandAgent {
             }
             messageApproved = true
             host.progress("Sending to \(to)…")
-            return Outcome(result: await Messaging.send(body, to: to, in: app, paste: host.pasteHere))
+            let result = await Messaging.send(body, to: to, in: app, paste: host.pasteHere)
+            host.log("command: send_message → \(result.prefix(160))")
+            if result.hasPrefix("Sent") { sentMessages.append(body) }
+            return Outcome(result: result)
         case "reply":
             host.showAnswer(text("text"))
             return Outcome(result: "Shown.", finished: true, shown: true)

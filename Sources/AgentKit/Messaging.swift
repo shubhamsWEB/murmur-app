@@ -27,8 +27,16 @@ enum Messaging {
                     try? await Task.sleep(nanoseconds: 300_000_000)
                     _ = ScreenControl.press("return")
                     try? await Task.sleep(nanoseconds: 800_000_000)
-                    return "Opened the WhatsApp chat with \(person.name) with the message in it and pressed Return to send "
-                        + "it. read_screen to check it was sent."
+                    // Still in the box: the Return didn't take (the chat wasn't focused yet). Once more.
+                    if stillTyped(text) {
+                        _ = ScreenControl.press("return")
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                    }
+                    if stillTyped(text) {
+                        return "The message is typed in the WhatsApp chat with \(person.name) but didn't send. press_keys "
+                            + "return once to send it (the user already said yes). Don't type it again."
+                    }
+                    return "Sent it on WhatsApp to \(person.name). Don't type or send it again."
                 }
             }
             _ = await MacActions.openAppReturningApp("WhatsApp")
@@ -109,6 +117,19 @@ enum Messaging {
                      "FR": "33", "NL": "31", "IE": "353", "NZ": "64"]
         if digits.count == 10, let code = codes[Locale.current.region?.identifier ?? ""] { return code + digits }
         return digits.count >= 8 ? digits : nil
+    }
+
+    /// Whether the message is still in the focused text box (so it wasn't sent).
+    static func stillTyped(_ text: String) -> Bool {
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString,
+                                            &focused) == .success, let focused,
+              CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focused as! AXUIElement, kAXValueAttribute as CFString, &value) == .success,
+              let typed = value as? String else { return false }
+        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !wanted.isEmpty && typed.trimmingCharacters(in: .whitespacesAndNewlines).contains(wanted)
     }
 
     private static func quoted(_ text: String) -> String {
