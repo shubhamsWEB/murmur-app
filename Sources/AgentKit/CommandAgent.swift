@@ -1,5 +1,23 @@
 import AppKit
 
+/// A file the search found for a description, best first: what the model sees to pick the one the user means.
+public struct FileCandidate: Sendable {
+    public let path: String
+    public let kind: String
+    public let modified: Date
+    public let excerpt: String?
+    /// The search's own score, for ordering and for telling a clear winner from a close call.
+    public let score: Double
+
+    public init(path: String, kind: String, modified: Date, excerpt: String?, score: Double) {
+        self.path = path
+        self.kind = kind
+        self.modified = modified
+        self.excerpt = excerpt
+        self.score = score
+    }
+}
+
 /// What the command agent needs from the app: asking you, showing answers, pasting, searching your files.
 @MainActor
 public struct CommandHost {
@@ -25,6 +43,8 @@ public struct CommandHost {
     public var log: (String) -> Void
     /// Open the settings where a model for commands is chosen (Commands & AI).
     public var openModelSettings: () -> Void = {}
+    /// The search's best matches for a description of a file (the same search the Search page runs), best first.
+    public var findFiles: (String) async -> [FileCandidate] = { _ in [] }
 
     public init(confirm: @escaping (String, String) async -> Bool, showAnswer: @escaping (String) -> Void,
                 insert: @escaping (String) -> Void, searchFiles: @escaping (String) -> Void,
@@ -81,6 +101,10 @@ public final class CommandAgent {
     private var prefs = CommandMemory.Preferences()
     /// What this command did, for memory: each tool call with its main arguments and result.
     private var did: [CommandMemory.Action] = []
+    /// The model is working this command (not the quick path).
+    private var routing = false
+    /// Files offered to the model to pick from in this command: opening one of them is its choice, not a stale memory.
+    private var offered: Set<String> = []
     /// What the user said for the command running now.
     private var utterance = ""
     /// The answer shown for this command, if any (for memory).
@@ -174,6 +198,8 @@ public final class CommandAgent {
         // Where the command happens, for the log: the app and the window you're looking at.
         host.log("command: in \(ScreenControl.workingApp()?.localizedName ?? "?"), window \"\(ScreenControl.frontWindowTitle() ?? "")\"")
         self.utterance = utterance
+        routing = false
+        offered = []
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -224,6 +250,25 @@ public final class CommandAgent {
         }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
+    }
+
+    /// The matches, for the model to pick from: name, kind, folder, date, a line from inside, and the path to open.
+    nonisolated static func describe(_ files: [FileCandidate], for query: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var lines = ["Files matching “\(query)”, best match first. Open the one the user asked for: open_file with its exact "
+                     + "path. If none of them is it, reply saying so (or search_files to show them all)."]
+        for (index, file) in files.enumerated() {
+            let url = URL(fileURLWithPath: file.path)
+            let folder = url.deletingLastPathComponent().path.replacingOccurrences(of: home, with: "~")
+            var line = "\(index + 1). \(url.lastPathComponent) · \(file.kind) · in \(folder) · modified "
+                + file.modified.formatted(date: .abbreviated, time: .omitted)
+            if let excerpt = file.excerpt?.replacingOccurrences(of: "«", with: "").replacingOccurrences(of: "»", with: ""),
+               !excerpt.isEmpty {
+                line += " · “\(excerpt.prefix(140))”"
+            }
+            lines.append(line + "\n   path: \(file.path)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// What to say when a command needs a model and there's none: Ollama isn't on this Mac and no cloud key worked.
@@ -427,6 +472,7 @@ public final class CommandAgent {
     }
 
     private func route(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool) async {
+        routing = true
         let now = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year().hour().minute())
         var context = "Now: \(now) (\(TimeZone.current.identifier))."
         context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
@@ -714,26 +760,40 @@ public final class CommandAgent {
             // The file from an earlier command (memory lists it as in play) only when the user points back at it
             // ("open it again", "that PDF", its name). "Open the PDF" or "mujhe PDF kholkar do" is a new request: the
             // model used to hand back the remembered file, so every PDF request opened the same one.
-            if let earlier = Self.earlierFile(text("query"), recent: CommandMemory.recentFiles()),
+            var query = text("query")
+            var afresh = false
+            let picked = offered.contains((query as NSString).expandingTildeInPath)
+            if !picked, let earlier = Self.earlierFile(query, recent: CommandMemory.recentFiles()),
                !Self.pointsBack(utterance, to: earlier) {
-                let words = Self.fileWords(utterance)
-                host.log("command: \(earlier) is the file from before, but this asks for one afresh: finding “\(words)”")
-                host.progress("Finding “\(words)”…")
-                return Outcome(result: await host.openFile(words), finished: true)
+                query = Self.fileWords(utterance)
+                afresh = true
+                host.log("command: \(earlier) is the file from before, but this asks for one afresh: finding “\(query)”")
             }
-            // A file seen on the screen or selected in Finder: open that one (by its path, or its exact name), not a
-            // search's best guess. play: start a video or song.
-            var path = (text("query") as NSString).expandingTildeInPath
-            if !path.hasPrefix("/"), let exact = await MacActions.findByName(text("query")) { path = exact }
-            if path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) {
-                if text("play") == "true", MacActions.isPlayable(path) {
-                    return Outcome(result: await MacActions.play(file: path))
+            // A file seen on the screen or selected in Finder, or one the model picked from the matches: open that one
+            // (by its path, or its exact name). play: start a video or song.
+            if !afresh {
+                var path = (query as NSString).expandingTildeInPath
+                if !path.hasPrefix("/"), let exact = await MacActions.findByName(query) { path = exact }
+                if path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) {
+                    if text("play") == "true", MacActions.isPlayable(path) {
+                        return Outcome(result: await MacActions.play(file: path))
+                    }
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                    return Outcome(result: "Opened \(URL(fileURLWithPath: path).lastPathComponent).")
                 }
-                NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                return Outcome(result: "Opened \(URL(fileURLWithPath: path).lastPathComponent).")
             }
-            host.progress("Finding “\(text("query"))”…")
-            return Outcome(result: await host.openFile(text("query")), finished: true)
+            // A description: the model sees the search's matches and picks, with everything it knows (what was
+            // said, memory, the screen). A clear winner opens at once; so does the quick path's top match.
+            host.progress("Finding “\(query)”…")
+            let found = routing ? await host.findFiles(query) : []
+            let clear = found.count == 1 || (found.count > 1 && found[0].score >= found[1].score * 1.4)
+            guard found.count > 1, !clear else {
+                return Outcome(result: await host.openFile(query), finished: true)
+            }
+            let matches = Array(found.prefix(5))
+            offered = Set(matches.map(\.path))
+            host.log("command: \(matches.count) close matches for “\(query)”; the model picks")
+            return Outcome(result: Self.describe(matches, for: query))
         case "search_files":
             // "my resume" → "resume": the possessive only adds noise to the search.
             var query = text("query").replacingOccurrences(of: #"^(my|the|all|some) "#, with: "",
@@ -1363,8 +1423,8 @@ public final class CommandAgent {
             tool("open_folder", "Open a standard folder in Finder",
                  ["name": ("string", "downloads, documents, desktop, pictures, music, movies or home")]),
             tool("open_file", "Open the user's own file: by its full path or exact name when you know it (Finder's "
-                 + "selection, a name on the screen), else the best match for a description with the user's own words, "
-                 + "e.g. \"lease 2025 pdf\"",
+                 + "selection, a name on the screen, a match listed earlier), else a description with the user's own "
+                 + "words, e.g. \"lease 2025 pdf\": a clear best match opens, otherwise you get the matches to pick from",
                  ["query": ("string", "the file's full path, its exact name, or the user's description"),
                   "play": ("string", "true to start playing a video or song")], required: ["query"]),
             tool("search_files", "Search the user's files by meaning and show the results",

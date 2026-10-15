@@ -65,6 +65,8 @@ public final class DictationController: ObservableObject {
     public var onOpenFile: ((String) async -> String)?
     /// Opens the settings for the commands' model (set by the app).
     public var onOpenModelSettings: (() -> Void)?
+    /// The search's best matches for a description of a file (set by the app).
+    public var onFindFiles: ((String) async -> [FileCandidate])?
 
     /// A press shorter than this is a tap, not a hold (taps start hands-free dictation).
     private let tapLength: TimeInterval = 0.3
@@ -700,6 +702,7 @@ extension DictationController {
             }
         )
         host.openModelSettings = { [weak self] in self?.onOpenModelSettings?() }
+        host.findFiles = { [weak self] query in await self?.onFindFiles?(query) ?? [] }
         return host
     }
 

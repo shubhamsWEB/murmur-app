@@ -84,6 +84,7 @@ final class AppController {
         dictation.onSearchFiles = { [weak self] query in self?.showSearchWindow(query: query) }
         dictation.onOpenFile = { [weak self] query in await self?.openBestFile(query) ?? "" }
         dictation.onOpenModelSettings = { [weak self] in self?.showHome(.commands) }
+        dictation.onFindFiles = { [weak self] query in await self?.fileCandidates(query) ?? [] }
         statusMenu.dictationItems = { [weak self] in self?.dictation.compactMenuItems() ?? [] }
         statusMenu.dictation = dictation
         statusMenu.onCommands = { [weak self] in self?.showHome(.commands) }
@@ -299,10 +300,7 @@ final class AppController {
             showSearchWindow(query: spoken)
             return "Choose folders to search first."
         }
-        // "my Aadhaar card": the user's own documents usually carry their name.
-        let wanted = SpokenFile(spoken, owner: CommandAgent.ownerForPersonalFile(spoken))
-        let vector = await engine.embedQuery(wanted.text)
-        let hits = await engine.search(wanted.text, vector: vector, prefixLast: false, kinds: wanted.kinds, limit: 30)
+        let (wanted, hits) = await searchFile(spoken)
         let rows = ResultSet(hits, query: wanted.text).ranked
         let kindNames = wanted.kinds.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "any"
         log("open file: \"\(spoken)\" → \"\(wanted.text)\" in \(kindNames): \(rows.count) strong, top \(rows.first?.name ?? "none")")
@@ -314,6 +312,30 @@ final class AppController {
         }
         showSearchWindow(query: wanted.text)
         return "Nothing matched “\(wanted.text)”."
+    }
+
+    /// The one search behind opening a file by description: what `openBestFile` opens and what the command model
+    /// picks from are the same results, in the same order.
+    private func searchFile(_ spoken: String) async -> (SpokenFile, [SearchHit]) {
+        // "my Aadhaar card": the user's own documents usually carry their name.
+        let wanted = SpokenFile(spoken, owner: CommandAgent.ownerForPersonalFile(spoken))
+        let vector = await engine.embedQuery(wanted.text)
+        let hits = await engine.search(wanted.text, vector: vector, prefixLast: false, kinds: wanted.kinds, limit: 30)
+        return (wanted, hits)
+    }
+
+    /// The strong matches for a description, best first, for the command model to pick from.
+    func fileCandidates(_ spoken: String) async -> [FileCandidate] {
+        guard model.hasFolders else { return [] }
+        let (wanted, hits) = await searchFile(spoken)
+        let strong = hits.prefix(Searcher.strongCount(hits))
+        var seen = Set<String>()
+        let files = strong.filter { seen.insert($0.path).inserted }.prefix(8)
+        log("open file: \"\(spoken)\" → \"\(wanted.text)\": \(files.count) for the model, top \(files.first.map { ($0.path as NSString).lastPathComponent } ?? "none")")
+        return files.map {
+            FileCandidate(path: $0.path, kind: $0.kind.rawValue, modified: Date(timeIntervalSince1970: $0.modified),
+                          excerpt: $0.excerpt, score: $0.score)
+        }
     }
 
     func showHome(_ section: HomeSection? = nil) {
