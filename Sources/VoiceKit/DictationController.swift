@@ -78,6 +78,8 @@ public final class DictationController: ObservableObject {
     private let minimumSamples = 16_000 / 4
 
     private static let keyDefault = "dictationKey"
+    private static let typingModifierDefault = "dictation.typingModifier"
+    private static let commandModifierDefault = "dictation.commandModifier"
     private static let modelDefault = "speechModel"
     private static let whisperDefault = "whisperMode"
     private static let keepDefault = "keepRecordings"
@@ -151,6 +153,46 @@ public final class DictationController: ObservableObject {
     }
 
     public var key: DictationKeyMonitor.Key { monitor.key }
+    /// Held with the talk key: always typed, never a command (⇧ unless you choose another).
+    @Published public private(set) var typingModifier: DictationKeyMonitor.Modifier =
+        UserDefaults.standard.string(forKey: "dictation.typingModifier").flatMap(DictationKeyMonitor.Modifier.init) ?? .shift
+    /// Held with the talk key: always a command, never typed (⌃ unless you choose another).
+    @Published public private(set) var commandModifier: DictationKeyMonitor.Modifier =
+        UserDefaults.standard.string(forKey: "dictation.commandModifier").flatMap(DictationKeyMonitor.Modifier.init) ?? .control
+
+    /// The keys that can choose typing or a command with the current talk key (not the one the talk key itself is).
+    public var modifierChoices: [DictationKeyMonitor.Modifier] {
+        DictationKeyMonitor.Modifier.allCases.filter { $0 != key.ownModifier }
+    }
+
+    /// Choosing the other one's key swaps them, so the two always differ.
+    public func setTypingModifier(_ modifier: DictationKeyMonitor.Modifier) {
+        if modifier == commandModifier { commandModifier = typingModifier }
+        typingModifier = modifier
+        saveModifiers()
+    }
+
+    public func setCommandModifier(_ modifier: DictationKeyMonitor.Modifier) {
+        if modifier == typingModifier { typingModifier = commandModifier }
+        commandModifier = modifier
+        saveModifiers()
+    }
+
+    private func saveModifiers() {
+        UserDefaults.standard.set(typingModifier.rawValue, forKey: Self.typingModifierDefault)
+        UserDefaults.standard.set(commandModifier.rawValue, forKey: Self.commandModifierDefault)
+        log("dictation: \(key.cap)+\(typingModifier.symbol) types only, \(key.cap)+\(commandModifier.symbol) runs a command")
+    }
+
+    /// A talk key that is itself one of the two (Right ⌥ with ⌥ for commands): that one moves to a free key.
+    private func keepModifiersFree() {
+        let free = modifierChoices.filter { $0 != typingModifier && $0 != commandModifier }
+        if typingModifier == key.ownModifier, let other = free.first { typingModifier = other; saveModifiers() }
+        if commandModifier == key.ownModifier, let other = free.first(where: { $0 != typingModifier }) {
+            commandModifier = other
+            saveModifiers()
+        }
+    }
     /// The speech model in use.
     public var speechModel: SpeechModel { transcriber.model }
     /// Whether the dictation key is being watched (needs Accessibility).
@@ -188,6 +230,8 @@ public final class DictationController: ObservableObject {
         monitor.key = key
         startMonitor(prompt: false)
         log("dictation: key is now \(key.display)")
+        keepModifiersFree()
+        objectWillChange.send()
     }
 
     public func setModel(_ model: SpeechModel) {
@@ -286,10 +330,10 @@ public final class DictationController: ObservableObject {
             detectCommands.toggle()
             log("intent: automatic detection \(detectCommands ? "on" : "off")")
         })
-        let hint = NSMenuItem(title: "Fn+⌃ always runs a command", action: nil, keyEquivalent: "")
+        let hint = NSMenuItem(title: "\(key.cap)+\(commandModifier.symbol) always runs a command", action: nil, keyEquivalent: "")
         hint.isEnabled = false
         assistants.addItem(hint)
-        let typing = NSMenuItem(title: "Fn+⇧ always types, never a command", action: nil, keyEquivalent: "")
+        let typing = NSMenuItem(title: "\(key.cap)+\(typingModifier.symbol) always types, never a command", action: nil, keyEquivalent: "")
         typing.isEnabled = false
         assistants.addItem(typing)
         assistants.addItem(.separator())
@@ -362,8 +406,8 @@ public final class DictationController: ObservableObject {
         case .idle:
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
             pressedAt = Date()
-            commandRequested = NSEvent.modifierFlags.contains(.control)
-            typingRequested = !commandRequested && NSEvent.modifierFlags.contains(.shift)
+            commandRequested = NSEvent.modifierFlags.contains(commandModifier.appKitFlag)
+            typingRequested = !commandRequested && NSEvent.modifierFlags.contains(typingModifier.appKitFlag)
             previousApp = NSWorkspace.shared.frontmostApplication
             // The microphone first: asking the app for its focus and selection can take a moment (Chrome, Electron
             // apps), and a quick first word was lost while it did.
@@ -391,10 +435,10 @@ public final class DictationController: ObservableObject {
     /// ⌃ pressed while the dictation key is held turns this recording into a command; ⇧ makes it typing only.
     private func modifiersChanged(_ flags: CGEventFlags) {
         guard case .listening(let handsFree) = phase, !commandRequested, !typingRequested else { return }
-        if flags.contains(.maskControl) {
+        if flags.contains(commandModifier.eventFlag) {
             commandRequested = true
             hud.show(.command)
-        } else if flags.contains(.maskShift) {
+        } else if flags.contains(typingModifier.eventFlag) {
             typingRequested = true
             hud.show(.typingOnly(handsFree: handsFree))
         }
@@ -499,13 +543,13 @@ public final class DictationController: ObservableObject {
                     if let selection { log("selection: \(selection.count) characters, copied with ⌘C") }
                 }
                 let decision = typingOnly
-                    ? IntentClassifier.Decision(intent: .dictation, reason: "⇧ held: typing only")
+                    ? IntentClassifier.Decision(intent: .dictation, reason: "typing key held")
                     : detect
                     ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
                                                     focus: focus, frontApp: frontApp,
                                                     hasSelection: selection != nil, router: agent.currentRouter())
                     : IntentClassifier.Decision(intent: forcedCommand ? .command : .dictation,
-                                                reason: forcedCommand ? "⌃ held" : "detection off")
+                                                reason: forcedCommand ? "command key held" : "detection off")
                 log("intent: \(decision.intent.rawValue) (\(decision.reason))")
                 if decision.intent == .dictation,
                    text.range(of: #"(?i)\b(whatsapp|message|msg|bhej|send|text|slack|mail)\b"#, options: .regularExpression) != nil {

@@ -877,7 +877,7 @@ extension VoiceStep {
     /// Continue never waits: the model keeps downloading and you can try it later.
     @ViewBuilder
     func tryIt(heard: DictationHistory.Item?, mic: Bool, dictation: DictationController) -> some View {
-        let key = dictation.key == .fn ? "fn" : "Right ⌥"
+        let key = dictation.key.short
         if let heard {
             Label("Heard: “\(heard.text)”", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(Theme.good)
@@ -976,7 +976,7 @@ private struct ShortcutStep: View {
     @ViewBuilder
     private var content: some View {
         let dictation = state.app.dictation
-        let talkKey = dictation.key == .fn ? "fn" : "Right ⌥"
+        let talkKey = dictation.key.short
         let heard = history.items.first { $0.date > appeared }
         VStack(alignment: .leading, spacing: 0) {
             StepTitle(title: "Your shortcuts",
@@ -985,8 +985,8 @@ private struct ShortcutStep: View {
             VStack(alignment: .leading, spacing: 10) {
                 ShortcutCard(number: "1", title: "Talk", detail: "Hold \(talkKey) and speak; let go and it's typed, or done "
                                  + "if you asked for something. Double-tap for hands-free.",
-                             extras: [([talkKey, "⇧"], "Only type: always typed, never a command"),
-                                      ([talkKey, "⌃"], "Only a command: always done, never typed")],
+                             extras: [([talkKey, dictation.typingModifier.symbol], "Only type: always typed, never a command"),
+                                      ([talkKey, dictation.commandModifier.symbol], "Only a command: always done, never typed")],
                              tested: heard != nil,
                              test: heard.map { "Heard: “\($0.text)”" } ?? talkTest(dictation, key: talkKey)) {
                     HStack(spacing: 4) {

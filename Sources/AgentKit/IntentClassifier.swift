@@ -91,7 +91,7 @@ public enum IntentClassifier {
 
     public static func decide(_ utterance: String, forcedCommand: Bool, focus: Focus, frontApp: String?,
                               hasSelection: Bool, router: Router) async -> Decision {
-        if forcedCommand { return Decision(intent: .command, reason: "⌃ held") }
+        if forcedCommand { return Decision(intent: .command, reason: "command key held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
         // Text selected and "summarise this", "make it more formal", "translate this to Hindi".

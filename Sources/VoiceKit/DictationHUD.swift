@@ -164,9 +164,9 @@ private struct HUDView: View {
 
     private var label: String {
         switch state.mode {
-        case .listening(let handsFree): return handsFree ? "Listening · tap Fn to finish" : "Listening"
+        case .listening(let handsFree): return handsFree ? "Listening · tap the key to finish" : "Listening"
         case .command: return "Command · let go when done"
-        case .typingOnly(let handsFree): return handsFree ? "Typing only · tap Fn to finish" : "Typing only"
+        case .typingOnly(let handsFree): return handsFree ? "Typing only · tap the key to finish" : "Typing only"
         case .working(let text): return text
         case .transcribing: return "Writing it down"
         case .preparing: return "Getting the speech model ready"

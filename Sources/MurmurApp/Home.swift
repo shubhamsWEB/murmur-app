@@ -192,7 +192,7 @@ struct Readiness {
 
     @MainActor
     private static func state(_ dictation: DictationController) -> (String, String, Bool, Bool) {
-        let key = dictation.key == .fn ? "fn" : "Right ⌥"
+        let key = dictation.key.short
         let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         let typing = dictation.canPaste && dictation.isListeningForKey
         switch dictation.speechModelState {
@@ -354,7 +354,7 @@ private struct HomePage: View {
 
     private var micOK: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
     private var typingOK: Bool { dictation.canPaste && dictation.isListeningForKey }
-    private var keyLabel: String { dictation.key == .fn ? "fn" : "⌥" }
+    private var keyLabel: String { dictation.key.cap }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -409,10 +409,10 @@ private struct HomePage: View {
                             detail: "Talk, let go, it's typed where your cursor is.")
                     Gesture(keys: [keyLabel, keyLabel], title: "Double-tap for hands-free",
                             detail: "Tap \(keyLabel) again to finish. Esc cancels.")
-                    Gesture(keys: [keyLabel, "⌃"], plus: true, title: "Force a command",
-                            detail: "Murmur usually tells by itself. Add ⌃ when it guesses wrong.")
-                    Gesture(keys: [keyLabel, "⇧"], plus: true, title: "Typing only",
-                            detail: "Add ⇧ and it's always typed, never run as a command.")
+                    Gesture(keys: [keyLabel, dictation.commandModifier.symbol], plus: true, title: "Only a command",
+                            detail: "Murmur usually tells by itself. Add \(dictation.commandModifier.symbol) when it guesses wrong.")
+                    Gesture(keys: [keyLabel, dictation.typingModifier.symbol], plus: true, title: "Only type",
+                            detail: "Add \(dictation.typingModifier.symbol) and it's always typed, never run as a command.")
                 }
             }
             .padding(24)
@@ -775,28 +775,43 @@ private struct SettingsPage: View {
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
                 RowDivider()
-                SettingRow(title: "Hold to talk",
-                           detail: "If fn opens the emoji picker, set Keyboard → “Press 🌐 key to” → Do Nothing, or use Right ⌥.") {
-                    Picker("Talk key", selection: state.bind(get: { dictation.key }, set: { dictation.setKey($0) })) {
-                        ForEach(DictationKeyMonitor.Key.allCases, id: \.self) { Text($0.display).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 220)
-                }
-                RowDivider()
-                SettingRow(title: "Hands-free", detail: "Double-tap to talk as long as you like; tap again to finish. Esc cancels.") {
-                    HStack(spacing: 4) { KeyCap(dictation.key == .fn ? "fn" : "⌥"); KeyCap(dictation.key == .fn ? "fn" : "⌥") }
-                }
-                RowDivider()
                 SettingRow(title: "Quiet voice", detail: "Boosts soft speech, for open offices and late nights. Still on this Mac.") {
                     MurmurSwitch(label: "Quiet voice",
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
             }
+            SettingsSection("Shortcuts") {
+                SettingRow(title: "Talk",
+                           detail: "Hold it and speak: Murmur works out whether it's typed or done. Double-tap for hands-free; "
+                               + "tap again to finish, Esc cancels. If fn opens the emoji picker, set Keyboard → “Press 🌐 key "
+                               + "to” → Do Nothing, or pick another key.") {
+                    Picker("Talk key", selection: state.bind(get: { dictation.key }, set: { dictation.setKey($0) })) {
+                        ForEach(DictationKeyMonitor.Key.allCases, id: \.self) { Text($0.display).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 290)
+                }
+                RowDivider()
+                SettingRow(title: "Only type",
+                           detail: "Hold it with \(dictation.key.short): always typed where your cursor is, never a command.") {
+                    modifierPicker("Only type", get: { dictation.typingModifier }, set: { dictation.setTypingModifier($0) })
+                }
+                RowDivider()
+                SettingRow(title: "Only a command",
+                           detail: "Hold it with \(dictation.key.short): always carried out, never typed.") {
+                    modifierPicker("Only a command", get: { dictation.commandModifier }, set: { dictation.setCommandModifier($0) })
+                }
+                RowDivider()
+                SettingRow(title: "Search files",
+                           detail: "Opens the search panel from any app. Click the keys and press new ones to change it.") {
+                    ShortcutRecorder(combo: app.model.hotkey, apply: { app.setHotkey($0) },
+                                     listening: { app.hotkeyRecording($0) }, capSize: 13)
+                }
+            }
             SettingsSection("Commands") {
                 SettingRow(title: "Tell commands from dictation",
-                           detail: "“Open Slack” or “PDF kholo” runs; “see you at 5” is typed. Off: only the key with ⌃ runs commands. The key with ⇧ always types.") {
+                           detail: "“Open Slack” or “PDF kholo” runs; “see you at 5” is typed. Off: only \(dictation.key.short) with \(dictation.commandModifier.symbol) runs commands.") {
                     MurmurSwitch(label: "Tell commands from dictation",
                                  isOn: state.bind(get: { dictation.detectCommands }, set: { dictation.detectCommands = $0 }))
                 }
@@ -903,6 +918,20 @@ private struct SettingsPage: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
             }
+        }
+    }
+
+    /// "fn + [⇧ Shift ▾]": which key, held with the talk key, chooses typing or a command.
+    private func modifierPicker(_ label: String, get: @escaping () -> DictationKeyMonitor.Modifier,
+                                set: @escaping (DictationKeyMonitor.Modifier) -> Void) -> some View {
+        HStack(spacing: 6) {
+            KeyCap(dictation.key.cap)
+            Text("+").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+            Picker(label, selection: state.bind(get: get, set: set)) {
+                ForEach(dictation.modifierChoices, id: \.self) { Text("\($0.symbol) \($0.name)").tag($0) }
+            }
+            .labelsHidden()
+            .frame(width: 130)
         }
     }
 

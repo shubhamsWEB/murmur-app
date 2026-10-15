@@ -8,11 +8,81 @@ public final class DictationKeyMonitor {
     public enum Key: String, CaseIterable {
         case fn
         case rightOption
+        case rightCommand
 
         public var display: String {
             switch self {
             case .fn: return "Fn (🌐)"
             case .rightOption: return "Right ⌥"
+            case .rightCommand: return "Right ⌘"
+            }
+        }
+
+        /// In a sentence: "hold fn", "hold Right ⌥".
+        public var short: String {
+            switch self {
+            case .fn: return "fn"
+            case .rightOption: return "Right ⌥"
+            case .rightCommand: return "Right ⌘"
+            }
+        }
+
+        /// On a key cap: "fn", "⌥", "⌘".
+        public var cap: String {
+            switch self {
+            case .fn: return "fn"
+            case .rightOption: return "⌥"
+            case .rightCommand: return "⌘"
+            }
+        }
+
+        /// The modifier the key itself sets, which can't also choose typing or a command.
+        public var ownModifier: Modifier? {
+            switch self {
+            case .fn: return nil
+            case .rightOption: return .option
+            case .rightCommand: return .command
+            }
+        }
+    }
+
+    /// A key held with the talk key to decide what it's for: typing only, or a command.
+    public enum Modifier: String, CaseIterable {
+        case shift, control, option, command
+
+        public var symbol: String {
+            switch self {
+            case .shift: return "⇧"
+            case .control: return "⌃"
+            case .option: return "⌥"
+            case .command: return "⌘"
+            }
+        }
+
+        public var name: String {
+            switch self {
+            case .shift: return "Shift"
+            case .control: return "Control"
+            case .option: return "Option"
+            case .command: return "Command"
+            }
+        }
+
+        public var eventFlag: CGEventFlags {
+            switch self {
+            case .shift: return .maskShift
+            case .control: return .maskControl
+            case .option: return .maskAlternate
+            case .command: return .maskCommand
+            }
+        }
+
+        public var appKitFlag: NSEvent.ModifierFlags {
+            switch self {
+            case .shift: return .shift
+            case .control: return .control
+            case .option: return .option
+            case .command: return .command
             }
         }
     }
@@ -90,6 +160,9 @@ public final class DictationKeyMonitor {
             case .rightOption:
                 guard code == kVK_RightOption else { onModifiers?(event.flags); return }
                 pressed = event.flags.contains(.maskAlternate)
+            case .rightCommand:
+                guard code == kVK_RightCommand else { onModifiers?(event.flags); return }
+                pressed = event.flags.contains(.maskCommand)
             }
             if pressed, !isDown {
                 isDown = true

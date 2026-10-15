@@ -221,7 +221,7 @@ struct MenuStatusView: View {
                         .background(Circle().fill(ready.dot.opacity(0.18)))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(ready.title).font(.system(size: 13, weight: .semibold))
-                        Text(ready.problem ? ready.detail : "\(ready.detail) · add ⌃ for a command")
+                        Text(ready.problem ? ready.detail : "\(ready.detail) · add \(dictation.commandModifier.symbol) for a command")
                             .font(.system(size: 11.5))
                             .foregroundStyle(Theme.ink2)
                             .lineLimit(1)
