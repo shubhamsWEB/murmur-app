@@ -43,11 +43,24 @@ public enum BrowserControl {
     /// menu, then checks it took. Safari asks for a password there, so it's left to the user.
     public static func enablePageAccess(in browser: Browser) async -> Bool {
         guard !browser.safari,
-              let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first,
-              await ScreenControl.turnOnMenuItem(titled: "Allow JavaScript from Apple Events", in: app) else { return false }
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        return await probe(browser) == .ok
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first else {
+            return false
+        }
+        guard await ScreenControl.turnOnMenuItem(titled: "Allow JavaScript from Apple Events", in: app) else {
+            onLog?("browser: couldn't find or press View → Developer → Allow JavaScript from Apple Events in \(browser.name)")
+            return false
+        }
+        // The switch can take a moment to apply: check a few times before giving up.
+        for wait in [500, 1000, 1500] as [UInt64] {
+            try? await Task.sleep(nanoseconds: wait * 1_000_000)
+            let access = await probe(browser)
+            if access == .ok { return true }
+            onLog?("browser: pressed the menu item in \(browser.name); pages still say \(access)")
+        }
+        return false
     }
+    /// Where these notes go (the app's log).
+    public static var onLog: ((String) -> Void)?
 
     /// The one-time note on how to allow page access, when Murmur couldn't turn it on itself.
     public static func explainOnce(_ access: PageAccess, _ browser: Browser) {

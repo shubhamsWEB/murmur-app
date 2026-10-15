@@ -1089,7 +1089,13 @@ public final class CommandAgent {
                 host.log("command: read the page in \(browser.name): \(page.count) characters")
                 return Outcome(result: page)
             }
-            return Outcome(result: await ScreenControl.read())
+            // The page's whole text through Accessibility, then what's on screen to press.
+            let screen = await ScreenControl.read()
+            if let page = await ScreenControl.readPage() {
+                host.log("command: read the page in \(browser.name) through Accessibility: \(page.count) characters")
+                return Outcome(result: "The whole page, top to bottom:\n\(page)\n\n\(screen)")
+            }
+            return Outcome(result: screen)
         case "browser_click":
             guard let browser = browserHere() else {
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
@@ -1178,6 +1184,12 @@ public final class CommandAgent {
             let screen = await ScreenControl.read()
             let controls = screen.split(separator: "\n").filter { $0.hasPrefix("[") }.count
             host.log("command: read the screen: \(screen.contains("Text on screen:") ? "text and " : "no text, ")\(controls) things to press")
+            // A web page is more than its first screenful: "summarise this" on a long page said there was nothing
+            // there, from the top of it alone.
+            if BrowserControl.inFront() != nil, let page = await ScreenControl.readPage() {
+                host.log("command: and the whole page through Accessibility: \(page.count) characters")
+                return Outcome(result: screen + "\n\nThe whole page, top to bottom (including what's scrolled out of view):\n\(page)")
+            }
             return Outcome(result: screen)
         case "click":
             let id = Int(args["id"]?.number ?? 0)

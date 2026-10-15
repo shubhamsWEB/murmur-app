@@ -209,6 +209,52 @@ public enum ScreenControl {
         return lines.joined(separator: "\n")
     }
 
+    /// All the text of the web page in the front browser window, top to bottom, including what's scrolled out of view,
+    /// through Accessibility. For when the browser won't let Murmur script its pages ("Allow JavaScript from Apple
+    /// Events" off): `read()` gives only what's visible, and "summarise this" got the first screenful of a long page.
+    /// Nil when there's no page (not a browser, or nothing in it).
+    public static func readPage(limit: Int = 12_000) async -> String? {
+        guard AXIsProcessTrusted(), let app = await targetApp() else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute) else { return nil }
+        // The page: the window's web area (the browser's own toolbars and tabs are left out).
+        var queue = [window]
+        var index = 0
+        var page: AXUIElement?
+        while index < queue.count, index < 4000 {
+            let node = queue[index]
+            index += 1
+            if string(node, kAXRoleAttribute) == "AXWebArea" { page = node; break }
+            queue.append(contentsOf: children(node))
+        }
+        guard let page else { return nil }
+        // Depth first, so the text comes in reading order.
+        var stack = [page]
+        var texts: [String] = []
+        var length = 0
+        var visited = 0
+        while let node = stack.popLast(), visited < 30_000, length < limit {
+            visited += 1
+            let role = string(node, kAXRoleAttribute) ?? ""
+            if role == "AXStaticText", let text = longString(node, kAXValueAttribute, max: 2000)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, texts.last != text {
+                texts.append(text)
+                length += text.count + 1
+                continue
+            }
+            if role == "AXImage", let text = longString(node, kAXDescriptionAttribute), text.count >= 3 {
+                texts.append("[image: \(text)]")
+                length += text.count + 10
+            }
+            stack.append(contentsOf: children(node).reversed())
+        }
+        guard length > 0 else { return nil }
+        let title = string(page, kAXTitleAttribute).map { "Page: \($0)\n" } ?? ""
+        return title + String(texts.joined(separator: "\n").prefix(limit))
+    }
+
     /// The text in a picture of the app's front window (Vision, on this Mac). Nil without Screen Recording
     /// permission (asked for once), or when there's nothing to read.
     private static func recognisedText(of app: NSRunningApplication) async -> String? {

@@ -73,6 +73,11 @@ public enum IntentClassifier {
     /// "…on my MacBook", "…on this computer": talking about the Mac, so most likely an instruction for it.
     static let aboutTheMac = #"\b(on|for|of|in) (my|this|the) (mac|macbook|laptop|computer|system|screen|desktop)\b"#
 
+    /// A question about your own chats, mail or calendar: "what did I send Roma on WhatsApp today?", "summarise my
+    /// chat with Neha", "any new emails from HDFC?". Typed while a text field had focus, it used to be pasted in as
+    /// text. (Not when it's said to someone: "did you see what I sent on WhatsApp?" stays text.)
+    static let aboutMyMessages = #"^(what|which|who|when|did|do i|have i|has|any|show|tell me|check|summari[sz]e|sum up|go through|find)\b.*\b(i|me|my|mine|mera|meri|mere|maine|mujhe)\b.*\b(whatsapp|messages?|chats?|texts?|emails?|e-mails?|mails?|inbox|gmail|slack|telegram|imessages?|calendar|meetings?|reminders?)\b|^(what|which|who|when|did|any|show|tell me|check|summari[sz]e|sum up|go through|find)\b.*\b(whatsapp|messages?|chats?|emails?|mails?|inbox|gmail|slack|calendar|meetings?|reminders?)\b.*\b(i|me|my|mine)\b|\b(whatsapp|chat|mail|email|inbox|messages?)\b.*\b(batao|bata do|summari[sz]e karo|padh ke batao|padho|dikhao|check karo)\b"#
+
     /// A question or instruction about what's on the screen: "what's on my screen", "summarise this page", "what
     /// does this error say", "read this email", "what am I looking at". Nobody dictates these into a message.
     static let aboutTheScreen = #"^(what(['’]s| is| are| does| do)?|whats|which|read|describe|summari[sz]e|explain|tell me|look at|check)\b.*\b(screen|on screen|this (page|tab|window|error|message|email|mail|article|document|doc|site|website|video|chart|table|code|dialog|popup|notification)|the (page|tab|window|error|dialog|popup))\b|^what (am i|i'm|im) (looking at|seeing)\b"#
@@ -135,6 +140,10 @@ public enum IntentClassifier {
         }
         if cleaned.range(of: aboutTheScreen, options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "about what's on the screen")
+        }
+        if cleaned.range(of: aboutMyMessages, options: .regularExpression) != nil,
+           cleaned.range(of: #"\b(you|your|u|tum|tumne|aap|aapne)\b"#, options: .regularExpression) == nil {
+            return Decision(intent: .command, reason: "a question about your messages")
         }
         // Somewhere you can't type (the desktop, a Finder window, a player): whatever you said is for Murmur.
         if focus == .notText { return Decision(intent: .command, reason: "nowhere to type") }
