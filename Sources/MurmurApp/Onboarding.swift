@@ -979,11 +979,14 @@ private struct ShortcutStep: View {
         let talkKey = dictation.key == .fn ? "fn" : "Right ⌥"
         let heard = history.items.first { $0.date > appeared }
         VStack(alignment: .leading, spacing: 0) {
-            StepTitle(title: "Your two shortcuts",
-                      subtitle: "One to talk, one to search. Both work in any app.")
+            StepTitle(title: "Your shortcuts",
+                      subtitle: "Hold \(talkKey) and Murmur works out whether you're writing or asking. Add a key to decide "
+                          + "yourself. All of them work in any app.")
             VStack(alignment: .leading, spacing: 10) {
-                ShortcutCard(number: "1", title: "Talk", detail: "Hold \(talkKey) and speak; let go and it's typed or done. "
-                                 + "Double-tap for hands-free. Add ⌃ to force a command, ⇧ to only type.",
+                ShortcutCard(number: "1", title: "Talk", detail: "Hold \(talkKey) and speak; let go and it's typed, or done "
+                                 + "if you asked for something. Double-tap for hands-free.",
+                             extras: [([talkKey, "⇧"], "Only type: always typed, never a command"),
+                                      ([talkKey, "⌃"], "Only a command: always done, never typed")],
                              tested: heard != nil,
                              test: heard.map { "Heard: “\($0.text)”" } ?? talkTest(dictation, key: talkKey)) {
                     HStack(spacing: 4) {
@@ -1020,6 +1023,8 @@ private struct ShortcutCard<Keys: View>: View {
     let number: String
     let title: String
     let detail: String
+    /// More ways to press it: the keys together, and what that does.
+    var extras: [([String], String)] = []
     let tested: Bool
     let test: String
     @ViewBuilder var keys: Keys
@@ -1039,6 +1044,17 @@ private struct ShortcutCard<Keys: View>: View {
                 }
                 Text(detail).font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
                     .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(extras.enumerated()), id: \.offset) { _, extra in
+                    HStack(spacing: 8) {
+                        HStack(spacing: 3) {
+                            ForEach(Array(extra.0.enumerated()), id: \.offset) { index, key in
+                                if index > 0 { Text("+").font(.system(size: 11)).foregroundStyle(Theme.ink3) }
+                                KeyCap(key)
+                            }
+                        }
+                        Text(extra.1).font(.system(size: 12.5)).foregroundStyle(Theme.ink)
+                    }
+                }
                 Label(test, systemImage: tested ? "checkmark.circle.fill" : "hand.point.right")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(tested ? Theme.good : Theme.ink)
