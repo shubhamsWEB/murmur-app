@@ -753,8 +753,8 @@ private struct VoiceStep: View {
                     PermissionRow(ok: dictation.canPaste && dictation.isListeningForKey, title: "Accessibility",
                                   detail: "So Murmur notices the Fn key and can type into other apps",
                                   button: "Open Settings…") { dictation.openAccessibilitySettings() }
-                    PermissionRow(ok: dictation.modelStatus.contains("ready"), title: "Speech model",
-                                  detail: dictation.modelStatus, button: nil) {}
+                    PermissionRow(ok: dictation.speechModelState.isReady, title: "Speech model",
+                                  detail: dictation.modelStatus, button: nil, okText: "Ready") {}
                 }
                 .frame(maxWidth: 520, alignment: .leading)
                 .padding(.top, 16)
@@ -937,6 +937,8 @@ private struct PermissionRow: View {
     let title: String
     let detail: String
     let button: String?
+    /// The word when it's fine: "Allowed" for a permission, "Ready" for the speech model.
+    var okText = "Allowed"
     let action: () -> Void
 
     var body: some View {
@@ -952,7 +954,7 @@ private struct PermissionRow: View {
             }
             Spacer(minLength: 8)
             if ok {
-                Pill(text: "Allowed", tone: .good)
+                Pill(text: okText, tone: .good)
             } else if let button {
                 Button(button, action: action).buttonStyle(.murmurPrimaryCompact)
             }
