@@ -19,7 +19,10 @@ public struct OllamaClient: Sendable {
 
         public var errorDescription: String? {
             switch self {
-            case .notRunning: return "Ollama isn't running. Open the Ollama app, then try again."
+            case .notRunning:
+                // Not there at all is a different fix from not open.
+                return OllamaProbe.isInstalled ? "Ollama isn't running. Open the Ollama app, then try again."
+                    : CommandAgent.needsModel
             case .modelMissing(let model): return "The model \(model) isn't installed. Run: ollama pull \(model)"
             case .bad(let detail): return "Ollama returned an error: \(detail)"
             }

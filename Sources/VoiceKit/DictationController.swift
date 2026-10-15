@@ -63,6 +63,8 @@ public final class DictationController: ObservableObject {
     public var onSearchFiles: ((String) -> Void)?
     /// Opens the file that best matches a description, or shows the matches (set by the app). Returns what it did.
     public var onOpenFile: ((String) async -> String)?
+    /// Opens the settings for the commands' model (set by the app).
+    public var onOpenModelSettings: (() -> Void)?
 
     /// A press shorter than this is a tap, not a hold (taps start hands-free dictation).
     private let tapLength: TimeInterval = 0.3
@@ -653,7 +655,7 @@ public final class DictationController: ObservableObject {
 
 extension DictationController {
     private func makeHost() -> CommandHost {
-        CommandHost(
+        var host = CommandHost(
             confirm: { [weak self] title, detail in self?.confirm(title, detail) ?? false },
             showAnswer: { [weak self] text in
                 guard let self else { return }
@@ -692,6 +694,8 @@ extension DictationController {
                 return await replaceSelection(with: text)
             }
         )
+        host.openModelSettings = { [weak self] in self?.onOpenModelSettings?() }
+        return host
     }
 
     /// Asks for an API key, checks its shape, saves it in the Keychain, then tests it with the provider and says

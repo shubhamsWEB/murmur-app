@@ -23,6 +23,8 @@ public struct CommandHost {
     public var progress: (String) -> Void
     /// Log lines.
     public var log: (String) -> Void
+    /// Open the settings where a model for commands is chosen (Commands & AI).
+    public var openModelSettings: () -> Void = {}
 
     public init(confirm: @escaping (String, String) async -> Bool, showAnswer: @escaping (String) -> Void,
                 insert: @escaping (String) -> Void, searchFiles: @escaping (String) -> Void,
@@ -223,6 +225,10 @@ public final class CommandAgent {
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
     }
+
+    /// What to say when a command needs a model and there's none: Ollama isn't on this Mac and no cloud key worked.
+    public nonisolated static let needsModel =
+        "Commands like this need a model. Install Ollama, or add a Claude or OpenAI key in Commands & AI."
 
     /// The earlier file a query names: its path or exact name, or every word of the query found in the name.
     nonisolated static func earlierFile(_ query: String, recent: [String]) -> String? {
@@ -485,6 +491,13 @@ public final class CommandAgent {
                 }
                 if answer == nil {
                     if step == 0, searchInstead(utterance) { return }
+                    // No model at all: say so plainly and open the page where one is set up.
+                    if router is OllamaRouter, !OllamaProbe.isInstalled {
+                        host.log("command: no model for this (Ollama isn't installed, no cloud key worked)")
+                        host.showAnswer(Self.needsModel)
+                        host.openModelSettings()
+                        return
+                    }
                     host.showAnswer(step == 0 ? error.localizedDescription
                         : "I stopped partway: \(error.localizedDescription) Try asking again.")
                     return
