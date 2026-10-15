@@ -411,6 +411,8 @@ private struct HomePage: View {
                             detail: "Tap \(keyLabel) again to finish. Esc cancels.")
                     Gesture(keys: [keyLabel, "⌃"], plus: true, title: "Force a command",
                             detail: "Murmur usually tells by itself. Add ⌃ when it guesses wrong.")
+                    Gesture(keys: [keyLabel, "⇧"], plus: true, title: "Typing only",
+                            detail: "Add ⇧ and it's always typed, never run as a command.")
                 }
             }
             .padding(24)
@@ -794,7 +796,7 @@ private struct SettingsPage: View {
             }
             SettingsSection("Commands") {
                 SettingRow(title: "Tell commands from dictation",
-                           detail: "“Open Slack” or “PDF kholo” runs; “see you at 5” is typed. Off: only the key with ⌃ runs commands.") {
+                           detail: "“Open Slack” or “PDF kholo” runs; “see you at 5” is typed. Off: only the key with ⌃ runs commands. The key with ⇧ always types.") {
                     MurmurSwitch(label: "Tell commands from dictation",
                                  isOn: state.bind(get: { dictation.detectCommands }, set: { dictation.detectCommands = $0 }))
                 }

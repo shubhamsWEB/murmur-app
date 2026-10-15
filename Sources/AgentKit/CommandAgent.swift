@@ -289,6 +289,19 @@ public final class CommandAgent {
             host.progress(summary)
             return
         }
+        // "Continue": a big task that stopped at its step or time limit picks up where it was, with its list and notes.
+        if TaskResume.isResume(utterance), let pending = TaskResume.take() {
+            plan = pending.steps.map { PlanStep(text: $0.text, done: $0.done) }
+            notes = pending.notes
+            self.utterance = pending.request
+            host.log("command: resuming “\(pending.request.prefix(80))” at \(plan.filter(\.done).count) of \(plan.count) steps")
+            host.progress("Picking up where I stopped…")
+            await route("Carry on with my earlier request: \"\(pending.request)\". Your task list and notes from before are "
+                        + "with your instructions: start at the first open step, and finish the whole request.",
+                        frontApp: frontApp, selection: selection, explicit: explicit)
+            host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
+            return
+        }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
     }
@@ -582,7 +595,9 @@ public final class CommandAgent {
         for step in 0..<stepCap {
             // A task list buys a few steps per item; nothing runs past the time cap.
             if !plan.isEmpty { budget = min(stepCap, max(maxSteps, plan.count * 6 + 10)) }
-            if step >= budget || Date().timeIntervalSince(began) > timeCap {
+            // A long task list gets longer: going through a dozen emails takes more than eight minutes.
+            let timeLimit = plan.count >= 5 ? timeCap * 2 : timeCap
+            if step >= budget || Date().timeIntervalSince(began) > timeLimit {
                 host.log("command: stopped at step \(step + 1) (budget \(budget), \(Int(Date().timeIntervalSince(began))) s)")
                 await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
                 return
@@ -862,8 +877,15 @@ public final class CommandAgent {
     /// what's left; failing that, the user is told it stopped.
     private func wrapUp(router: Router, system: String, turns: [RouterTurn], tools: [ToolSpec]) async {
         var turns = turns
+        // Out of steps or time with the task list unfinished: keep it, so "continue" picks it up from here.
+        let resumable = plan.contains { !$0.done }
+        if resumable {
+            TaskResume.save(.init(request: utterance, steps: plan.map { (text: $0.text, done: $0.done) }, notes: notes, at: Date()))
+            host.log("command: kept the unfinished task (\(plan.filter { !$0.done }.count) steps open) for “continue”")
+        }
         turns.append(.user("Stop here. Call reply now: in two or three sentences, what you found or did for the "
-            + "request, with any answer you have, and what's still left to do."))
+            + "request, with any answer you have, and what's still left to do."
+            + (resumable ? " End by saying they can say “continue” to pick up from here." : "")))
         let replyOnly = tools.filter { $0.name == "reply" }
         if let last = try? await router.chat(system: system, turns: Self.compacted(turns), tools: replyOnly),
            let call = last.calls.first(where: { $0.name == "reply" }) {

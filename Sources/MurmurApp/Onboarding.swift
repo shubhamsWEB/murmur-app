@@ -983,7 +983,7 @@ private struct ShortcutStep: View {
                       subtitle: "One to talk, one to search. Both work in any app.")
             VStack(alignment: .leading, spacing: 10) {
                 ShortcutCard(number: "1", title: "Talk", detail: "Hold \(talkKey) and speak; let go and it's typed or done. "
-                                 + "Double-tap for hands-free. Add ⌃ to force a command.",
+                                 + "Double-tap for hands-free. Add ⌃ to force a command, ⇧ to only type.",
                              tested: heard != nil,
                              test: heard.map { "Heard: “\($0.text)”" } ?? talkTest(dictation, key: talkKey)) {
                     HStack(spacing: 4) {

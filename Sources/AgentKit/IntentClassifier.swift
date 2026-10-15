@@ -108,6 +108,9 @@ public enum IntentClassifier {
         if cleaned.range(of: somethingToRemember, options: .regularExpression) != nil {
             return Decision(intent: .command, reason: "something to remember")
         }
+        if TaskResume.hasPending, TaskResume.isResume(utterance) {
+            return Decision(intent: .command, reason: "carries on with the unfinished task")
+        }
         if CommandMemory.isFollowUp(utterance) || CommandMemory.forgetRequest(utterance) != nil {
             return Decision(intent: .command, reason: "follows on from the last command")
         }

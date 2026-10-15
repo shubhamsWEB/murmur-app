@@ -12,6 +12,8 @@ final class DictationHUD {
     enum Mode: Equatable {
         case listening(handsFree: Bool)
         case command
+        /// ⇧ with the talk key: what you say is typed, never run as a command.
+        case typingOnly(handsFree: Bool)
         case working(String)
         case transcribing
         case preparing
@@ -164,6 +166,7 @@ private struct HUDView: View {
         switch state.mode {
         case .listening(let handsFree): return handsFree ? "Listening · tap Fn to finish" : "Listening"
         case .command: return "Command · let go when done"
+        case .typingOnly(let handsFree): return handsFree ? "Typing only · tap Fn to finish" : "Typing only"
         case .working(let text): return text
         case .transcribing: return "Writing it down"
         case .preparing: return "Getting the speech model ready"
@@ -174,7 +177,7 @@ private struct HUDView: View {
     @ViewBuilder
     private var indicator: some View {
         switch state.mode {
-        case .listening, .command:
+        case .listening, .command, .typingOnly:
             // The starling swells with your voice; the halo shows it's live even in silence.
             let level = CGFloat(min(1, max(0, state.level)))
             ZStack {

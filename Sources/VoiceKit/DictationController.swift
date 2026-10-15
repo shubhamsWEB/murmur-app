@@ -44,6 +44,8 @@ public final class DictationController: ObservableObject {
     private var warnedAboutKey = false
     /// ⌃ was held with the dictation key: the speech is a command, not text to type.
     private var commandRequested = false
+    /// ⇧ held with the talk key: dictation only, never a command (the opposite of ⌃).
+    private var typingRequested = false
     /// The app you were in when you pressed the key (commands paste back into it).
     private var previousApp: NSRunningApplication?
     /// At the key press: whether a text field had the focus, and what was selected.
@@ -287,6 +289,9 @@ public final class DictationController: ObservableObject {
         let hint = NSMenuItem(title: "Fn+⌃ always runs a command", action: nil, keyEquivalent: "")
         hint.isEnabled = false
         assistants.addItem(hint)
+        let typing = NSMenuItem(title: "Fn+⇧ always types, never a command", action: nil, keyEquivalent: "")
+        typing.isEnabled = false
+        assistants.addItem(typing)
         assistants.addItem(.separator())
         for helper in AssistantCLI.allCases {
             assistants.addItem(ClosureMenuItem("Allow \(helper.display)", checked: helper.isAllowed) { [weak self] in
@@ -358,6 +363,7 @@ public final class DictationController: ObservableObject {
             let doubleTap = Date().timeIntervalSince(lastTapAt) < doubleTapWindow
             pressedAt = Date()
             commandRequested = NSEvent.modifierFlags.contains(.control)
+            typingRequested = !commandRequested && NSEvent.modifierFlags.contains(.shift)
             previousApp = NSWorkspace.shared.frontmostApplication
             // The microphone first: asking the app for its focus and selection can take a moment (Chrome, Electron
             // apps), and a quick first word was lost while it did.
@@ -382,11 +388,16 @@ public final class DictationController: ObservableObject {
         }
     }
 
-    /// ⌃ pressed while the dictation key is held turns this recording into a command.
+    /// ⌃ pressed while the dictation key is held turns this recording into a command; ⇧ makes it typing only.
     private func modifiersChanged(_ flags: CGEventFlags) {
-        guard case .listening = phase, flags.contains(.maskControl), !commandRequested else { return }
-        commandRequested = true
-        hud.show(.command)
+        guard case .listening(let handsFree) = phase, !commandRequested, !typingRequested else { return }
+        if flags.contains(.maskControl) {
+            commandRequested = true
+            hud.show(.command)
+        } else if flags.contains(.maskShift) {
+            typingRequested = true
+            hud.show(.typingOnly(handsFree: handsFree))
+        }
     }
 
     private func otherKey(_ code: Int64) {
@@ -411,7 +422,8 @@ public final class DictationController: ObservableObject {
         // The pill first, so you see Murmur listening the moment you press the key; the microphone starts off the
         // main thread (it can take a second with a Bluetooth headset) and keeps everything from the start.
         phase = .listening(handsFree: handsFree)
-        hud.show(commandRequested ? .command : .listening(handsFree: handsFree))
+        hud.show(commandRequested ? .command
+                 : typingRequested ? .typingOnly(handsFree: handsFree) : .listening(handsFree: handsFree))
         recorder.start { [weak self] error, took in
             guard let self else { return }
             if let error {
@@ -456,6 +468,7 @@ public final class DictationController: ObservableObject {
         lastSamples = samples
         let transcriber = transcriber
         let forcedCommand = commandRequested
+        let typingOnly = typingRequested
         let frontApp = previousApp?.localizedName
         let pressedSelection = selectionAtPress
         let focus = focusAtPress
@@ -481,11 +494,13 @@ public final class DictationController: ObservableObject {
                 }
                 var selection = pressedSelection
                 // "Summarise this" with text selected in an app that doesn't report its selection: copy it.
-                if selection == nil, detect || forcedCommand, CommandAgent.isAboutSelection(text) {
+                if selection == nil, !typingOnly, detect || forcedCommand, CommandAgent.isAboutSelection(text) {
                     selection = await TextInserter.copySelection()
                     if let selection { log("selection: \(selection.count) characters, copied with ⌘C") }
                 }
-                let decision = detect
+                let decision = typingOnly
+                    ? IntentClassifier.Decision(intent: .dictation, reason: "⇧ held: typing only")
+                    : detect
                     ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
                                                     focus: focus, frontApp: frontApp,
                                                     hasSelection: selection != nil, router: agent.currentRouter())

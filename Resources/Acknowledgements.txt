@@ -211,6 +211,11 @@ The cua-driver skill (Resources/Skills/cua-driver) is from David Ondrej's skills
 (always, requires, install, source). Cua Driver itself is not included: you
 install it yourself (https://cua.ai/docs/how-to-guides/driver/install).
 
+The online-shopping skill (Resources/Skills/online-shopping) is adapted from the
+online-shopping skill in the same repository, under the same license: rewritten
+for Murmur's own tools (no DeepAPI), keeping its research-only rule, its price-
+scaled effort and its answer format.
+
 MIT License
 
 Copyright (c) 2026 David Ondrej
