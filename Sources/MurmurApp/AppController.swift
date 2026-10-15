@@ -300,12 +300,20 @@ final class AppController {
             showSearchWindow(query: spoken)
             return "Choose folders to search first."
         }
-        let (wanted, hits) = await searchFile(spoken)
+        let (wanted, hits, named) = await searchFile(spoken)
         let rows = ResultSet(hits, query: wanted.text).ranked
         let kindNames = wanted.kinds.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "any"
-        log("open file: \"\(spoken)\" → \"\(wanted.text)\" in \(kindNames): \(rows.count) strong, top \(rows.first?.name ?? "none")")
-        // The search's best match opens: its ranking already weighs the words, the file's text and the kind asked
-        // for. (A second guess from file names alone used to overrule it and open the wrong file.)
+        log("open file: \"\(spoken)\" → \"\(wanted.text)\" in \(kindNames): \(named.count) named, \(rows.count) strong, top "
+            + "\(named.first.map { ($0.file.path as NSString).lastPathComponent } ?? rows.first?.name ?? "none")")
+        // A file named for what was asked ("PanCard.pdf" for "my PAN card") opens first: a scanned card has little
+        // text, and a long document that mentions the words outranked it in the search.
+        if let file = named.first {
+            let url = URL(fileURLWithPath: file.file.path)
+            log("open: \(url.lastPathComponent) (its name matches)" + (Opener.dryRun ? " (dry run)" : ""))
+            if !Opener.dryRun { NSWorkspace.shared.open(url) }
+            return "Opened \(url.lastPathComponent)."
+        }
+        // Otherwise the search's best match: its ranking weighs the words, the file's text and the kind asked for.
         if let best = rows.first {
             engine.open(best)
             return "Opened \(best.name)."
@@ -316,26 +324,50 @@ final class AppController {
 
     /// The one search behind opening a file by description: what `openBestFile` opens and what the command model
     /// picks from are the same results, in the same order.
-    private func searchFile(_ spoken: String) async -> (SpokenFile, [SearchHit]) {
+    private func searchFile(_ spoken: String) async
+        -> (SpokenFile, [SearchHit], [(file: FileRecord, score: Double)]) {
         // "my Aadhaar card": the user's own documents usually carry their name.
         let wanted = SpokenFile(spoken, owner: CommandAgent.ownerForPersonalFile(spoken))
         let vector = await engine.embedQuery(wanted.text)
         let hits = await engine.search(wanted.text, vector: vector, prefixLast: false, kinds: wanted.kinds, limit: 30)
-        return (wanted, hits)
+        var named = await engine.filesNamed(wanted.text, kinds: wanted.kinds)
+        // "My resume" names Roma's CV as well as yours: between equally good names, the one with your name first.
+        if !wanted.owner.isEmpty {
+            let mine = { (file: FileRecord) in
+                FileNameMatch.nameWords((file.path as NSString).lastPathComponent).contains { wanted.owner.contains($0) }
+            }
+            named = named.enumerated().sorted { a, b in
+                if a.element.score != b.element.score { return a.element.score > b.element.score }
+                let (x, y) = (mine(a.element.file), mine(b.element.file))
+                return x != y ? x : a.offset < b.offset
+            }.map(\.element)
+        }
+        return (wanted, hits, named)
     }
 
     /// The strong matches for a description, best first, for the command model to pick from.
     func fileCandidates(_ spoken: String) async -> [FileCandidate] {
         guard model.hasFolders else { return [] }
-        let (wanted, hits) = await searchFile(spoken)
-        let strong = hits.prefix(Searcher.strongCount(hits))
+        let (wanted, hits, named) = await searchFile(spoken)
+        // Files named for it first (scored above any search score, so one alone is a clear winner), then the search's
+        // matches. At least five of those: one long document that mentions the words used to leave only itself above
+        // the cut, and the photo of the driving license below it.
+        let strong = hits.prefix(max(Searcher.strongCount(hits), 5))
         var seen = Set<String>()
-        let files = strong.filter { seen.insert($0.path).inserted }.prefix(8)
-        log("open file: \"\(spoken)\" → \"\(wanted.text)\": \(files.count) for the model, top \(files.first.map { ($0.path as NSString).lastPathComponent } ?? "none")")
-        return files.map {
-            FileCandidate(path: $0.path, kind: $0.kind.rawValue, modified: Date(timeIntervalSince1970: $0.modified),
-                          excerpt: $0.excerpt, score: $0.score)
+        var files: [FileCandidate] = named.compactMap { item in
+            guard seen.insert(item.file.path).inserted else { return nil }
+            return FileCandidate(path: item.file.path, kind: item.file.kind.rawValue,
+                                 modified: Date(timeIntervalSince1970: item.file.mtime),
+                                 excerpt: "its name matches what was asked", score: 100 * item.score)
         }
+        for hit in strong where files.count < 8 && seen.insert(hit.path).inserted {
+            files.append(FileCandidate(path: hit.path, kind: hit.kind.rawValue,
+                                       modified: Date(timeIntervalSince1970: hit.modified), excerpt: hit.excerpt,
+                                       score: hit.score))
+        }
+        log("open file: \"\(spoken)\" → \"\(wanted.text)\": \(files.count) for the model (\(named.count) named), top "
+            + "\(files.first.map { ($0.path as NSString).lastPathComponent } ?? "none")")
+        return files
     }
 
     func showHome(_ section: HomeSection? = nil) {

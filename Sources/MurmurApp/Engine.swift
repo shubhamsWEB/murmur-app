@@ -1,3 +1,4 @@
+import AgentKit
 import MurmurIndex
 import Foundation
 
@@ -837,6 +838,31 @@ nonisolated final class Engine: @unchecked Sendable {
                         && !types.contains((hit.path as NSString).pathExtension.lowercased())
                         && FileManager.default.fileExists(atPath: hit.path)
                 })
+            }
+        }
+    }
+
+    /// Indexed files whose names are the file asked for (`FileNameMatch`), best first, then the most recently changed:
+    /// "PanCard.pdf" for "PAN card", "Aadhar.pdf" for "aadhaar". The hybrid search can miss these (a scanned card
+    /// has little text) or bury them under a long document that mentions the words.
+    func filesNamed(_ query: String, kinds: Set<FileKind>? = nil, limit: Int = 8) async -> [(file: FileRecord, score: Double)] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                let (chosen, skippedFolders, types): ([URL], [URL], Set<String>) = lock.withLock {
+                    (self.roots, self.excluded, Set(self.excludedTypes))
+                }
+                let folders = chosen.map(\.path), skipped = skippedFolders.map(\.path)
+                var found: [(file: FileRecord, score: Double)] = []
+                for file in (try? searchStore?.files(under: folders)) ?? [] {
+                    if let kinds, !kinds.contains(file.kind) { continue }
+                    guard let score = FileNameMatch.score(name: (file.path as NSString).lastPathComponent, for: query),
+                          FolderSelection.isSearched(file.path, folders: folders, skipped: skipped),
+                          !types.contains((file.path as NSString).pathExtension.lowercased()),
+                          FileManager.default.fileExists(atPath: file.path) else { continue }
+                    found.append((file, score))
+                }
+                found.sort { $0.score != $1.score ? $0.score > $1.score : $0.file.mtime > $1.file.mtime }
+                continuation.resume(returning: Array(found.prefix(limit)))
             }
         }
     }

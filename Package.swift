@@ -77,6 +77,8 @@ let appTargets: [Target] = [
         swiftSettings: [.defaultIsolation(MainActor.self)],
         linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
     ),
+    // Opening a file by what was said: real requests from the log, so a fix can't quietly come undone.
+    .testTarget(name: "AgentKitTests", dependencies: ["AgentKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
 ]
 #else
 let appProducts: [Product] = []

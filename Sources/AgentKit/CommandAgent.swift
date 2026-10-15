@@ -327,11 +327,21 @@ public final class CommandAgent {
         }
     }
 
-    /// The user means the file from before: "it", "that", "again", "wahi", "phir se", or a word from its name.
+    /// A path or a file name ("/Users/…/Aadhar.pdf", "Aadhar.pdf"), not a description ("Aadhaar card").
+    nonisolated static func namesAFile(_ query: String) -> Bool {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        if query.hasPrefix("/") || query.hasPrefix("~/") { return true }
+        let ext = (query as NSString).pathExtension
+        return (1...5).contains(ext.count) && ext.allSatisfy { $0.isLetter || $0.isNumber }
+    }
+
+    /// The user means the file from before: "it", "that", "again", "wahi", "phir se", or its name ("my PAN card"
+    /// for PanCard.pdf).
     nonisolated static func pointsBack(_ utterance: String, to name: String) -> Bool {
         let text = QuickCommands.clean(utterance)
         if text.range(of: #"\b(it|that|this|same|again|previous|last|earlier|wahi|wohi|vahi|wo|woh|vo|voh|usko|use|usse|isko|ise|yahi|phir se|fir se|dobara|pichl[ia]|abhi wal[ia])\b"#,
                       options: .regularExpression) != nil { return true }
+        if FileNameMatch.names(utterance, name) { return true }
         // Case, accents and doubled letters folded: "aadhaar" said, "Aadhar.pdf" named.
         let fold: (String) -> String = { text in
             var out = ""
@@ -683,7 +693,17 @@ public final class CommandAgent {
                 }
                 if !Self.openingTools.contains(call.name) { didMoreThanOpen = true }
                 let outcome = await execute(call.name, call.arguments)
-                if outcome.finished { return }
+                if outcome.finished {
+                    // "My driving license and PAN card": the card opened, but the license's matches still wait for a
+                    // pick, or another part of the request comes after. Finish only when nothing else is pending.
+                    let more = reply.calls[(index + 1)...].contains { $0.name != "done" && $0.name != "reply" }
+                    if !more && !awaitingPick { return }
+                    host.log("command: one part finished; going on with the rest")
+                    results.append(outcome.result)
+                    turns.append(.toolResult(callID: call.id, name: call.name, content: outcome.result
+                        + " (That part is done. Finish the rest of the request.)"))
+                    continue
+                }
                 if call.name == "open_file" {
                     awaitingPick = outcome.result.hasPrefix("Files matching")
                 } else if call.name == "reply" || call.name == "search_files" {
@@ -943,7 +963,10 @@ public final class CommandAgent {
             var query = text("query")
             var afresh = false
             let picked = offered.contains((query as NSString).expandingTildeInPath)
-            if !picked, let earlier = Self.earlierFile(query, recent: CommandMemory.recentFiles()),
+            // Only when the model hands back a particular file (its path or file name). A description it wrote
+            // ("PAN card") is its reading of the request, and is searched as is: replacing it with the whole sentence
+            // ("my driving license and pan card") found a palmistry book instead of the card.
+            if !picked, Self.namesAFile(query), let earlier = Self.earlierFile(query, recent: CommandMemory.recentFiles()),
                !Self.pointsBack(utterance, to: earlier) {
                 query = Self.fileWords(utterance)
                 afresh = true
