@@ -452,8 +452,9 @@ struct SpokenFile {
         if rest.contains(where: { ["cv", "resume", "résumé"].contains($0) }) {
             rest = rest.filter { !["cv", "resume", "résumé"].contains($0) } + ["resume", "cv"]
         }
-        let base = rest.isEmpty ? spoken : rest.joined(separator: " ")
-        text = owner.isEmpty ? base : base + " " + owner.joined(separator: " ")
+        // What the file is, without the user's name: their name is in every file about them (a handover, a
+        // contract), which then outranked the Aadhaar or PAN card asked for.
+        text = rest.isEmpty ? spoken : rest.joined(separator: " ")
         // A photo can be a screenshot and the other way round; "file" says nothing.
         if kinds.contains(.image) { kinds.insert(.screenshot) }
         self.kinds = kinds.isEmpty ? nil : kinds

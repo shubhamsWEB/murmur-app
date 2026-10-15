@@ -105,6 +105,8 @@ public final class CommandAgent {
     private var routing = false
     /// Files offered to the model to pick from in this command: opening one of them is its choice, not a stale memory.
     private var offered: Set<String> = []
+    /// Matches were offered and nothing has opened yet: the model owes a pick (or a reply that none fits).
+    private var awaitingPick = false
     /// What the user said for the command running now.
     private var utterance = ""
     /// The answer shown for this command, if any (for memory).
@@ -200,6 +202,7 @@ public final class CommandAgent {
         self.utterance = utterance
         routing = false
         offered = []
+        awaitingPick = false
         lastBrowser = nil
         pageAccess = [:]
         openedIn = nil
@@ -291,7 +294,14 @@ public final class CommandAgent {
         let text = QuickCommands.clean(utterance)
         if text.range(of: #"\b(it|that|this|same|again|previous|last|earlier|wahi|wohi|vahi|wo|woh|vo|voh|usko|use|usse|isko|ise|yahi|phir se|fir se|dobara|pichl[ia]|abhi wal[ia])\b"#,
                       options: .regularExpression) != nil { return true }
-        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        // Case, accents and doubled letters folded: "aadhaar" said, "Aadhar.pdf" named.
+        let fold: (String) -> String = { text in
+            var out = ""
+            for ch in text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) where out.last != ch {
+                out.append(ch)
+            }
+            return out
+        }
         let generic: Set<String> = ["pdf", "pdfs", "doc", "docx", "file", "document", "copy", "final", "new", "untitled"]
         let nameWords = fold((name as NSString).deletingPathExtension)
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
@@ -308,7 +318,8 @@ public final class CommandAgent {
             "you", "could", "would", "murmur", "hey", "the", "a", "an", "mujhe", "muje", "mujhko", "humein", "hume",
             "ko", "do", "de", "dena", "dijiye", "dijie", "karo", "kar", "kare", "karein", "karna", "kholo", "khol",
             "kholkar", "kholke", "kholiye", "kholna", "kholdo", "dikhao", "dikha", "dikhaiye", "dhundo", "dhoondo",
-            "dhundho", "dhoondho", "zara", "jara", "ek", "toh", "to", "na",
+            "dhundho", "dhoondho", "zara", "jara", "ek", "toh", "to", "na", "mera", "meri", "mere", "apna", "apni",
+            "apne", "wala", "wali", "wale", "ka", "ki", "ke", "se", "hai",
         ]
         let words = QuickCommands.clean(utterance).split(separator: " ").map(String.init)
         let kept = words.filter { !drop.contains($0.lowercased()) }
@@ -574,6 +585,14 @@ public final class CommandAgent {
             var looked = false
             for (index, call) in reply.calls.enumerated() {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
+                if call.name == "done", awaitingPick {
+                    // "open_file" and "done" in one response: the matches came back, nothing has opened yet.
+                    host.log("command: done before picking from the matches; asking for the pick")
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Not done: nothing has opened yet. Pick the user's file from the matches above and call open_file "
+                        + "with its exact path, or reply that none of them is it."))
+                    continue
+                }
                 if call.name == "done" {
                     if checksBeforeDone < 2, let why = notDoneYet(utterance, step: step, checks: checksBeforeDone,
                                                                   didMoreThanOpen: didMoreThanOpen,
@@ -602,6 +621,11 @@ public final class CommandAgent {
                 if !Self.openingTools.contains(call.name) { didMoreThanOpen = true }
                 let outcome = await execute(call.name, call.arguments)
                 if outcome.finished { return }
+                if call.name == "open_file" {
+                    awaitingPick = outcome.result.hasPrefix("Files matching")
+                } else if call.name == "reply" || call.name == "search_files" {
+                    awaitingPick = false
+                }
                 results.append(outcome.result)
                 // A look counts only if nothing changed the screen after it.
                 if Self.screenChangingTools.contains(call.name) { changedScreen = true; looked = false }
@@ -804,10 +828,8 @@ public final class CommandAgent {
                 query = "resume cv" + (query.lowercased().hasPrefix("cv") || query.lowercased().hasPrefix("resume")
                     ? "" : " " + query)
             }
-            // "my resume", "my Aadhaar card": the user's own documents carry their name.
-            if let owner = Self.ownerForPersonalFile(text("query")), !query.lowercased().contains(owner.lowercased()) {
-                query += " " + owner
-            }
+            // The user's name isn't added: a document that mentions them a lot (a handover, a contract) then outranked
+            // the Aadhaar or PAN card asked for.
             host.searchFiles(query)
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url":
@@ -1365,9 +1387,9 @@ public final class CommandAgent {
                 + "the user's own name goes under subject \"my name\" as \"My name is <full name>\"; "
                 + "forget_fact drops one), then reply in a few words. \"Remind me to…\" is a reminder, not this. Follow "
                 + "what the user told you over everything; use what was noticed from their commands when they don't say.",
-            "- The user's own documents (\"my resume\", \"my Aadhaar card\", \"my PAN card\", \"my passport\"): search or "
-                + "open them with their name from memory in the query (\"Shubham Agrawal Aadhaar\"), as such files are "
-                + "usually named after their owner.",
+            "- The user's own documents (\"my resume\", \"my Aadhaar card\", \"my PAN card\", \"my passport\"): open_file "
+                + "with what the document is (\"Aadhaar card\", \"PAN card\"), not the user's name: a name matches every "
+                + "file about them. When the matches come back, pick the user's own one (their name in it helps tell).",
             "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
                 + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall.",
             "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
