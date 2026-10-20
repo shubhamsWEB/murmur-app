@@ -121,6 +121,8 @@ as helpers they can’t change files (Claude Code `--permission-mode dontAsk`, C
 - **Commands** stay on your Mac with the local model. If you choose Claude or OpenAI, the command’s words, the front
   app’s name, any selected text and, when a step reads the screen or a page, that text are sent to that provider.
   Never audio, never files, never pictures.
+- **AI cleanup** (off unless you turn it on) tidies dictation with the same model as commands: on your Mac with the
+  local model, or, if you chose Claude or OpenAI, the dictated words are sent to that provider. Never audio.
 - **Network use** is otherwise limited to the one-time model downloads from Hugging Face.
 
 Settings, the index and models live in `~/Library/Application Support/Murmur`.

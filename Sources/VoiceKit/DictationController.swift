@@ -51,6 +51,19 @@ public final class DictationController: ObservableObject {
     /// At the key press: whether a text field had the focus, and what was selected.
     private var focusAtPress = IntentClassifier.Focus.unknown
     private var selectionAtPress: String?
+    /// Audio is coming in for this recording.
+    private var micLive = false
+    /// The pill says the microphone is starting (so it switches to listening once it's on).
+    private var showingMicStart = false
+    /// Which start the microphone's answer belongs to (a quick tap and a second press can overlap).
+    private var micAttempt = UUID()
+    /// What the speech model heard last, before AI cleanup (for "Paste Exactly What I Said").
+    private var lastHeard: String?
+    /// The last spoken command, shown above its answer.
+    private var lastCommand: String?
+    /// AI cleanup changed the last dictation.
+    private var lastCleaned = false
+    private let logo = FloatingLogo()
 
     /// Decide from the words whether you're dictating or giving a command (on by default). Fn+⌃ always means a command.
     public var detectCommands: Bool {
@@ -67,6 +80,8 @@ public final class DictationController: ObservableObject {
     public var onOpenFile: ((String) async -> String)?
     /// Opens the settings for the commands' model (set by the app).
     public var onOpenModelSettings: (() -> Void)?
+    /// Opens Murmur's window (the floating button, set by the app).
+    public var onOpenApp: (() -> Void)?
     /// Opens Settings at the speech languages (no speech model chosen yet).
     public var onOpenSpeechSettings: (() -> Void)?
     /// The search's best matches for a description of a file (set by the app).
@@ -86,6 +101,68 @@ public final class DictationController: ObservableObject {
     private static let whisperDefault = "whisperMode"
     private static let keepDefault = "keepRecordings"
     private static let fitTextDefault = "dictation.fitText"
+    private static let microphoneDefault = "dictation.microphone"
+    private static let preferBuiltInDefault = "dictation.preferBuiltInMic"
+    private static let showLogoDefault = "dictation.showLogo"
+    private static let aiCleanupDefault = "dictation.aiCleanup"
+
+    /// The microphone picked in Settings (its Core Audio UID); nil chooses automatically: the system's input, or the
+    /// Mac's own microphone instead of a Bluetooth headset when `preferBuiltInMic` is on.
+    public var microphoneUID: String? {
+        get { UserDefaults.standard.string(forKey: Self.microphoneDefault) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.microphoneDefault)
+            recorder.chosenUID = newValue
+            log("dictation: microphone is now \(newValue.flatMap { AudioDevices.input(uid: $0)?.name } ?? "automatic")")
+            objectWillChange.send()
+        }
+    }
+
+    /// Use the Mac's own microphone rather than AirPods or another Bluetooth headset (on by default): their
+    /// microphone drops them to a phone-call codec, which is worse for recognition and for your music.
+    public var preferBuiltInMic: Bool {
+        get { UserDefaults.standard.object(forKey: Self.preferBuiltInDefault) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.preferBuiltInDefault)
+            recorder.preferBuiltIn = newValue
+            objectWillChange.send()
+        }
+    }
+
+    /// The microphones to choose from, and the one dictation would use now.
+    public func microphones() -> [AudioDevices.Input] { AudioDevices.inputs() }
+    public func microphoneInUse() -> AudioDevices.Input? { recorder.currentChoice() }
+
+    /// The Murmur button on screen (on by default): click to open Murmur, drag to move it.
+    public var showLogo: Bool {
+        get { UserDefaults.standard.object(forKey: Self.showLogoDefault) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.showLogoDefault)
+            logo.setEnabled(newValue)
+            objectWillChange.send()
+        }
+    }
+
+    /// AI cleanup (off by default): fillers and stumbles out, self-corrections applied, lists set out, in the style
+    /// for the kind of app. Uses the commands' model; with Claude or OpenAI the dictated words go to that provider.
+    public var aiCleanup: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.aiCleanupDefault) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.aiCleanupDefault); objectWillChange.send() }
+    }
+
+    public func cleanupStyle(for category: DictationCleanup.Category) -> DictationCleanup.Style {
+        UserDefaults.standard.string(forKey: "dictation.cleanupStyle.\(category.rawValue)")
+            .flatMap(DictationCleanup.Style.init).flatMap { category.styles.contains($0) ? $0 : nil }
+            ?? category.defaultStyle
+    }
+
+    public func setCleanupStyle(_ style: DictationCleanup.Style, for category: DictationCleanup.Category) {
+        UserDefaults.standard.set(style.rawValue, forKey: "dictation.cleanupStyle.\(category.rawValue)")
+        objectWillChange.send()
+    }
+
+    /// Where AI cleanup's words go: on this Mac, or to a provider.
+    public var cleanupModel: String { agent.currentRouter().name }
 
     /// Fits what you say to the sentence it goes into: the space before it, no capital or full stop mid-sentence.
     /// The words are never changed.
@@ -196,6 +273,17 @@ public final class DictationController: ObservableObject {
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.hud.setLevel(level) }
         }
+        recorder.chosenUID = UserDefaults.standard.string(forKey: Self.microphoneDefault)
+        recorder.preferBuiltIn = UserDefaults.standard.object(forKey: Self.preferBuiltInDefault) as? Bool ?? true
+        hud.onVisible = { [weak self] frame in self?.logo.pillMoved(frame) }
+        // With the Murmur button on screen, the listening pill grows out of it (one pill, not two).
+        hud.anchor = { [weak self] in self?.logo.anchor }
+        logo.onOpen = { [weak self] in self?.onOpenApp?() }
+        logo.onStartDictation = { [weak self] in self?.logoClicked() }
+        logo.onHide = { [weak self] in
+            self?.showLogo = false
+            self?.hud.flash("Murmur button hidden · turn it back on in Settings", seconds: 3, tone: .info)
+        }
         // Which app you're working in, so "what's on my screen" reads it even when Murmur's own window is in front.
         ScreenControl.watchFrontApp()
         BrowserControl.onNeedsPermission = { [weak self] message in self?.hud.flash(message, seconds: 6, tone: .info) }
@@ -265,6 +353,7 @@ public final class DictationController: ObservableObject {
         }
         startMonitor(prompt: true)
         hud.prewarm()
+        logo.setEnabled(showLogo)
         Task.detached(priority: .background) { WhisperTranscriber.removeDroppedModels() }
         // Only a model that's here, or one you chose to download: a fresh install used to start a 500 MB download of
         // English before you'd picked a language, alongside the search model (both slow, and not asked for).
@@ -348,6 +437,11 @@ public final class DictationController: ObservableObject {
         }
         if let lastText {
             items.append(ClosureMenuItem("Paste Last Dictation Again") { [weak self] in self?.pasteLast() })
+            if let lastHeard, lastCleaned {
+                items.append(ClosureMenuItem("Paste Exactly What I Said") { [weak self] in
+                    self?.report(TextInserter.insert(lastHeard))
+                })
+            }
             items.append(ClosureMenuItem("Copy Last Dictation") { TextInserter.copy(lastText) })
         }
         items.append(ClosureMenuItem("Quiet Voice", checked: whisperMode) { [weak self] in
@@ -542,20 +636,65 @@ public final class DictationController: ObservableObject {
             return
         }
         // The pill first, so you see Murmur listening the moment you press the key; the microphone starts off the
-        // main thread (it can take a second with a Bluetooth headset) and keeps everything from the start.
+        // main thread and keeps everything from the start. A Bluetooth headset can take a second to wake, and what
+        // was said meanwhile was lost while the pill already said "Listening": until audio is coming in it says
+        // the microphone is starting.
         phase = .listening(handsFree: handsFree)
-        hud.show(commandRequested ? .command
-                 : typingRequested ? .typingOnly(handsFree: handsFree) : .listening(handsFree: handsFree))
-        recorder.start { [weak self] error, took in
-            guard let self else { return }
-            if let error {
-                log("dictation: can't start the microphone: \(error.localizedDescription)")
+        micLive = false
+        hud.show(listeningMode(handsFree: handsFree))
+        let attempt = UUID()
+        micAttempt = attempt
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, micAttempt == attempt, !micLive, case .listening = phase else { return }
+            showingMicStart = true
+            hud.show(.startingMic)
+        }
+        recorder.start { [weak self] result in
+            guard let self, micAttempt == attempt else { return }
+            if let error = result.error {
+                log("dictation: can't start the microphone: \(error)")
                 guard case .listening = phase else { return }
                 phase = .idle
                 hud.flash("Can't start the microphone")
                 return
             }
-            if took > 0.4 { log(String(format: "dictation: the microphone took %.1f s to start", took)) }
+            micLive = true
+            let name = result.device.map { "\($0.name) (\($0.kind))" } ?? "the default microphone"
+            log(String(format: "dictation: listening with %@, on in %.2f s", name, result.took))
+            if let fellBack = result.fellBack { log("dictation: used the default microphone instead of \(fellBack)") }
+            guard case .listening(let handsFree) = phase else { return }
+            if showingMicStart {
+                showingMicStart = false
+                hud.show(listeningMode(handsFree: handsFree))
+            }
+        }
+    }
+
+    /// The pill while recording: a command (⌃), typing only (⇧), or plain listening.
+    private func listeningMode(handsFree: Bool) -> DictationHUD.Mode {
+        commandRequested ? .command : typingRequested ? .typingOnly(handsFree: handsFree) : .listening(handsFree: handsFree)
+    }
+
+    /// The Murmur button's Start Dictation: hands-free (like a double-tap of the key); the next one finishes.
+    private func logoClicked() {
+        switch phase {
+        case .listening:
+            finish()
+        case .idle:
+            guard speechModelChosen else {
+                hud.flash("Choose a speech model first", seconds: 3)
+                onOpenSpeechSettings?()
+                return
+            }
+            pressedAt = Date()
+            commandRequested = false
+            typingRequested = false
+            previousApp = NSWorkspace.shared.frontmostApplication
+            begin(handsFree: true)
+            focusAtPress = Self.focus()
+            selectionAtPress = Self.selectedText()
+        default:
+            break
         }
     }
 
@@ -577,6 +716,7 @@ public final class DictationController: ObservableObject {
 
     private func finishRecording() {
         let recorded = recorder.stop()
+        showingMicStart = false
         guard recorded.count >= minimumSamples else {
             phase = .idle
             hud.hide()
@@ -588,6 +728,9 @@ public final class DictationController: ObservableObject {
                    leveled.speechDB, leveled.noiseDB, leveled.gainDB, whisperMode ? " (quiet voice)" : ""))
         let samples = leveled.samples
         lastSamples = samples
+        // Next to no sound at all: the microphone isn't hearing you (muted, the wrong one, a closed lid).
+        let silent = leveled.speechDB < -55
+        let micName = recorder.device?.name
         let transcriber = transcriber
         let forcedCommand = commandRequested
         let typingOnly = typingRequested
@@ -612,7 +755,13 @@ public final class DictationController: ObservableObject {
                 }
                 phase = .idle
                 guard !text.isEmpty else {
-                    hud.flash("Didn't catch that")
+                    if silent {
+                        log("dictation: no sound from \(micName ?? "the microphone")")
+                        hud.flash("No sound from \(micName ?? "the microphone") · choose another in Settings",
+                                  seconds: 4, tone: .problem)
+                    } else {
+                        hud.flash("Didn't catch that")
+                    }
                     return
                 }
                 var selection = pressedSelection
@@ -645,24 +794,35 @@ public final class DictationController: ObservableObject {
                     log("command: \"\(text)\"")
                     DictationHistory.shared.add(text, app: frontApp, kind: .command)
                     hud.show(.working("“\(text.prefix(60))”"))
+                    lastCommand = text
                     await agent.run(text, frontApp: frontApp, selection: selection, explicit: decision.explicit,
                                     editable: focus == .textField)
                     if hud.isWorking { hud.hide() }
                     return
                 }
-                lastText = text
-                DictationHistory.shared.add(text, app: frontApp, kind: .dictation)
+                lastHeard = text
+                lastCleaned = false
+                var words = text
+                if aiCleanup, DictationCleanup.worthCleaning(text) {
+                    hud.show(.working("Tidying up"))
+                    if let cleaned = await cleanUp(text) {
+                        words = cleaned
+                        lastCleaned = cleaned != text
+                    }
+                }
+                lastText = words
+                DictationHistory.shared.add(words, app: frontApp, kind: .dictation)
                 if focus == .notText {
                     // Pasting into Finder or the desktop makes a text clipping file: copy it instead.
-                    TextInserter.copy(text)
+                    TextInserter.copy(words)
                     log("dictation: nowhere to type, copied instead")
                     hud.flash("Nowhere to type here · copied to clipboard", seconds: 3)
                     return
                 }
                 hud.hide()
                 // Spacing, the first letter and the final full stop fitted to the sentence it goes into.
-                let typed = fitText ? CursorContext.fit(text) : text
-                if typed != text { log("dictation: fitted to the sentence around the cursor") }
+                let typed = fitText ? CursorContext.fit(words) : words
+                if typed != words { log("dictation: fitted to the sentence around the cursor") }
                 lastText = typed
                 report(TextInserter.insert(typed))
             } catch {
@@ -671,6 +831,55 @@ public final class DictationController: ObservableObject {
                 hud.flash("Transcription failed")
             }
         }
+    }
+
+    /// AI cleanup with the commands' model. Nil — the words are typed as heard — when the model is slow (over 4 s),
+    /// fails, or replies with anything but a tidied version of what was said.
+    private func cleanUp(_ text: String) async -> String? {
+        let app = NSWorkspace.shared.frontmostApplication
+        let category = DictationCleanup.category(bundleID: app?.bundleIdentifier, windowTitle: Self.frontWindowTitle())
+        let style = cleanupStyle(for: category)
+        let router = agent.currentRouter()
+        let system = DictationCleanup.system(style: style, category: category)
+        let user = DictationCleanup.user(text)
+        let started = Date()
+        let reply: String? = await withCheckedContinuation { continuation in
+            let once = ResumeOnce()
+            let work = Task {
+                let answer = try? await router.chat(system: system, turns: [.user(user)], tools: []).text
+                once.run { continuation.resume(returning: answer) }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                once.run { continuation.resume(returning: nil) }
+                work.cancel()
+            }
+        }
+        let took = Date().timeIntervalSince(started)
+        let what = "\(router.name), \(category.rawValue), \(style.rawValue)"
+        guard let reply else {
+            log(String(format: "dictation: AI cleanup (%@) gave nothing in %.1f s: typed as heard", what, took))
+            return nil
+        }
+        guard let cleaned = DictationCleanup.accept(original: text, cleaned: reply) else {
+            log(String(format: "dictation: AI cleanup (%@) changed more than tidying in %.1f s: typed as heard", what, took))
+            return nil
+        }
+        log(String(format: "dictation: AI cleanup (%@) in %.1f s%@", what, took, cleaned == text ? ", nothing to change" : ""))
+        return cleaned
+    }
+
+    /// The front window's title ("Inbox – Gmail", "WhatsApp"), for telling web apps apart in a browser.
+    static func frontWindowTitle() -> String? {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.2)
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &window) == .success,
+              let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+        var title: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &title)
+        return title as? String
     }
 
     private func report(_ outcome: TextInserter.Outcome) {
@@ -822,7 +1031,7 @@ extension DictationController {
                 guard let self else { return }
                 hud.hide()
                 answerPanel.onPaste = { [weak self] text in self?.pasteIntoPreviousApp(text) }
-                answerPanel.show(text)
+                answerPanel.show(text, asked: lastCommand, trace: agent.trace)
             },
             insert: { [weak self] text in self?.pasteIntoPreviousApp(text) },
             searchFiles: { [weak self] query in
@@ -1111,5 +1320,19 @@ extension DictationController {
 enum TextCleanup {
     static func basic(_ text: String) -> String {
         text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+}
+
+/// Resumes a continuation once, whichever comes first: the model's answer or the time running out.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    func run(_ body: () -> Void) {
+        lock.lock()
+        let first = !done
+        done = true
+        lock.unlock()
+        if first { body() }
     }
 }

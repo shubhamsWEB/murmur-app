@@ -295,21 +295,78 @@ public enum ScreenControl {
 
     // MARK: Acting
 
-    /// Clicks the button or link whose words match `text` (the same words, then starting with them, then containing
-    /// them), from a fresh look at the screen: browser_click when the browser's page can't be scripted.
+    /// Clicks the button or link whose words best match `text`, found anywhere in the front window, not only among
+    /// the first things a read lists: a web app like Gmail has hundreds, and "Sent" in its sidebar wasn't among
+    /// them. The same words first, then words that start with them ("Sent 3" for "Sent"), then ones that contain
+    /// them; links and buttons before other things, ones on screen first. Pressed through Accessibility (scrolled
+    /// into view first), else clicked with the pointer. browser_click uses it when the page can't be scripted.
     public static func click(labeled text: String) async -> String {
-        _ = await read()
-        let want = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AXIsProcessTrusted() else { return "Murmur needs Accessibility permission to click." }
+        let want = folded(text)
         guard !want.isEmpty else { return "Say what to click." }
-        var best: (index: Int, score: Int)?
-        for (index, element) in elements.enumerated() {
-            let role = string(element, kAXRoleAttribute) ?? ""
-            guard let words = label(element, role: role)?.lowercased() else { continue }
-            let score = words == want ? 3 : words.hasPrefix(want) ? 2 : words.contains(want) ? 1 : 0
-            if score > (best?.score ?? 0) { best = (index, score) }
+        guard let app = await targetApp() else { return "No app is in front." }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute) else {
+            return "\(app.localizedName ?? "The front app") has no window open."
         }
-        guard let best else { return "Nothing on the screen says “\(text)”. read_screen to see what's there, or scroll." }
-        return await click(best.index + 1)
+        let pressable: Set<String> = [
+            "AXLink", "AXButton", "AXTab", "AXMenuItem", "AXMenuButton", "AXRadioButton", "AXCheckBox",
+            "AXPopUpButton", "AXDisclosureTriangle", "AXTreeItem", "AXRow", "AXCell",
+        ]
+        var best: (element: AXUIElement, score: Int)?
+        var queue = [window]
+        var index = 0
+        while index < queue.count, index < 25_000 {
+            let node = queue[index]
+            index += 1
+            let role = string(node, kAXRoleAttribute) ?? ""
+            if pressable.contains(role), let words = label(node, role: role) {
+                let match = matchScore(folded(words), want)
+                if match > 0 {
+                    let score = match * 10 + (role == "AXLink" || role == "AXButton" ? 2 : 0) + (isOnScreen(node) ? 1 : 0)
+                    if score > (best?.score ?? 0) { best = (node, score) }
+                }
+                // A link's or button's children are its label.
+                if role == "AXLink" || role == "AXButton" { continue }
+            }
+            queue.append(contentsOf: children(node))
+        }
+        guard let best else {
+            return "Nothing on the screen says “\(text)”. read_screen to see what's there, or scroll."
+        }
+        let what = describe(best.element) ?? "“\(text)”"
+        AXUIElementPerformAction(best.element, "AXScrollToVisible" as CFString)
+        if AXUIElementPerformAction(best.element, kAXPressAction as CFString) == .success {
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            return "Clicked \(what)."
+        }
+        guard let point = center(of: best.element) else { return "Couldn't click \(what)." }
+        app.activate()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        mouseClick(at: point)
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        return "Clicked \(what)."
+    }
+
+    /// Lowercased, quotes and punctuation dropped, spaces collapsed: "“Sent”" → "sent".
+    nonisolated static func folded(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: #"[“”"'‘’.,:;!?()\[\]]"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// How well a control's words match what to click: 4 the same, 3 starting with it as a word ("sent 3"),
+    /// 2 starting with it, 1 containing it as a word, 0 not at all.
+    nonisolated static func matchScore(_ words: String, _ want: String) -> Int {
+        guard !words.isEmpty, !want.isEmpty else { return 0 }
+        if words == want { return 4 }
+        if words.hasPrefix(want + " ") { return 3 }
+        if words.hasPrefix(want) { return 2 }
+        if (" " + words + " ").contains(" " + want + " ") { return 1 }
+        return 0
     }
 
     /// Puts the cursor in the field whose label or placeholder contains `name`; with no name (or no match), the

@@ -39,26 +39,48 @@ public enum BrowserControl {
         }
     }
 
-    /// Turns on the browser's "Allow JavaScript from Apple Events" (Chrome-family: View → Developer), through its
-    /// menu, then checks it took. Safari asks for a password there, so it's left to the user.
+    /// Turns on the browser's "Allow JavaScript from Apple Events" (Chrome-family: View → Developer), then checks it
+    /// took. The switch belongs to the Chrome profile of the window in front, and its menu acts on the browser only
+    /// while that's the active app: so the browser comes to the front first (Murmur's own question was in front),
+    /// and the menu is tried twice, through Accessibility and then by opening it as a person would (System Events).
+    /// Safari asks for a password there, so it's left to the user.
     public static func enablePageAccess(in browser: Browser) async -> Bool {
         guard !browser.safari,
               let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first else {
             return false
         }
-        guard await ScreenControl.turnOnMenuItem(titled: "Allow JavaScript from Apple Events", in: app) else {
-            onLog?("browser: couldn't find or press View → Developer → Allow JavaScript from Apple Events in \(browser.name)")
-            return false
-        }
-        // The switch can take a moment to apply: check a few times before giving up.
-        for wait in [500, 1000, 1500] as [UInt64] {
+        let title = "Allow JavaScript from Apple Events"
+        app.activate()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        if await probe(browser) == .ok { return true }
+        if await ScreenControl.turnOnMenuItem(titled: title, in: app), await waitForAccess(browser) { return true }
+        onLog?("browser: the menu item didn't take through Accessibility; opening the menu instead")
+        app.activate()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let name = app.localizedName ?? browser.name
+        let script = """
+        tell application "System Events" to tell process "\(name)"
+          set frontmost to true
+          set switchItem to menu item "\(title)" of menu 1 of menu item "Developer" of menu 1 of menu bar item "View" of menu bar 1
+          if (value of attribute "AXMenuItemMarkChar" of switchItem) is missing value then click switchItem
+        end tell
+        """
+        let result = await MacActions.appleScript(source: script)
+        if result.hasPrefix("Script error") { onLog?("browser: \(result.prefix(160))") }
+        if await waitForAccess(browser) { return true }
+        onLog?("browser: \(browser.name) still won't run page scripts; working through Accessibility instead")
+        return false
+    }
+
+    /// The switch can take a moment to apply: checked a few times.
+    private static func waitForAccess(_ browser: Browser) async -> Bool {
+        for wait in [400, 800, 1200] as [UInt64] {
             try? await Task.sleep(nanoseconds: wait * 1_000_000)
-            let access = await probe(browser)
-            if access == .ok { return true }
-            onLog?("browser: pressed the menu item in \(browser.name); pages still say \(access)")
+            if await probe(browser) == .ok { return true }
         }
         return false
     }
+
     /// Where these notes go (the app's log).
     public static var onLog: ((String) -> Void)?
 
@@ -286,6 +308,60 @@ public enum BrowserControl {
         }
     }
 
+    /// The whole page, for summarising or answering about all of it: scrolled to the end a few times so what loads
+    /// further down (comments, "infinite" lists, lazy sections) is there, its full text taken, then put back where
+    /// it was. The page itself, or the panel that scrolls in web apps (the same one browser_scroll moves).
+    public static func readAll(in browser: Browser, limit: Int = 150_000) async
+        -> Result<(title: String, url: String, text: String), Failure> {
+        let toEnd = #"""
+        (() => {
+          const page = document.scrollingElement || document.documentElement;
+          let box = (window.__murmurBox && window.__murmurBox.isConnected) ? window.__murmurBox : page;
+          if (box === page && page.scrollHeight <= innerHeight + 5) {
+            let area = 0;
+            for (const e of document.querySelectorAll('div,main,section,ul,article')) {
+              if (e.scrollHeight <= e.clientHeight + 20) continue;
+              if (!/(auto|scroll)/.test(getComputedStyle(e).overflowY)) continue;
+              const r = e.getBoundingClientRect(), a = r.width * r.height;
+              if (a > area) { area = a; box = e; }
+            }
+          }
+          window.__murmurBox = box === page ? null : box;
+          if (window.__murmurStart === undefined) window.__murmurStart = box === page ? scrollY : box.scrollTop;
+          if (box === page) scrollTo(0, box.scrollHeight); else box.scrollTop = box.scrollHeight;
+          return String(box.scrollHeight);
+        })()
+        """#
+        var last = ""
+        for _ in 0..<6 {
+            guard case .success(let height) = await evaluate(toEnd, in: browser) else { break }
+            try? await Task.sleep(nanoseconds: 800_000_000)   // what loads as you reach the end
+            if height == last { break }
+            last = height
+        }
+        let take = #"""
+        (() => {
+          const box = (window.__murmurBox && window.__murmurBox.isConnected) ? window.__murmurBox : null;
+          const root = box || document.body || document.documentElement;
+          const text = (root.innerText || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+          const start = window.__murmurStart || 0;
+          delete window.__murmurStart;
+          if (box) box.scrollTop = start; else scrollTo(0, start);
+          return JSON.stringify({ title: document.title, url: location.href, text: text.slice(0, LIMIT) });
+        })()
+        """#.replacingOccurrences(of: "LIMIT", with: String(limit))
+        switch await evaluate(take, in: browser) {
+        case .failure(let failure): return .failure(failure)
+        case .success(let json):
+            guard let data = json.data(using: .utf8),
+                  let page = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .success((title: "", url: "", text: json))
+            }
+            return .success((title: page["title"] as? String ?? "", url: page["url"] as? String ?? "",
+                             text: page["text"] as? String ?? ""))
+        }
+    }
+
     /// Clicks the link or button whose words best match `target` (exact, then starts with, then contains).
     public static func click(_ target: String, in browser: Browser) async -> String {
         let code = "((want) => {" + visible + labelOf + #"""
@@ -486,6 +562,8 @@ public enum BrowserControl {
           if (!app.running() || app.windows.length === 0) return "";
           const norm = u => String(u || "").replace(/^https?:\/\/(www\.)?/i, "").replace(/#.*$/, "").replace(/\/$/, "").toLowerCase();
           const site = u => norm(u).split(/[\/?]/)[0];
+          // With the part after # kept: Gmail's #inbox and #sent are one page to norm, but different views.
+          const full = u => String(u || "").replace(/^https?:\/\/(www\.)?/i, "").replace(/\/(?=#|$)/, "").toLowerCase();
           const target = norm(want), home = target === site(want);
           const wins = app.windows();
           for (let wi = 0; wi < wins.length; wi++) {
@@ -496,6 +574,8 @@ public enum BrowserControl {
                 if (safari) wins[wi].currentTab = tabs[i]; else wins[wi].activeTabIndex = i + 1;
                 if (wi > 0) wins[wi].index = 1;
                 app.activate();
+                // The same page, another view (#sent while it shows #inbox) or another address on it: go there.
+                if (!home && full(u) !== full(want)) { tabs[i].url = want; return "went there"; }
                 return "switched";
               }
             }
@@ -509,6 +589,9 @@ public enum BrowserControl {
         let site = url.host?.replacingOccurrences(of: "www.", with: "") ?? url.absoluteString
         switch await jxa(script, [browser.bundleID, browser.safari ? "safari" : "chromium", url.absoluteString,
                                   reuse ? "1" : "0"]) {
+        case .success(let result) where result.hasPrefix("went there"):
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "Opened \(url.absoluteString) in the \(site) tab that was already open in \(browser.name)."
         case .success(let result) where result.hasPrefix("switched"):
             try? await Task.sleep(nanoseconds: 300_000_000)
             return "Switched to the \(site) tab that was already open in \(browser.name)."

@@ -62,10 +62,12 @@ let appDependencies: [Package.Dependency] = [
 let appTargets: [Target] = [
     // Murmur's commands: the quick patterns, the Ollama router, Mac actions, Claude Code / Codex as helpers.
     .target(name: "AgentKit", swiftSettings: [.swiftLanguageMode(.v5)]),
+    // Catches Objective-C exceptions (AVAudioEngine raises them for a microphone it can't use) so they can't quit Murmur.
+    .target(name: "MurmurObjC"),
     // Murmur's dictation: microphone, Parakeet and Whisper, the dictation key, pasting into the focused app, the HUD.
     .target(
         name: "VoiceKit",
-        dependencies: ["AgentKit", .product(name: "FluidAudio", package: "FluidAudio"),
+        dependencies: ["AgentKit", "MurmurObjC", .product(name: "FluidAudio", package: "FluidAudio"),
                        .product(name: "WhisperKit", package: "WhisperKit")],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),

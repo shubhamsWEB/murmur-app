@@ -10,8 +10,16 @@ triggers: [email, emails, e-mail, mail, mails, inbox, gmail, outlook, unread]
 - Gmail: the user's browser (open_url mail.google.com; a tab that already has it comes forward). Read it with
   browser_read. Mail app: open_app Mail, then read_screen, or run_applescript (app_dictionary Mail) to list
   messages with sender, subject, date and read status, which is faster and complete.
-- "Unread" in Gmail: search is:unread in the search box (or open_url
-  https://mail.google.com/mail/u/0/#search/is%3Aunread). "Today": newer_than:1d. From someone: from:name.
+- Gmail's folders and searches have their own addresses: go straight there with open_url, rather than clicking
+  through the sidebar (it opens in the Gmail tab that's already open):
+  - Sent: https://mail.google.com/mail/u/0/#sent · Drafts: …/#drafts · Starred: …/#starred · All mail: …/#all
+  - A search: https://mail.google.com/mail/u/0/#search/<words>, e.g. #search/in%3Asent+murmur for sent emails
+    about Murmur, #search/is%3Aunread for unread. "Today": newer_than:1d. From someone: from:name. To someone:
+    to:name.
+- If a click or address doesn't change the view, don't repeat it and don't ask the user to click for you: use
+  the address above, the search box, or Gmail's keyboard shortcuts (g then t: Sent; g then i: Inbox).
+- Sent emails: the list shows who each went to ("To: …"), the subject and the date. To report what was said,
+  open each one, as below.
 
 ## Going through many emails
 1. plan first: one step per email you will open (subject and sender), plus a last step for the answer. If there

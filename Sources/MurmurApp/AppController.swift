@@ -88,6 +88,7 @@ final class AppController {
         dictation.onOpenFile = { [weak self] query in await self?.openBestFile(query) ?? "" }
         dictation.onOpenModelSettings = { [weak self] in self?.showHome(.commands) }
         dictation.onOpenSpeechSettings = { [weak self] in self?.showHome(.dictation) }
+        dictation.onOpenApp = { [weak self] in self?.showHome() }
         // One download at a time, the speech model first: together both crawled.
         // A speech download reports "preparing" between its files for a moment: the search model resumes only after
         // three quiet seconds, so it doesn't stop and start with every file.

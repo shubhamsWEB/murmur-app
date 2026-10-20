@@ -776,12 +776,92 @@ private struct SpeechAccuracyRows: View {
             }
         }
         RowDivider()
+        SettingRow(title: "Microphone", detail: microphoneDetail(dictation.microphoneInUse())) {
+            let devices = dictation.microphones()
+            Picker("Microphone", selection: Binding(get: { dictation.microphoneUID ?? "" },
+                                                    set: { dictation.microphoneUID = $0.isEmpty ? nil : $0 })) {
+                Text("Automatic").tag("")
+                ForEach(devices) { device in Text(device.name).tag(device.uid) }
+                if let chosen = dictation.microphoneUID, !devices.contains(where: { $0.uid == chosen }) {
+                    Text("Not connected").tag(chosen)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 230)
+        }
+        if dictation.microphoneUID == nil {
+            RowDivider()
+            SettingRow(title: "Use the Mac's microphone over AirPods",
+                       detail: "AirPods and other Bluetooth headsets drop to phone-call sound while their microphone is on, "
+                           + "so Murmur hears you less clearly and may miss your first word. Not when the lid is closed.") {
+                MurmurSwitch(label: "Use the Mac's microphone over AirPods",
+                             isOn: Binding(get: { dictation.preferBuiltInMic }, set: { dictation.preferBuiltInMic = $0 }))
+            }
+        }
+        RowDivider()
+        SettingRow(title: "Murmur button on screen",
+                   detail: "A small Murmur pill on your screen. Click it to open Murmur, drag it wherever you like, "
+                       + "right-click to start dictating or hide it.") {
+            MurmurSwitch(label: "Murmur button on screen",
+                         isOn: Binding(get: { dictation.showLogo }, set: { dictation.showLogo = $0 }))
+        }
+        RowDivider()
         SettingRow(title: "Fit to the sentence",
                    detail: "Adds the space before what you say, and leaves out the capital and full stop when it goes into "
                        + "the middle of a sentence. Your words are never changed.") {
             MurmurSwitch(label: "Fit to the sentence",
                          isOn: Binding(get: { dictation.fitText }, set: { dictation.fitText = $0 }))
         }
+    }
+
+    private func microphoneDetail(_ inUse: AudioDevices.Input?) -> String {
+        guard let inUse else { return "No microphone found." }
+        var line = "Listening with \(inUse.name)."
+        if inUse.isBluetooth { line += " Bluetooth microphones are less accurate than the Mac's own." }
+        return line
+    }
+}
+
+/// AI cleanup: off by default. When on, fillers and stumbles come out, self-corrections are applied and lists set
+/// out, in a style for each kind of app.
+private struct CleanupSettings: View {
+    @ObservedObject var dictation: DictationController
+
+    var body: some View {
+        SettingsSection("AI cleanup") {
+            SettingRow(title: "Tidy up what you say",
+                       detail: "Takes out “um”, “uh” and repeated words, keeps only the corrected version when you correct "
+                           + "yourself (“at 5, no, 6pm” → “at 6pm”) and sets out spoken lists. Nothing else is changed: "
+                           + "if the model rewrites, answers or drops anything, or takes over 4 seconds, your words go in "
+                           + "as heard. The menu's “Paste Exactly What I Said” brings back the original.") {
+                MurmurSwitch(label: "Tidy up what you say",
+                             isOn: Binding(get: { dictation.aiCleanup }, set: { dictation.aiCleanup = $0 }))
+            }
+            if dictation.aiCleanup {
+                RowDivider()
+                SettingRow(title: "Model", detail: modelDetail) { EmptyView() }
+                ForEach(DictationCleanup.Category.allCases, id: \.self) { category in
+                    RowDivider()
+                    SettingRow(title: category.display, detail: category.examples) {
+                        Picker(category.display, selection: Binding(get: { dictation.cleanupStyle(for: category) },
+                                                                    set: { dictation.setCleanupStyle($0, for: category) })) {
+                            ForEach(category.styles, id: \.self) { Text($0.display).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: category.styles.count == 3 ? 270 : 180)
+                    }
+                }
+            }
+        }
+    }
+
+    private var modelDetail: String {
+        let name = dictation.cleanupModel
+        if name == "Local model" {
+            return "The local model (Ollama) set in Commands & Assistants. Your words stay on this Mac."
+        }
+        return "\(name), as set in Commands & Assistants. What you dictate is sent to it to be tidied."
     }
 }
 
@@ -811,6 +891,7 @@ private struct SettingsPage: View {
                 }
                 SpeechAccuracyRows(dictation: dictation)
             }
+            CleanupSettings(dictation: dictation)
             SettingsSection("Shortcuts") {
                 SettingRow(title: "Talk",
                            detail: "Hold it and speak: Murmur works out whether it's typed or done. Double-tap for hands-free; "

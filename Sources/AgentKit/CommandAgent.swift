@@ -144,11 +144,27 @@ public final class CommandAgent {
     private final class Shown { var answer: String? }
     /// Whether each browser's pages can be scripted, checked once per command.
     private var pageAccess: [String: Bool] = [:]
+    /// The tool sets the model has for this command: a local model gets the ones the request needs (and more when it
+    /// asks); a cloud model gets them all.
+    private var groups: Set<ToolGroup> = Set(ToolGroup.allCases)
+    /// Signs of the task going nowhere, read after every step.
+    private var health = TaskHealth()
+    /// This command kept itself for "continue" (so it clears that when it finishes), and whether it stopped early.
+    private var savedThisRun = false
+    private var stoppedEarly = false
+    /// The page was read to the end in this command (for a summary or a question about all of it).
+    private var readWholePage = false
+    private var wholePageChecks = 0
+    /// The model working this command (it can change to the local one when a cloud model fails).
+    private var activeRouter: Router?
+    /// What this command did so far (skills followed, steps, model, time), shown with its answer.
+    public private(set) var trace = TaskTrace()
     /// Tools after which the screen is different: the step's last result shows the model the new screen.
     /// Tools that only bring something up: on their own, they rarely finish a request with more than one part.
     private static let openingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "read_screen", "wait",
         "browser_read", "browser_tabs", "browser_scroll", "browser_back", "plan", "use_skill", "read_skill_file",
+        "more_tools", "read_whole_page",
     ]
 
     /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
@@ -247,6 +263,14 @@ public final class CommandAgent {
         messageApproved = false
         sentMessages = []
         did = []
+        health = TaskHealth()
+        groups = Set(ToolGroup.allCases)
+        savedThisRun = false
+        stoppedEarly = false
+        readWholePage = false
+        wholePageChecks = 0
+        activeRouter = nil
+        trace = TaskTrace()
         shown.answer = nil
         let app = ScreenControl.workingApp()?.localizedName ?? frontApp
         let window = ScreenControl.frontWindowTitle()
@@ -266,6 +290,34 @@ public final class CommandAgent {
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
+            return
+        }
+        // "Continue": a task that didn't finish (out of steps or time, or Murmur quit) picks up where it was, with its
+        // list and notes. Before the quick commands, where "continue" and "resume" mean the media keys: with an
+        // unfinished task waiting, they mean the task.
+        if TaskResume.isResume(utterance), let pending = TaskResume.take() {
+            plan = pending.steps.map { PlanStep(text: $0.text, done: $0.done) }
+            notes = pending.notes
+            self.utterance = pending.request
+            saveProgress()   // still kept if this run is cut short too
+            host.log("command: resuming “\(pending.request.prefix(80))” at \(plan.filter(\.done).count) of \(plan.count) steps")
+            host.progress("Picking up where I stopped…")
+            if pending.finished == true {
+                // It ended with an answer: "continue" means go further than that answer went.
+                await route("Continue with my last request: \"\(pending.request)\". Your answer was:\n\"\"\"\n"
+                            + "\(pending.answer?.prefix(3000) ?? "")\n\"\"\"\nGo further from where that stopped: what "
+                            + "it didn't cover (the rest of the page or list, more detail, the next items). Don't repeat "
+                            + "what you already said, and don't redo anything already done (a message sent, a file "
+                            + "written). Then reply.",
+                            frontApp: frontApp, selection: selection, explicit: explicit)
+            } else {
+                await route("Carry on with my earlier request: \"\(pending.request)\". Your task list and notes from "
+                            + "before are shown to you: start at the first open step, check the screen for where things "
+                            + "are, and finish the whole request.",
+                            frontApp: frontApp, selection: selection, explicit: explicit)
+            }
+            clearIfFinished()
+            host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
             return
         }
         // A request about someone or something in memory ("open Mom's photos") goes to the model, which sees it all.
@@ -289,20 +341,8 @@ public final class CommandAgent {
             host.progress(summary)
             return
         }
-        // "Continue": a big task that stopped at its step or time limit picks up where it was, with its list and notes.
-        if TaskResume.isResume(utterance), let pending = TaskResume.take() {
-            plan = pending.steps.map { PlanStep(text: $0.text, done: $0.done) }
-            notes = pending.notes
-            self.utterance = pending.request
-            host.log("command: resuming “\(pending.request.prefix(80))” at \(plan.filter(\.done).count) of \(plan.count) steps")
-            host.progress("Picking up where I stopped…")
-            await route("Carry on with my earlier request: \"\(pending.request)\". Your task list and notes from before are "
-                        + "with your instructions: start at the first open step, and finish the whole request.",
-                        frontApp: frontApp, selection: selection, explicit: explicit)
-            host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
-            return
-        }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
+        clearIfFinished()
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
     }
 
@@ -574,12 +614,39 @@ public final class CommandAgent {
         // Skills: how the user wants things done. "Always" ones and ones the request names in full, the rest listed.
         let skills = SkillLibrary.shared.prompt(for: utterance)
         skillsInFull = skills.inFull
-        if !skills.inFull.isEmpty { host.log("command: skills \(skills.inFull.joined(separator: ", "))") }
-        let system = Self.systemPrompt(helpers: helpers) + skills.text + "\n\n" + context
-        let tools = Self.tools(helpers: helpers)
-        var turns: [RouterTurn] = [.user(utterance)]
+        let library = SkillLibrary.shared
+        var matched: [String] = []
+        for name in skills.inFull {
+            let always = library.skill(named: name).map { library.mode(of: $0) == .always } ?? false
+            trace.follow(name, because: always ? "always on" : "matched the request")
+            if !always { matched.append(name) }
+        }
+        host.log("command: skills followed: "
+            + (skills.inFull.isEmpty ? "none" : skills.inFull.map { "\($0) (\(trace.why[$0] ?? ""))" }.joined(separator: ", ")))
         var router = currentRouter()
-        host.progress("Thinking…")
+        activeRouter = router
+        trace.model = router is OllamaRouter ? routerModel : router.name
+        // A local model gets the tool sets this request needs (more when it asks, or calls one); a cloud model, all.
+        if router is OllamaRouter {
+            groups = ToolGroup.select(QuickCommands.clean(utterance), frontIsBrowser: BrowserControl.inFront() != nil,
+                                      hasSelection: !(selection?.isEmpty ?? true),
+                                      codingSession: CodingSession.current != nil, skillsListed: !skills.text.isEmpty,
+                                      mentionsMemory: prefs.touches(utterance))
+            host.log("command: local model's tools: core + \(groups.sorted().map(\.rawValue).joined(separator: ", "))")
+        } else {
+            groups = Set(ToolGroup.allCases)
+        }
+        let allTools = Self.tools(helpers: helpers)
+        func offered(_ groups: Set<ToolGroup>) -> [ToolSpec] {
+            let everything = groups.count == ToolGroup.allCases.count
+            return allTools.filter { ToolGroup.offers($0.name, in: groups) && (!everything || $0.name != "more_tools") }
+        }
+        var builtFor = groups
+        var system = Self.systemPrompt(helpers: helpers, groups: groups) + skills.text + "\n\n" + context
+        var tools = offered(groups)
+        var turns: [RouterTurn] = [.user(utterance)]
+        // The skills this request brought in, so you see they're being followed.
+        host.progress(matched.isEmpty ? "Thinking…" : "Thinking… · following \(matched.joined(separator: ", "))")
         var lastSignature = ""
         var repeats = 0
         // Whether anything beyond opening an app or a page has happened: "open saleshq.ai and summarise it" isn't
@@ -593,20 +660,26 @@ public final class CommandAgent {
         let began = Date()
         var budget = maxSteps
         for step in 0..<stepCap {
+            // New tool sets since the last step (asked for, or a tool from one was used): rules and tools to match.
+            if groups != builtFor {
+                builtFor = groups
+                system = Self.systemPrompt(helpers: helpers, groups: groups) + skills.text + "\n\n" + context
+                tools = offered(groups)
+            }
             // A task list buys a few steps per item; nothing runs past the time cap.
             if !plan.isEmpty { budget = min(stepCap, max(maxSteps, plan.count * 6 + 10)) }
             // A long task list gets longer: going through a dozen emails takes more than eight minutes.
             let timeLimit = plan.count >= 5 ? timeCap * 2 : timeCap
             if step >= budget || Date().timeIntervalSince(began) > timeLimit {
                 host.log("command: stopped at step \(step + 1) (budget \(budget), \(Int(Date().timeIntervalSince(began))) s)")
-                await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
+                await wrapUp(router: router, system: system, turns: turns, tools: tools)
                 return
             }
             var answer: RouterReply?
             let asked = Date()
-            let stepSystem = system + taskState
+            var sent = request(system, turns, tools: tools, router: router)
             do {
-                answer = try await router.chat(system: stepSystem, turns: Self.compacted(turns), tools: tools)
+                answer = try await router.chat(system: sent.system, turns: sent.turns, tools: tools)
                 host.log(String(format: "command: %@ step %d took %.2f s", router.name, step + 1,
                                 Date().timeIntervalSince(asked)))
             } catch {
@@ -615,13 +688,16 @@ public final class CommandAgent {
                 // Too slow, or the connection dropped: ask the same model once more before giving up on it.
                 if let failure = error as? RouterError, case .unreachable = failure {
                     host.progress("Still working… (step \(step + 1))")
-                    answer = try? await router.chat(system: stepSystem, turns: Self.compacted(turns), tools: tools)
+                    answer = try? await router.chat(system: sent.system, turns: sent.turns, tools: tools)
                 }
                 // A cloud model that still fails (offline, bad key) hands over to the local model.
                 if answer == nil, !(router is OllamaRouter) {
                     router = OllamaRouter(model: routerModel)
+                    activeRouter = router
+                    trace.model = routerModel
                     host.progress("\(error.localizedDescription) Using the local model…")
-                    answer = try? await router.chat(system: stepSystem, turns: Self.compacted(turns), tools: tools)
+                    sent = request(system, turns, tools: tools, router: router)
+                    answer = try? await router.chat(system: sent.system, turns: sent.turns, tools: tools)
                 }
                 if answer == nil {
                     if step == 0, searchInstead(utterance) { return }
@@ -650,7 +726,7 @@ public final class CommandAgent {
                 let text = ModelOutput.answer(reply.text)
                 if !text.isEmpty { host.showAnswer(text); return }
                 // Nothing at all: ask once more rather than stop silently half-way.
-                if nudgedForTools { await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools); return }
+                if nudgedForTools { await wrapUp(router: router, system: system, turns: turns, tools: tools); return }
                 nudgedForTools = true
                 turns.append(.user("Continue the request with tool calls: the next step, reply with the answer, or done."))
                 continue
@@ -658,10 +734,23 @@ public final class CommandAgent {
             turns.append(.assistant(text: reply.text, calls: reply.calls))
             var finishedNow = false
             var results: [String] = []
+            var stepLog: [(tool: String, result: String)] = []
             var changedScreen = false
             var looked = false
             for (index, call) in reply.calls.enumerated() {
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
+                // A summary of a page (or a question about all of it), answered from the part read so far: Murmur
+                // reads the whole page first, once, and the model answers from all of it.
+                if call.name == "reply" || call.name == "done", !readWholePage, wholePageChecks == 0,
+                   PageDigest.wantsWholePage(QuickCommands.clean(utterance)), let browser = browserHere() {
+                    wholePageChecks += 1
+                    host.log("command: \(call.name) before the whole page was read; reading all of it first")
+                    let page = await wholePage(browser)
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Not yet: that was from part of the page only. " + page
+                        + "\n\nNow call reply with the answer, from the whole page."))
+                    continue
+                }
                 // The task list still has open steps: done, or a final reply, would leave the request half done.
                 if call.name == "done" || call.name == "reply", planChecks < 3, plan.contains(where: { !$0.done }) {
                     planChecks += 1
@@ -707,7 +796,27 @@ public final class CommandAgent {
                     continue
                 }
                 if !Self.openingTools.contains(call.name) { didMoreThanOpen = true }
-                let outcome = await execute(call.name, call.arguments)
+                // An action meant to change the page (a click, an address, a search): the page before it, so an
+                // action that quietly did nothing is said to have failed, rather than reported as done.
+                let expectsChange = Self.pageChangingTools.contains(call.name)
+                    || (call.name == "browser_type" && call.arguments["submit"]?.description == "true")
+                let before = expectsChange ? await pageMark() : nil
+                var outcome = await execute(call.name, call.arguments)
+                if let before, !outcome.finished, await pageUnchanged(since: before) {
+                    host.log("command:   ↳ nothing changed on the page")
+                    outcome = Outcome(result: outcome.result + "\nNothing changed: the page is still “\(before.title)” "
+                        + "(\(before.url)). That didn't work, so don't repeat it: try another way (the exact address with "
+                        + "open_url, the site's own search, a keyboard shortcut, or read_screen and click).",
+                        finished: outcome.finished, shown: outcome.shown)
+                }
+                stepLog.append((call.name, outcome.result))
+                // A tool from a set the model wasn't given still runs, and its set comes with the next step; a page
+                // put up brings the browser tools.
+                if let group = ToolGroup.of(call.name), !groups.contains(group) {
+                    groups.insert(group)
+                    host.log("command: \(call.name) used; loading the \(group.rawValue) tools")
+                }
+                if openedPage || lastBrowser != nil, !groups.contains(.browser) { groups.insert(.browser) }
                 if outcome.finished {
                     // "My driving license and PAN card": the card opened, but the license's matches still wait for a
                     // pick, or another part of the request comes after. Finish only when nothing else is pending.
@@ -749,9 +858,22 @@ public final class CommandAgent {
             lastSignature = signature
             if repeats >= 2 {
                 host.log("command: the same step three times; stopping")
-                await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
+                await wrapUp(router: router, system: system, turns: turns, tools: tools)
                 return
             }
+            // Going nowhere (steps failing, the same step again, nothing ticked off): say so once, with what went
+            // wrong, so the model changes course while it still has steps left.
+            let openCount = plan.filter { !$0.done }.count
+            let nudge = health.record(stepLog, openSteps: plan.isEmpty ? nil : openCount,
+                                      doneSteps: plan.isEmpty ? nil : plan.count - openCount)
+                ?? (repeats == 1 ? TaskHealth.repeatNudge : nil)
+            if let nudge {
+                host.log("command: nudged: \(nudge.prefix(90))…")
+                turns = ContextBudget.appendingState(nudge, to: turns)
+            }
+            // A command still going after a few steps is a task: kept as it stands, so if Murmur quits or it stops
+            // early, "continue" picks it up, task list or not.
+            if step >= 2 { saveProgress(evenWithoutPlan: true) }
             if let current = plan.firstIndex(where: { !$0.done }) {
                 host.progress("Step \(current + 1) of \(plan.count): \(plan[current].text.prefix(60))…")
             } else {
@@ -759,7 +881,7 @@ public final class CommandAgent {
             }
         }
         host.log("command: stopped after \(stepCap) steps")
-        await wrapUp(router: router, system: system + taskState, turns: turns, tools: tools)
+        await wrapUp(router: router, system: system, turns: turns, tools: tools)
     }
 
     /// Money moving: always asked, whatever was allowed.
@@ -803,12 +925,12 @@ public final class CommandAgent {
     /// Moving through pages and lists: the same call again is progress (the next screenful), not a loop.
     private static let browsingTools: Set<String> = [
         "browser_scroll", "browser_read", "browser_back", "read_screen", "wait", "note", "plan",
-        "use_skill", "read_skill_file",
+        "use_skill", "read_skill_file", "more_tools", "read_whole_page",
     ]
 
-    /// The task list and notes, added to the instructions on every step.
-    private var taskState: String {
-        guard !plan.isEmpty || !notes.isEmpty || !loadedSkills.isEmpty else { return "" }
+    /// Skills loaded with use_skill: they join the instructions (and stay the same from then on).
+    private var skillState: String {
+        guard !loadedSkills.isEmpty else { return "" }
         var lines: [String] = []
         let library = SkillLibrary.shared
         for name in loadedSkills {
@@ -816,6 +938,13 @@ public final class CommandAgent {
             lines.append("\n" + library.heading(skill, "loaded with use_skill: follow it"))
             lines.append(library.instructions(skill))
         }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The task list and notes, shown to the model on every step.
+    private var progressState: String {
+        guard !plan.isEmpty || !notes.isEmpty else { return "" }
+        var lines: [String] = []
         if !plan.isEmpty {
             lines.append("\nYour task list (keep it current with plan; [x] done, [ ] to do):")
             lines += plan.map { "\($0.done ? "[x]" : "[ ]") \($0.text)" }
@@ -830,6 +959,50 @@ public final class CommandAgent {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// What the model is sent for a step. A cloud model gets the task list and notes with its instructions, as
+    /// before. A local model gets them after the conversation instead: they change every step, and Ollama only reuses
+    /// what it read last time up to the first change, so in the instructions they made it read everything again.
+    /// And the whole prompt is fitted to the local model's context, oldest steps first, rather than cut by Ollama.
+    private func request(_ system: String, _ turns: [RouterTurn], tools: [ToolSpec],
+                         router: Router) -> (system: String, turns: [RouterTurn]) {
+        let compact = Self.compacted(turns)
+        guard router is OllamaRouter else { return (system + skillState + progressState, compact) }
+        let instructions = system + skillState
+        let progress = progressState
+        let fixed = ContextBudget.tokens(instructions) + ContextBudget.tokens(tools) + ContextBudget.tokens(progress)
+        let fitted = ContextBudget.fit(compact, fixed: fixed, window: OllamaClient.contextWindow)
+        if fitted.count < compact.count { host.log("command: left out \(compact.count - fitted.count) old turns to fit the context") }
+        return (instructions, ContextBudget.appendingState(progress, to: fitted))
+    }
+
+    /// Keeps the task as it stands for "continue": its list with steps still to do. `evenWithoutPlan`: a task the
+    /// model didn't write a list for is kept as one open step, the request itself, with the notes so far.
+    private func saveProgress(evenWithoutPlan: Bool = false) {
+        var steps = plan.map { TaskResume.Step(text: $0.text, done: $0.done) }
+        if steps.isEmpty, evenWithoutPlan { steps = [.init(text: "Finish the request: \(utterance.prefix(200))", done: false)] }
+        guard steps.contains(where: { !$0.done }) else { return }
+        TaskResume.save(.init(request: utterance, steps: steps, notes: notes))
+        savedThisRun = true
+    }
+
+    /// When a command ends. Stopped short (out of steps or time), or answered with steps still open: it stays kept as
+    /// it is, for "continue". Finished with an answer worth going further on (a page summarised, a question
+    /// answered, a list gone through): kept for half an hour as finished, so "continue" goes on from that answer.
+    /// Otherwise what this command kept is cleared; one that never kept anything leaves an older task alone.
+    private func clearIfFinished() {
+        if stoppedEarly || plan.contains(where: { !$0.done }) { return }
+        let goesFurther = routing && shown.answer != nil
+            && (Self.asksForInformation(utterance) || PageDigest.wantsWholePage(QuickCommands.clean(utterance))
+                || !notes.isEmpty || !plan.isEmpty)
+        if goesFurther {
+            TaskResume.save(.init(request: utterance, steps: plan.map { .init(text: $0.text, done: $0.done) },
+                                  notes: notes, answer: shown.answer, finished: true))
+            host.log("command: kept for half an hour, so “continue” can go further")
+        } else if savedThisRun || !plan.isEmpty {
+            TaskResume.clear()
+        }
     }
 
     /// "[x] open the inbox\n[ ] open the HDFC email": the model's list as steps.
@@ -878,21 +1051,23 @@ public final class CommandAgent {
     private func wrapUp(router: Router, system: String, turns: [RouterTurn], tools: [ToolSpec]) async {
         var turns = turns
         // Out of steps or time with the task list unfinished: keep it, so "continue" picks it up from here.
-        let resumable = plan.contains { !$0.done }
+        stoppedEarly = true
+        saveProgress(evenWithoutPlan: true)
+        let resumable = plan.isEmpty || plan.contains { !$0.done }
         if resumable {
-            TaskResume.save(.init(request: utterance, steps: plan.map { (text: $0.text, done: $0.done) }, notes: notes, at: Date()))
             host.log("command: kept the unfinished task (\(plan.filter { !$0.done }.count) steps open) for “continue”")
         }
         turns.append(.user("Stop here. Call reply now: in two or three sentences, what you found or did for the "
             + "request, with any answer you have, and what's still left to do."
             + (resumable ? " End by saying they can say “continue” to pick up from here." : "")))
         let replyOnly = tools.filter { $0.name == "reply" }
-        if let last = try? await router.chat(system: system, turns: Self.compacted(turns), tools: replyOnly),
+        let sent = request(system, turns, tools: replyOnly, router: router)
+        if let last = try? await router.chat(system: sent.system, turns: sent.turns, tools: replyOnly),
            let call = last.calls.first(where: { $0.name == "reply" }) {
             host.showAnswer(call.arguments["text"]?.description ?? "")
             return
         }
-        let text = ModelOutput.answer((try? await router.chat(system: system, turns: Self.compacted(turns), tools: []))?.text ?? "")
+        let text = ModelOutput.answer((try? await router.chat(system: sent.system, turns: sent.turns, tools: []))?.text ?? "")
         host.showAnswer(text.isEmpty ? "I couldn't finish that one. Try asking again, or in smaller steps." : text)
     }
 
@@ -954,6 +1129,10 @@ public final class CommandAgent {
     /// Runs a tool, and remembers what it did for the next command.
     private func execute(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
         let outcome = await perform(tool, args)
+        trace.record(tool, args.mapValues(\.description), result: outcome.result)
+        // What it said, in the log: a step that "worked" but didn't is visible there.
+        let said = outcome.result.prefix(200).replacingOccurrences(of: "\n", with: " ⏎ ")
+        host.log("command:   ↳ \(said)\(outcome.result.count > 200 ? "…" : "")")
         did.append(CommandMemory.Action(tool: tool, args: args.mapValues { String($0.description.prefix(200)) },
                                         result: String(outcome.result.prefix(300))))
         return outcome
@@ -1106,6 +1285,9 @@ public final class CommandAgent {
             guard let browser = browserHere() else {
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
             }
+            if !readWholePage, PageDigest.wantsWholePage(QuickCommands.clean(utterance)) {
+                return Outcome(result: await wholePage(browser))
+            }
             host.progress("Reading the page…")
             if await canScript(browser), case .success(let page) = await BrowserControl.read(in: browser) {
                 host.log("command: read the page in \(browser.name): \(page.count) characters")
@@ -1118,6 +1300,11 @@ public final class CommandAgent {
                 return Outcome(result: "The whole page, top to bottom:\n\(page)\n\n\(screen)")
             }
             return Outcome(result: screen)
+        case "read_whole_page":
+            guard let browser = browserHere() else {
+                return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
+            }
+            return Outcome(result: await wholePage(browser))
         case "browser_click":
             guard let browser = browserHere() else {
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
@@ -1196,6 +1383,10 @@ public final class CommandAgent {
             host.log("command: ran an AppleScript → \(result.hasPrefix("Script error") ? "error" : "ok")")
             return Outcome(result: result)
         case "read_screen":
+            if !readWholePage, PageDigest.wantsWholePage(QuickCommands.clean(utterance)),
+               let browser = BrowserControl.inFront() {
+                return Outcome(result: await wholePage(browser))
+            }
             // In a browser, the page itself says more than its window does.
             if let browser = BrowserControl.inFront(), await canScript(browser),
                case .success(let page) = await BrowserControl.read(in: browser) {
@@ -1346,6 +1537,7 @@ public final class CommandAgent {
             let open = plan.filter { !$0.done }.count
             host.log("command: plan \(before == 0 ? "made" : "updated"): \(plan.count) steps, \(open) open")
             if before == 0, plan.count >= 3 { await askForTask() }
+            saveProgress()
             if let current = plan.firstIndex(where: { !$0.done }) {
                 host.progress("Step \(current + 1) of \(plan.count): \(plan[current].text.prefix(60))…")
             }
@@ -1355,6 +1547,7 @@ public final class CommandAgent {
             guard !note.isEmpty else { return Outcome(result: "Nothing to note.") }
             notes.append(String(note.prefix(700)))
             if notes.count > 60 { notes.removeFirst(notes.count - 60) }
+            saveProgress()
             return Outcome(result: "Noted (\(notes.count) notes).")
         case "browser_back":
             guard let browser = browserHere() else {
@@ -1384,15 +1577,91 @@ public final class CommandAgent {
                 return Outcome(result: "The \(skill.name) skill is already in your instructions. Follow it.")
             }
             loadedSkills.append(skill.name)
+            trace.follow(skill.name, because: "loaded for this task")
             host.progress("Using the \(skill.name) skill…")
             return Outcome(result: "Loaded the \(skill.name) skill: its instructions are now with yours on every "
                 + "step. Follow them from here.")
+        case "more_tools":
+            let wanted = ToolGroup.parse(text("sets"))
+            guard !wanted.isEmpty else {
+                return Outcome(result: "Name a set: \(ToolGroup.allCases.map(\.rawValue).joined(separator: ", ")).")
+            }
+            let new = wanted.filter { !groups.contains($0) }
+            groups.formUnion(wanted)
+            host.log("command: more_tools → \(wanted.map(\.rawValue).joined(separator: ", "))")
+            return Outcome(result: new.isEmpty ? "You have those tools already."
+                : "Loaded the \(new.map(\.rawValue).joined(separator: ", ")) tools: they're in your list from the next step.")
         case "read_skill_file":
             host.log("command: read_skill_file \(text("name"))/\(text("file"))")
             return Outcome(result: SkillLibrary.shared.read(text("name"), file: text("file")))
         default:
             return Outcome(result: "Unknown tool \(tool).")
         }
+    }
+
+    /// Tools after which the page should look different.
+    private static let pageChangingTools: Set<String> = [
+        "browser_click", "click", "open_url", "web_search", "site_search", "browser_back",
+    ]
+
+    /// Where the browser is and what its page holds, cheaply: the address, the title and a sign of the text.
+    struct PageMark: Equatable {
+        let url: String
+        let title: String
+        let text: Int
+    }
+
+    private func pageMark() async -> PageMark? {
+        guard let browser = BrowserControl.inFront() ?? (openedPage ? BrowserControl.running(browserInUse) : nil),
+              let tab = await BrowserControl.currentTab(in: browser) else { return nil }
+        var text = 0
+        if pageAccess[browser.bundleID] == true,
+           case .success(let length) = await BrowserControl.evaluate(
+               "String(document.body ? document.body.innerText.length : 0)", in: browser) {
+            text = Int(length) ?? 0
+        } else if let page = await ScreenControl.readPage(limit: 4000) {
+            text = page.hashValue
+        }
+        return PageMark(url: tab.url, title: tab.title, text: text)
+    }
+
+    /// The page is just as it was (looked at twice, a second apart, in case it was still loading).
+    private func pageUnchanged(since before: PageMark) async -> Bool {
+        guard await pageMark() == before else { return false }
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        return await pageMark() == before
+    }
+
+    /// The page read to the very end, for the model: whole when it fits, else read in parts with notes taken on each
+    /// part for the request (by the same model, with no tools), so the answer covers all of it.
+    private func wholePage(_ browser: BrowserControl.Browser) async -> String {
+        host.progress("Reading the whole page…")
+        var title = "", url = "", text = ""
+        if await canScript(browser), case .success(let page) = await BrowserControl.readAll(in: browser) {
+            (title, url, text) = (page.title, page.url, page.text)
+        } else if let page = await ScreenControl.readPage() {
+            text = page
+        }
+        guard !text.isEmpty else {
+            return "Couldn't get the page's text. Use read_screen, or browser_scroll and browser_read."
+        }
+        readWholePage = true
+        let router = activeRouter ?? currentRouter()
+        let local = router is OllamaRouter
+        host.log("command: read the whole page in \(browser.name): \(text.count) characters")
+        if text.count <= (local ? 14_000 : 60_000) { return PageDigest.whole(title: title, url: url, text: text) }
+        let parts = PageDigest.parts(text, size: local ? 9_000 : 40_000)
+        var notes: [String] = []
+        for (index, part) in parts.enumerated() {
+            host.progress("Reading the page: part \(index + 1) of \(parts.count)…")
+            let prompt = PageDigest.notePrompt(request: utterance, title: title, url: url, part: index + 1,
+                                               of: parts.count, text: part)
+            let reply = try? await router.chat(system: PageDigest.noteSystem, turns: [.user(prompt)], tools: [])
+            let written = ModelOutput.answer(reply?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            notes.append(written.isEmpty ? String(part.prefix(1500)) + " …" : written)
+        }
+        host.log("command: notes on \(parts.count) parts of the page")
+        return PageDigest.notes(title: title, url: url, characters: text.count, parts: notes)
     }
 
     /// The browser the page tools act in: the one in front, or the one this command opened a page in. Not the
@@ -1500,12 +1769,24 @@ public final class CommandAgent {
         }
         var access = await BrowserControl.probe(browser)
         if access == .switchOff, !browser.safari {
-            let yes = await host.confirm("Let Murmur work inside \(browser.name) pages?",
-                "Murmur will turn on \(browser.name)'s “Allow JavaScript from Apple Events” (View → Developer), so it can "
-                + "read pages and click and type in them directly. You can turn it off there at any time.")
+            // Asked once: after a yes, Murmur turns it on by itself whenever it finds it off (a new Chrome profile,
+            // a Chrome update that reset it).
+            let allowedKey = "pageAccess.allowed.\(browser.bundleID)"
+            var yes = UserDefaults.standard.bool(forKey: allowedKey)
+            if yes {
+                host.log("command: page access in \(browser.name) is off; turning it on (allowed before)")
+            } else {
+                yes = await host.confirm("Let Murmur work inside \(browser.name) pages?",
+                    "Murmur will turn on \(browser.name)'s “Allow JavaScript from Apple Events” (View → Developer), so it "
+                    + "can read pages and click and type in them directly. You can turn it off there at any time.")
+                if yes { UserDefaults.standard.set(true, forKey: allowedKey) }
+            }
+            if yes { host.progress("Setting up \(browser.name) for Murmur…") }
             if yes, await BrowserControl.enablePageAccess(in: browser) {
                 access = .ok
                 host.log("command: turned on page access in \(browser.name)")
+            } else {
+                host.log("command: page access in \(browser.name) stays off (\(yes ? "turning it on didn't work" : "you said no"))")
             }
         }
         let usable = access == .ok
@@ -1551,51 +1832,53 @@ public final class CommandAgent {
         return Outcome(result: summary)
     }
 
-    static func systemPrompt(helpers: [AssistantCLI]) -> String {
-        var lines = [
-            "You are Murmur, a voice assistant on the user's Mac. The user spoke a command; carry it out with tools.",
-            "Rules:",
-            "- Respond only with tool calls. Work in steps until the WHOLE request is done: each response does what "
+    static func systemPrompt(helpers: [AssistantCLI], groups: Set<ToolGroup> = Set(ToolGroup.allCases)) -> String {
+        // Each rule with the tool set it's about (nil: always): a rule about tools the model doesn't have is noise.
+        let tagged: [(ToolGroup?, String)] = [
+            (nil, "You are Murmur, a voice assistant on the user's Mac. The user spoke a command; carry it out with tools."),
+            (nil, "Rules:"),
+            (nil, "- Respond only with tool calls. Work in steps until the WHOLE request is done: each response does what "
                 + "it can (several calls in order are fine), then you see the results and the screen, and go on. "
                 + "When everything the user asked for is done, call done. If one response does it all (\"open "
-                + "Slack\"), put done at the end of that same response.",
-            "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said.",
-            "- Opening a file (\"open my resume pdf\"): open_file with the description in the user's words. A file "
+                + "Slack\"), put done at the end of that same response."),
+            (nil, "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said."),
+            (nil, "- Opening a file (\"open my resume pdf\"): open_file with the description in the user's words. A file "
                 + "from memory (\"In play\") only when the user points back to it (\"open it again\", \"that PDF\"); "
-                + "\"open the PDF\" is a new request, not the last file opened.",
-            "- The user may speak Hinglish (Hindi in English letters) or Hindi. Understand it like English: kholo / "
+                + "\"open the PDF\" is a new request, not the last file opened."),
+            (nil, "- The user may speak Hinglish (Hindi in English letters) or Hindi. Understand it like English: kholo / "
                 + "kholkar do / khol do = open; band karo = close or quit; chalao / bajao / play karo = play; bhejo = "
                 + "send; dhundo / search karo = find; dikhao = show; batao = tell; badhao / kam karo = turn up / down; "
                 + "mujhe = for me. \"Mujhe PDF kholkar do\" → open_file \"PDF\". Messages keep the user's own words "
-                + "and language.",
-            "- Files: \"search\", \"find\" or \"look for\" means the user's own files on this Mac: search_files. "
-                + "open_folder for standard folders.",
-            "- Web: web_search only when the user says web, online, internet or Google, or after opening a browser; "
-                + "open_url for a site.",
-            "- Mac settings and updates: open_settings (\"check for updates\" → software update); then read_screen "
-                + "and click if the user asked for a specific switch.",
-            "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot, media_control (pause or resume a playing video or song, next, previous), set_brightness, set_bluetooth, set_wifi "
-                + "(switch these directly; don't open Settings for them).",
-            "- Shortcuts: list_shortcuts, run_shortcut.",
-            "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
+                + "and language."),
+            (nil, "- Files: \"search\", \"find\" or \"look for\" means the user's own files on this Mac: search_files. "
+                + "open_folder for standard folders."),
+            (nil, "- Web: web_search only when the user says web, online, internet or Google, or after opening a browser; "
+                + "open_url for a site."),
+            (.apps, "- Mac settings and updates: open_settings (\"check for updates\" → software update); then read_screen "
+                + "and click if the user asked for a specific switch."),
+            (.system, "- System: set_volume, change_volume, mute, brightness, lock_screen, screenshot, media_control (pause or resume a playing video or song, next, previous), set_brightness, set_bluetooth, set_wifi "
+                + "(switch these directly; don't open Settings for them)."),
+            (.system, "- Shortcuts: list_shortcuts, run_shortcut."),
+            (.coding, "- Building or changing software (an app, website, script, API, project; \"create a React app…\"): call "
                 + "build_with_agent with the user's full request. It starts Claude Code or Codex in Terminal to build "
-                + "it. Never web_search or open a browser for that.",
-            "- You can see and use the front app like a person: read_screen shows the text in its window and lists "
+                + "it. Never web_search or open a browser for that."),
+            (nil, "- You can see and use the front app like a person: read_screen shows the text in its window and lists "
                 + "its buttons, links and fields as [n]. To answer what's on the screen (\"what's on my screen\", "
                 + "\"summarise this page\", \"what does this error say\"), read_screen, then reply from its text. "
                 + "click n; type_text (into field n, submit true to press Return); press_keys "
                 + "(\"return\", \"cmd+l\", \"cmd+n\", \"down\", \"pagedown\"); wait. Use them for any task the other "
                 + "tools don't cover. After an action that changes the screen you are shown the new screen with its "
                 + "[n] numbers; use only numbers from the latest screen. Keep going until the whole request is done, "
-                + "then call done.",
-            "- In the browser (Chrome, Safari, Brave, Edge, Arc), use the browser tools: they work inside the page and "
+                + "then call done."),
+            (.browser, "- In the browser (Chrome, Safari, Brave, Edge, Arc), use the browser tools: they work inside the page and "
                 + "are faster and surer than read_screen. browser_read gives the page's address, full text, fields and "
                 + "links/buttons; browser_click clicks a link or button by its words (\"the first video\": click its "
                 + "title words); browser_type types into a field by its name (submit true to search or send the form); "
                 + "browser_scroll (down, up, top, bottom) for more of the page; browser_tabs and browser_switch_tab; "
-                + "media_control pauses or plays the page's video. To summarise or answer about a page: browser_read, "
-                + "then reply from its text. If a browser tool says it can't work in pages, use read_screen and click.",
-            "- Apps that can be scripted (Notes, Reminders, Calendar, Mail, Messages, Contacts, Finder, Music, "
+                + "media_control pauses or plays the page's video. To summarise a page or answer about all of it: "
+                + "read_whole_page (it reads to the very end for you), then reply from all of it. If a browser tool "
+                + "says it can't work in pages, use read_screen and click."),
+            (.appData, "- Apps that can be scripted (Notes, Reminders, Calendar, Mail, Messages, Contacts, Finder, Music, "
                 + "Safari, System Events…): run_applescript does it directly, without clicking: e.g. tell application "
                 + "\"Reminders\" to make new reminder with properties {name:\"Call Mom\", remind me date:(current date) + "
                 + "3600}; tell application \"Notes\" to make new note with properties {body:\"<h1>Title</h1>text\"}; "
@@ -1604,105 +1887,111 @@ public final class CommandAgent {
                 + "visible:true}; tell application \"System Events\" to tell appearance preferences to set dark mode to "
                 + "true; tell application \"Finder\" to … . Prefer it over clicking through an app. Scripts that send, "
                 + "delete, quit or empty something are shown to the user first. If a script fails, read the error, fix "
-                + "it and try again, or use the app's screen instead.",
-            "- Websites: open the result page directly when you can: site_search (YouTube, Amazon, GitHub, Maps, "
+                + "it and try again, or use the app's screen instead."),
+            (.browser, "- Websites: open the result page directly when you can: site_search (YouTube, Amazon, GitHub, Maps, "
                 + "Wikipedia…) or open_url with a search URL; then browser_read and browser_click what the user wants "
                 + "(\"the first video\": the first link that is a video title, not an ad or a channel). YouTube sorted "
                 + "by views (\"the most viewed\"): open_url https://www.youtube.com/results?search_query=<words>&sp=CAM%253D "
                 + "then click the first video title; if the page isn't sorted, use its Filters button, Sort by, View "
-                + "count. To play a video, click its title.",
-            "- Clicking send, buy, post or delete asks the user; only do it when they asked for it.",
-            "- To write something in an app (\"open Notes and write a shopping list\", \"open TextEdit and draft a "
+                + "count. To play a video, click its title."),
+            (nil, "- Clicking send, buy, post or delete asks the user; only do it when they asked for it."),
+            (.text, "- To write something in an app (\"open Notes and write a shopping list\", \"open TextEdit and draft a "
                 + "letter to…\"): call write_in_app ONCE with the app and the finished text, written by you in full "
                 + "(plain text, a short title line first for notes). Don't call open_app as well. new_document false "
-                + "only when the user wants it added to what's already open.",
-            "- Selected text (below, when there is any) is what \"this\", \"it\" and \"the selection\" mean. Do the "
+                + "only when the user wants it added to what's already open."),
+            (.text, "- Selected text (below, when there is any) is what \"this\", \"it\" and \"the selection\" mean. Do the "
                 + "whole request in one go: write the summary, translation or rewrite yourself, then put it where the "
                 + "user asked. In place of the selection: replace_selection. In another app: write_in_app (\"summarise "
                 + "this and add it to Notes\" → write_in_app with app Notes and your summary as the text). To read: "
-                + "reply. Never answer that you can't put it somewhere: use the tools.",
-            "- To write text where the user is typing (no selection to replace), call insert_text with the finished "
-                + "text only.",
-            "- Terminal: run_command runs a shell command on this Mac and gives you its output (anything that changes "
+                + "reply. Never answer that you can't put it somewhere: use the tools."),
+            (.text, "- To write text where the user is typing (no selection to replace), call insert_text with the finished "
+                + "text only."),
+            (nil, "- Terminal: run_command runs a shell command on this Mac and gives you its output (anything that changes "
                 + "something is shown to the user first). Use it for what the other tools don't cover: disk space, "
                 + "battery, Wi-Fi details, file operations (copy, move, zip, convert an image with sips), git, "
                 + "installed tools. One command at a time; read the output, then go on or reply with the answer. "
-                + "Never use sudo.",
-            "- Don't give up after one try: when a step fails, try another way (another tool, read_screen and click, "
-                + "or run_command). Only reply that something can't be done once the tools truly can't do it.",
-            "- To answer a question, call reply with a short answer.",
-            "- Finish the WHOLE request, by the quickest route. A request to be told something (\"get me the updates "
+                + "Never use sudo."),
+            (nil, "- Don't give up after one try: when a step fails, try another way (another tool, read_screen and click, "
+                + "or run_command). Only reply that something can't be done once the tools truly can't do it."),
+            (nil, "- To answer a question, call reply with a short answer."),
+            (nil, "- Finish the WHOLE request, by the quickest route. A request to be told something (\"get me the updates "
                 + "on my latest LinkedIn post\", \"how many…\", \"what's…\") is only done when you call reply with the "
                 + "actual answer: the numbers, names or text. reply ends the command: use it once, for the final "
-                + "answer, never to describe a step.",
-            "- Memory first: before acting, check the memory below. Use the user's name for their own documents, "
+                + "answer, never to describe a step."),
+            (nil, "- Memory first: before acting, check the memory below. Use the user's name for their own documents, "
                 + "nicknames for people (\"Mom\" is who they said), their chosen browser and apps, and every preference "
-                + "they told you, in every step and every search.",
-            "- Work where the user is. The front app below (its window, Finder's selection, the browser tab when a "
+                + "they told you, in every step and every search."),
+            (nil, "- Work where the user is. The front app below (its window, Finder's selection, the browser tab when a "
                 + "browser is in front, and the screen when the request points at it) is where \"this\", \"that\", "
                 + "\"the first one\", \"play\" and \"open\" happen, unless the user names another app or a website. "
                 + "Finder: videos, songs and documents are the user's own files: open_file with the file's path or "
                 + "its exact name from the screen (play true to play a video or song); \"play this\" with a video "
                 + "selected: media_control play. A player (QuickTime, Music, Spotify, IINA, VLC): media_control. A "
                 + "browser: the page tools. Go to YouTube or the web only when the user names a site or asks to search "
-                + "online; never web_search or search_files for something already on the screen.",
-            "- Information inside apps: get the data, don't just open the app. Calendar: calendar_events (\"what's on "
+                + "online; never web_search or search_files for something already on the screen."),
+            (.appData, "- Information inside apps: get the data, don't just open the app. Calendar: calendar_events (\"what's on "
                 + "my calendar tomorrow\", \"my meetings this week\": start and days from today's date above). "
                 + "Reminders: reminders_list. Other apps that can be scripted (Mail, Notes, Messages, Contacts, Music, "
                 + "Safari, Finder, Photos, Things, OmniFocus…): run_applescript that reads it and returns text, e.g. "
                 + "tell application \"Mail\" to get {subject, sender} of messages 1 thru 10 of inbox; call "
                 + "app_dictionary first when unsure of the app's words. Apps that can't be scripted (WhatsApp, Slack, "
                 + "Teams, most Electron apps): open_app, read_screen, then click and scroll to the right view and read "
-                + "again. Then reply with the details asked for.",
-            "- Personal facts and preferences: when the user tells you something lasting about themselves or how they "
+                + "again. Then reply with the details asked for."),
+            (.memory, "- Personal facts and preferences: when the user tells you something lasting about themselves or how they "
                 + "like things done (\"remember that Mom is Roma on WhatsApp\", \"from now on open links in Chrome\", "
                 + "\"keep my messages short\", \"call me Shubham\"), call remember (the same subject again replaces it; "
                 + "the user's own name goes under subject \"my name\" as \"My name is <full name>\"; "
                 + "forget_fact drops one), then reply in a few words. \"Remind me to…\" is a reminder, not this. Follow "
-                + "what the user told you over everything; use what was noticed from their commands when they don't say.",
-            "- The user's own documents (\"my resume\", \"my Aadhaar card\", \"my PAN card\", \"my passport\"): open_file "
+                + "what the user told you over everything; use what was noticed from their commands when they don't say."),
+            (nil, "- The user's own documents (\"my resume\", \"my Aadhaar card\", \"my PAN card\", \"my passport\"): open_file "
                 + "with what the document is (\"Aadhaar card\", \"PAN card\"), not the user's name: a name matches every "
-                + "file about them. When the matches come back, pick the user's own one (their name in it helps tell).",
-            "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
-                + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall.",
-            "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
+                + "file about them. When the matches come back, pick the user's own one (their name in it helps tell)."),
+            (.memory, "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
+                + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall."),
+            (nil, "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
                 + "page. \"And also ask when she's coming back\" after messaging Roma on WhatsApp → send_message to Roma "
                 + "on WhatsApp with that question; \"play it\" after opening a video → play that video; \"do it again\" → "
-                + "repeat it.",
-            "- Messages to people (\"send a message to Riya on WhatsApp saying…\", \"text Mom that I'm late\", \"tell "
+                + "repeat it."),
+            (.messages, "- Messages to people (\"send a message to Riya on WhatsApp saying…\", \"text Mom that I'm late\", \"tell "
                 + "the team on Slack…\"): send_message with the app, who it's for and the message in the user's words "
                 + "(fix only obvious transcription slips). It asks the user first. If its result says to finish on the "
-                + "screen, do that. Never just type the request into the box the user is in.",
-            "- Copy and paste: \"paste what I copied\" → paste_clipboard. \"Copy the text from the other page/app and paste "
+                + "screen, do that. Never just type the request into the box the user is in."),
+            (.text, "- Copy and paste: \"paste what I copied\" → paste_clipboard. \"Copy the text from the other page/app and paste "
                 + "it here\" → get the text (browser_switch_tab or open_app, then browser_read or read_screen; or select it "
                 + "and press_keys cmd+c, then read_clipboard), then insert_text with exactly that text: it goes back to "
-                + "the box the user was in. Never type the request itself into the box.",
-            "- Documents: open_file with the user's own distinctive words (\"Q3 sales report\", \"lease 2025\"), never "
+                + "the box the user was in. Never type the request itself into the box."),
+            (nil, "- Documents: open_file with the user's own distinctive words (\"Q3 sales report\", \"lease 2025\"), never "
                 + "a generic word like \"document\". If it says it's showing matches, the user picks; don't open "
-                + "something else instead.",
-            "- Big requests, done the way a person would (\"summarise my emails\", \"go through my unread messages\", "
+                + "something else instead."),
+            (nil, "- Big requests, done the way a person would (\"summarise my emails\", \"go through my unread messages\", "
                 + "\"compare these three laptops\", \"check every tab\"): call plan first with the steps you can see, "
                 + "then work through them one at a time. Open the list, read it, scroll for more; open each item that "
                 + "matters (important, unread, from a person, about money or dates), read it, note what matters with "
                 + "note, go back (browser_back), then the next. Rewrite the plan as you learn: add the items you "
                 + "found, drop what isn't needed, add a step when something blocks you (a sign-in, a pop-up). Mark "
                 + "steps [x] as you finish them. When every step is done, reply with the answer built from your "
-                + "notes: grouped, most important first. Never answer from the first screen alone.",
-            "- Long pages: browser_read gives the text from where the page is scrolled to. To understand a whole page "
-                + "(a long post, its comments, a feed, an article), browser_scroll down and read on until the page says "
-                + "it's the end or you have what's needed; click \"see more\", \"load more comments\" and similar to "
-                + "open hidden text. Don't answer from the first screen alone when the answer is further down.",
-            "- Tabs: the browser's current tab is given below when there is one. If it already shows what's needed, "
+                + "notes: grouped, most important first. Never answer from the first screen alone."),
+            (.browser, "- Long pages: browser_read gives only the text from where the page is scrolled to. For a whole page "
+                + "(a long post, its comments, an article, a README), call read_whole_page instead of scrolling: it "
+                + "reads to the very end. Click \"see more\" or \"load more comments\" first when the answer needs "
+                + "hidden text. Never answer about a whole page from the first screen."),
+            (.browser, "- Tabs: the browser's current tab is given below when there is one. If it already shows what's needed, "
                 + "work there (browser_read) rather than opening it again. open_url, web_search and site_search come to "
                 + "a tab that already has the page, and after your first page they load in that same tab, so never "
                 + "open the same site twice. Inside a site, follow its links and buttons (browser_click: \"Me\", "
-                + "\"Posts\", \"Activity\", the post itself) rather than guessing deep addresses.",
+                + "\"Posts\", \"Activity\", the post itself) rather than guessing deep addresses."),
         ]
+        var lines = tagged.filter { entry in entry.0.map { groups.contains($0) } ?? true }.map { $0.1 }
         if !helpers.isEmpty {
             let names = helpers.map { $0 == .claude ? "ask_claude" : "ask_codex" }.joined(separator: " or ")
             lines.append("- For hard reasoning, coding, long writing or anything you are unsure of, call \(names) with a "
                 + "self-contained task, then pass the answer on with reply or insert_text. Never use \(names) to find, "
                 + "search or open the user's files or apps: use open_file, search_files or open_app.")
+        }
+        let more = ToolGroup.moreToolsHint(loaded: groups)
+        if !more.isEmpty {
+            lines.append("- Your tools are the ones this request most likely needs. If you need another kind, call "
+                + "more_tools with the set's name (the tools come with your next step): \(more).")
         }
         lines.append("- When nothing more is needed, call done.")
         return lines.joined(separator: "\n")
@@ -1763,6 +2052,8 @@ public final class CommandAgent {
             tool("site_search", "Search a website in the browser (youtube, google, amazon, github, maps, wikipedia, "
                  + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
             tool("browser_read", "Read the page in the browser: address, title, its text, fields, links and buttons"),
+            tool("read_whole_page", "Read the whole page in the browser, to the very end (it scrolls and loads the "
+                 + "rest itself): for a summary, or a question about all of an article, post, thread or its comments"),
             tool("browser_click", "Click a link or button on the browser page by its words",
                  ["text": ("string", "the link's or button's words, as shown")]),
             tool("browser_type", "Type into a field on the browser page (by its label or placeholder; empty: the "
@@ -1839,6 +2130,8 @@ public final class CommandAgent {
                  ["name": ("string", "the skill's name"),
                   "file": ("string", "the file's path inside the skill, e.g. references/setup.md")]),
             tool("done", "Finish when nothing more is needed"),
+            tool("more_tools", "Load another set of tools (named in your rules) for the next steps",
+                 ["sets": ("string", "the set names, e.g. browser or system, text")]),
         ]
         if helpers.contains(.claude) {
             list.append(tool("ask_claude", "Ask Claude Code (strong reasoning, coding, writing); returns its answer",

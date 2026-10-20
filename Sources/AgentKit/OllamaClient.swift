@@ -32,6 +32,19 @@ public struct OllamaClient: Sendable {
     public let base = URL(string: "http://127.0.0.1:11434")!
     public var model: String
 
+    /// The context the model gets, in tokens. Ollama's own default is 4,096 on Macs with up to about 32 GB, and it
+    /// silently cuts a longer prompt from the start: Murmur's instructions and tools alone are longer than that, so
+    /// the model lost its instructions. Every call sends the same size (a different one makes Ollama reload the
+    /// model): 16K, or 8K on an 8 GB Mac.
+    public static let contextWindow: Int = ProcessInfo.processInfo.physicalMemory <= 9 * 1_073_741_824 ? 8192 : 16384
+
+    /// Options for every call: the context size, plus `extra`.
+    static func options(_ extra: [String: Any] = [:]) -> [String: Any] {
+        var options: [String: Any] = ["num_ctx": contextWindow]
+        for (key, value) in extra { options[key] = value }
+        return options
+    }
+
     public init(model: String) {
         self.model = model
     }
@@ -50,7 +63,7 @@ public struct OllamaClient: Sendable {
             "stream": false,
             "think": false,                 // a router needs a decision, not a chain of thought
             "keep_alive": "30m",            // stay loaded between commands
-            "options": maxTokens.map { ["temperature": 0, "num_predict": $0] } ?? ["temperature": 0],
+            "options": Self.options(maxTokens.map { ["temperature": 0, "num_predict": $0] } ?? ["temperature": 0]),
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let data: Data
@@ -99,7 +112,7 @@ public struct OllamaClient: Sendable {
             "stream": false,
             "think": false,
             "keep_alive": "30m",
-            "options": ["temperature": 0, "num_predict": 24],
+            "options": Self.options(["temperature": 0, "num_predict": 24]),
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         request.httpBody = data
@@ -119,7 +132,8 @@ public struct OllamaClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 60
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "keep_alive": "30m"])
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "keep_alive": "30m",
+                                                                         "options": Self.options()])
         _ = try? await URLSession.shared.data(for: request)
     }
 
