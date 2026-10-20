@@ -85,6 +85,54 @@ public final class DictationController: ObservableObject {
     private static let modelDefault = "speechModel"
     private static let whisperDefault = "whisperMode"
     private static let keepDefault = "keepRecordings"
+    private static let fitTextDefault = "dictation.fitText"
+
+    /// Fits what you say to the sentence it goes into: the space before it, no capital or full stop mid-sentence.
+    /// The words are never changed.
+    public var fitText: Bool {
+        get { UserDefaults.standard.object(forKey: Self.fitTextDefault) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.fitTextDefault); objectWillChange.send() }
+    }
+
+    /// While other languages update to Parakeet Ultra: how far the download is (0…1).
+    @Published public private(set) var multilingualUpdate: Double?
+    /// Other languages are on v3 and the more accurate Ultra can be downloaded.
+    public var multilingualUpdateAvailable: Bool {
+        transcriber.model == .multilingual && ParakeetTranscriber.multilingualUpdateAvailable
+    }
+
+    /// Downloads Parakeet Ultra next to v3 (dictation keeps working on v3 meanwhile), switches to it, then frees
+    /// v3's space.
+    public func updateMultilingual() {
+        guard multilingualUpdate == nil, multilingualUpdateAvailable else { return }
+        multilingualUpdate = 0
+        log("dictation: updating other languages to Parakeet Ultra")
+        let next = SpeechTranscriber.multilingualUltra()
+        let started = Date()
+        Task { [weak self] in
+            do {
+                try await next.prepare { [weak self] fraction, downloading in
+                    DispatchQueue.main.async {
+                        guard let self, downloading else { return }
+                        self.multilingualUpdate = fraction
+                    }
+                }
+                guard let self else { return }
+                multilingualUpdate = nil
+                if transcriber.model == .multilingual {
+                    transcriber = next
+                    log(String(format: "dictation: other languages now use Parakeet Ultra (%.0f s)",
+                               Date().timeIntervalSince(started)))
+                }
+                Task.detached(priority: .background) { ParakeetTranscriber.removeOldMultilingual() }
+                objectWillChange.send()
+            } catch {
+                self?.multilingualUpdate = nil
+                self?.log("dictation: the Ultra update failed: \(error.localizedDescription)")
+                self?.hud.flash("Couldn't download the update · try again in Settings", seconds: 4)
+            }
+        }
+    }
 
     /// Keep every recording and what the speech model heard (Documents/Murmur Recordings), to compare speech models on
     /// the same clips. Off by default; nothing leaves this Mac.
@@ -558,6 +606,7 @@ public final class DictationController: ObservableObject {
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
                            seconds, text.count, Date().timeIntervalSince(started)))
+                if let detail = await transcriber.lastDetail { log("dictation: whisper \(detail)") }
                 if keepRecordings {
                     keep(samples, text: text, model: transcriber.model, took: Date().timeIntervalSince(started))
                 }
@@ -611,7 +660,11 @@ public final class DictationController: ObservableObject {
                     return
                 }
                 hud.hide()
-                report(TextInserter.insert(text))
+                // Spacing, the first letter and the final full stop fitted to the sentence it goes into.
+                let typed = fitText ? CursorContext.fit(text) : text
+                if typed != text { log("dictation: fitted to the sentence around the cursor") }
+                lastText = typed
+                report(TextInserter.insert(typed))
             } catch {
                 phase = .idle
                 log("dictation: transcription failed: \(error.localizedDescription)")

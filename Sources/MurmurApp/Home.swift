@@ -755,6 +755,36 @@ private struct Fix: View {
 
 // MARK: - Dictation
 
+/// Fitting text to the sentence, and the Ultra update for other languages. Its own view, so the download's progress
+/// refreshes.
+private struct SpeechAccuracyRows: View {
+    @ObservedObject var dictation: DictationController
+
+    var body: some View {
+        if dictation.multilingualUpdate != nil || dictation.multilingualUpdateAvailable {
+            RowDivider()
+            SettingRow(title: "More accurate other languages",
+                       detail: "Parakeet Ultra makes fewer mistakes in all 25 languages. A one-time download, about 630 MB; "
+                           + "dictation keeps working while it downloads.") {
+                if let progress = dictation.multilingualUpdate {
+                    Text("Downloading · \(Int((progress * 100).rounded()))%")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                        .monospacedDigit()
+                } else {
+                    Button("Update") { dictation.updateMultilingual() }.buttonStyle(.murmurSecondary)
+                }
+            }
+        }
+        RowDivider()
+        SettingRow(title: "Fit to the sentence",
+                   detail: "Adds the space before what you say, and leaves out the capital and full stop when it goes into "
+                       + "the middle of a sentence. Your words are never changed.") {
+            MurmurSwitch(label: "Fit to the sentence",
+                         isOn: Binding(get: { dictation.fitText }, set: { dictation.fitText = $0 }))
+        }
+    }
+}
+
 /// All of Murmur's settings on one page: the language you speak, the talk key, commands, indexing, the app, and what's
 /// kept. Folders, the AI for commands, and memory have their own pages, linked from here.
 private struct SettingsPage: View {
@@ -779,6 +809,7 @@ private struct SettingsPage: View {
                     MurmurSwitch(label: "Quiet voice",
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
+                SpeechAccuracyRows(dictation: dictation)
             }
             SettingsSection("Shortcuts") {
                 SettingRow(title: "Talk",

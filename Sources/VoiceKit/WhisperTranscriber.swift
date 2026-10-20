@@ -22,6 +22,8 @@ public actor WhisperTranscriber {
 
     public nonisolated let source: Source
     private var kit: Loaded?
+    /// How the last transcription went (encode and decode time, re-decodes), for the log.
+    public private(set) var lastTimings: String?
     private var loading: Task<Loaded, Error>?
 
     public init(source: Source) {
@@ -57,18 +59,35 @@ public actor WhisperTranscriber {
 
     public func transcribe(_ samples: [Float]) async throws -> String {
         let kit = try await loadedKit()
-        let options = DecodingOptions(
+        let results = try await kit.kit.transcribe(audioArray: samples, decodeOptions: Self.options(source))
+        if let t = results.first?.timings {
+            // (WhisperKit's fallback count is off by one; the time spent decoding again is exact.)
+            lastTimings = String(format: "encode %.2f s, decode %.2f s, decoding again %.2f s, %.2f s in all",
+                                 t.encoding, t.decodingLoop, t.decodingFallback, t.fullPipeline)
+        }
+        return results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// How Whisper decodes. WhisperKit's defaults decode again, up to five more times and each time more randomly,
+    /// whenever the model isn't confident (average log-probability under −1.0) — and then keep the last, most random
+    /// attempt. The Hinglish models are often "unsure" by that measure (Hindi in English letters), so one dictation
+    /// could take six decodes and come out worse. Only a repetition loop (the known Whisper failure) is decoded again,
+    /// once.
+    static func options(_ source: Source) -> DecodingOptions {
+        DecodingOptions(
             task: .transcribe,
             language: source.language,
             temperature: 0,
+            temperatureFallbackCount: 1,
             usePrefillPrompt: true,
             detectLanguage: false,
             skipSpecialTokens: true,
             withoutTimestamps: true,
+            compressionRatioThreshold: 2.4,
+            logProbThreshold: nil,
+            firstTokenLogProbThreshold: nil,
             chunkingStrategy: .vad
         )
-        let results = try await kit.kit.transcribe(audioArray: samples, decodeOptions: options)
-        return results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func loadedKit(progress: (@Sendable (Double, Bool) -> Void)? = nil) async throws -> Loaded {
@@ -106,6 +125,10 @@ public actor WhisperTranscriber {
                 download: false
             )
             let kit = try await WhisperKit(config)
+            // One second of silence through the whole pipeline, so the GPU's first-run setup happens now and not on
+            // your first dictation.
+            _ = try? await kit.transcribe(audioArray: [Float](repeating: 0, count: 16_000),
+                                          decodeOptions: Self.options(source))
             progress?(1, false)
             return Loaded(kit)
         }

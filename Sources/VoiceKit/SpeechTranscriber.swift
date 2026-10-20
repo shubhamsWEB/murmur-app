@@ -9,7 +9,7 @@ public enum SpeechModel: String, CaseIterable, Sendable {
     /// Hindi and English, written in English letters. (Prime, on Whisper large-v3, was tried and dropped: Apex did
     /// better.)
     case hinglishApex
-    /// Parakeet TDT 0.6B v3: 25 European languages, detected automatically.
+    /// Parakeet Ultra (a post-trained TDT 0.6B v3): 25 European languages, detected automatically.
     case multilingual
 
     /// A saved setting, including models that were dropped (Prime is now Apex).
@@ -57,7 +57,8 @@ public enum SpeechModel: String, CaseIterable, Sendable {
     /// The one-time download it needs.
     public var downloadSize: String {
         switch self {
-        case .english, .multilingual: return "about 600 MB"
+        case .english: return "about 600 MB"
+        case .multilingual: return "about 630 MB"
         case .hinglishApex: return "about 590 MB"
         }
     }
@@ -104,6 +105,17 @@ public actor SpeechTranscriber {
     private let parakeet: ParakeetTranscriber?
     private let whisper: WhisperTranscriber?
 
+    /// Other languages on Parakeet Ultra, for the update from v3 (it downloads while v3 keeps working).
+    static func multilingualUltra() -> SpeechTranscriber {
+        SpeechTranscriber(model: .multilingual, parakeet: ParakeetTranscriber.ultra())
+    }
+
+    private init(model: SpeechModel, parakeet: ParakeetTranscriber) {
+        self.model = model
+        self.parakeet = parakeet
+        self.whisper = nil
+    }
+
     public init(model: SpeechModel = .english) {
         self.model = model
         switch model {
@@ -127,6 +139,11 @@ public actor SpeechTranscriber {
     public func prepare(progress: (@Sendable (Double, Bool) -> Void)? = nil) async throws {
         if let parakeet { try await parakeet.prepare(progress: progress) }
         if let whisper { try await whisper.prepare(progress: progress) }
+    }
+
+    /// Timings of the last transcription, for the log (Whisper only).
+    public var lastDetail: String? {
+        get async { await whisper?.lastTimings }
     }
 
     public func transcribe(_ samples: [Float]) async throws -> String {
