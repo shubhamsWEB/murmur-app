@@ -10,6 +10,7 @@
 pub mod audio;
 pub mod cursor;
 pub mod fit;
+pub mod history;
 pub mod keys;
 pub mod level;
 pub mod logo;
@@ -39,6 +40,10 @@ pub struct Config {
     pub quiet_voice: bool,
     /// The Murmur button on screen (on by default, as on the Mac).
     pub floating_button: bool,
+    /// A history of dictations on this PC, for Home's "This week" (on by default, as on the Mac).
+    pub keep_history: bool,
+    /// Every recording and what was heard, saved to Documents\Murmur Recordings (off by default).
+    pub keep_recordings: bool,
 }
 
 /// Hold the key to talk; a press shorter than this is a tap, not a dictation (as on the Mac).
@@ -76,6 +81,7 @@ struct Inner {
     /// What a dictation is doing: "idle", "listening" or "working" (Home's key lights up while you talk).
     phase: Mutex<&'static str>,
     log: Mutex<Option<std::fs::File>>,
+    history: history::History,
 }
 
 enum Work {
@@ -85,7 +91,8 @@ enum Work {
 impl Dictation {
     /// Starts dictation: the pill's window, the key watcher, and the model (downloaded if it's missing and dictation
     /// is on, else loaded). `launch` makes a helper launch for some arguments and a log file's name.
-    pub fn start(app: &AppHandle, config: Config, logs: PathBuf,
+    /// `data`: the folder the history is kept in (the settings').
+    pub fn start(app: &AppHandle, config: Config, logs: PathBuf, data: &std::path::Path,
                  launch: impl Fn(Vec<String>, &str) -> Launch + Send + Sync + 'static) -> Dictation {
         let events = app.clone();
         let download = ModelDownload::new(move |event| {
@@ -111,6 +118,7 @@ impl Dictation {
             key_problem: Mutex::new(None),
             phase: Mutex::new("idle"),
             log: Mutex::new(log),
+            history: history::History::open(data),
         });
         if let Err(error) = pill::make(app) {
             inner.note(&format!("no pill: {error}"));
@@ -149,6 +157,9 @@ impl Dictation {
     /// A new choice from Settings: the key changes at once; another model is loaded (or downloaded).
     pub fn configure(&self, config: Config) {
         let before = self.config();
+        if before.keep_history && !config.keep_history {
+            self.inner.history.clear();
+        }
         logo::set_enabled(&self.inner.app, config.floating_button);
         *self.inner.combo.lock().unwrap() = config.key;
         *self.inner.config.lock().unwrap() = config.clone();
@@ -165,6 +176,12 @@ impl Dictation {
     /// Settings' Download (or Try Again).
     pub fn download(&self) {
         self.inner.start_download();
+    }
+
+    /// Settings' Clear History.
+    pub fn clear_history(&self) {
+        self.inner.history.clear();
+        self.inner.changed();
     }
 
     /// What Settings shows.
@@ -308,7 +325,12 @@ impl Inner {
             "microphone": config.microphone,
             "quietVoice": config.quiet_voice,
             "floatingButton": config.floating_button,
+            "keepHistory": config.keep_history,
+            "keepRecordings": config.keep_recordings,
+            "history": if config.keep_history { json!(self.history.counts()) } else { json!([]) },
+            "recordingsFolder": history::recordings_folder().map(|folder| folder.display().to_string()),
             "phase": *self.phase.lock().unwrap(),
+            "handsFree": self.hands_free.load(Ordering::SeqCst),
         });
         if microphones {
             state["microphones"] = json!(audio::microphones());
@@ -466,6 +488,13 @@ impl Inner {
             return;
         }
         let text = recognizer.words(&leveled.samples, rate);
+        let config = self.config();
+        if config.keep_recordings {
+            match history::keep_recording(samples, rate, &text, config.model.name()) {
+                Ok(path) => self.note(&format!("recording kept: {}", path.display())),
+                Err(error) => self.note(&format!("can't keep the recording: {error}")),
+            }
+        }
         self.note(&format!("{seconds:.1} s of audio → {} characters in {:.2} s (speech {:.0} dBFS, noise {:.0}, gain {:+.0} dB{})",
                            text.chars().count(), started.elapsed().as_secs_f64(), leveled.speech_db,
                            leveled.noise_db, leveled.gain_db, if quiet { ", quiet voice" } else { "" }));
@@ -476,7 +505,13 @@ impl Inner {
         // Spacing, the first letter and the last full stop fitted to the sentence it lands in; never the words.
         let text = cursor::fit(&text);
         match paste::insert(&text) {
-            Ok(()) => pill::hide(&self.app),
+            Ok(()) => {
+                pill::hide(&self.app);
+                if config.keep_history {
+                    self.history.add(&text, None, "dictation");
+                    self.changed();
+                }
+            }
             Err(error) => {
                 self.note(&format!("paste: {error}"));
                 pill::flash(&self.app, &format!("Couldn't type it: {error}"), "problem", 4.0);

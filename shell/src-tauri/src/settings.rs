@@ -52,6 +52,9 @@ pub struct Settings {
     pub quiet_voice_off: bool,
     /// The Murmur button on screen (on unless turned off), and where it was left (physical pixels).
     pub floating_button_off: bool,
+    /// Dictation's history (on unless turned off: Home's "This week"), and keeping every recording (off).
+    pub history_off: bool,
+    pub keep_recordings: bool,
     pub floating_button_at: Option<(i32, i32)>,
 }
 
@@ -65,6 +68,8 @@ impl Settings {
             microphone: self.microphone.clone(),
             quiet_voice: !self.quiet_voice_off,
             floating_button: !self.floating_button_off,
+            keep_history: !self.history_off,
+            keep_recordings: self.keep_recordings,
         }
     }
 }

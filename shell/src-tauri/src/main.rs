@@ -652,7 +652,7 @@ fn main() {
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, dictation_info,
-            set_dictation, download_speech_model, logo_clicked, logo_menu
+            set_dictation, download_speech_model, logo_clicked, logo_menu, dictation_action
         ])
         .build(tauri::generate_context!())
         .expect("Murmur couldn't start");
@@ -774,7 +774,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     let dictation = {
         let config = shell.settings.lock().unwrap().dictation();
         let helper = shell.clone();
-        dictation::Dictation::start(&handle, config, shell.logs.clone(), move |args, log| helper.launch(args, log))
+        let data = shell.settings_path.parent().map(PathBuf::from).unwrap_or_else(|| shell.logs.clone());
+        dictation::Dictation::start(&handle, config, shell.logs.clone(), &data, move |args, log| helper.launch(args, log))
     };
     app.manage(dictation);
     if shell.settings.lock().unwrap().delete_code_index {
@@ -1612,6 +1613,8 @@ fn set_dictation(app: AppHandle, choice: String, value: Value) -> Result<(), Str
             "model" => settings.speech_model = text,
             "microphone" => settings.microphone = text,
             "floatingButton" => settings.floating_button_off = !value.as_bool().unwrap_or(true),
+            "keepHistory" => settings.history_off = !value.as_bool().unwrap_or(true),
+            "keepRecordings" => settings.keep_recordings = value.as_bool().unwrap_or(false),
             _ => return Err(format!("no dictation setting called {choice}")),
         }
         settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
@@ -1659,6 +1662,23 @@ fn logo_menu_chosen(app: &AppHandle, id: &str) {
             app.state::<dictation::Dictation>().configure(config);
         }
         _ => {}
+    }
+}
+
+/// Settings → Dictation's Clear History and Show (the recordings' folder).
+#[tauri::command(async)]
+fn dictation_action(app: AppHandle, action: String) -> Result<(), String> {
+    match action.as_str() {
+        "clearHistory" => {
+            app.state::<dictation::Dictation>().clear_history();
+            Ok(())
+        }
+        "showRecordings" => {
+            let folder = dictation::history::recordings_folder().ok_or("no home folder")?;
+            std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+            app.opener().open_path(folder.display().to_string(), None::<&str>).map_err(|error| error.to_string())
+        }
+        _ => Err(format!("no dictation action called {action}")),
     }
 }
 

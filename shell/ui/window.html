@@ -48,6 +48,8 @@
             <div class="gestures">
               <div class="gesture"><span class="caps" id="gesture-keys"></span>
                 <span class="gesture-text"><b>Hold to dictate</b><span>Talk, let go, and it's typed where your cursor is.</span></span></div>
+              <div class="gesture"><span class="caps" id="hands-free-keys"></span>
+                <span class="gesture-text"><b>Double-tap for hands-free</b><span>Talk without holding. Tap again to finish, Esc to cancel.</span></span></div>
               <div class="gesture"><span class="caps"><span class="cap">Esc</span></span>
                 <span class="gesture-text"><b>Changed your mind?</b><span>Press any other key while holding to cancel.</span></span></div>
               <div class="gesture"><span class="caps" id="search-keys"></span>
@@ -58,6 +60,13 @@
             <span class="section-label">Quiet Voice</span>
             <p id="home-quiet"></p>
           </div>
+        </div>
+        <h2 class="block-title">This week</h2>
+        <div class="card week" id="week">
+          <div class="stat"><b id="week-words">0</b><span>words dictated</span></div>
+          <div class="stat"><b id="week-minutes">0 min</b><span>saved vs. typing</span></div>
+          <div class="stat"><b id="week-today">0</b><span>words today</span></div>
+          <p class="week-off" id="week-off" hidden>Turn on <b>Keep a history</b> in Settings to see your week here.</p>
         </div>
         <h2 class="block-title">On this PC</h2>
         <div class="model-cards">
@@ -139,6 +148,19 @@
             <span>A small Murmur pill you can drag anywhere. Click it to open Murmur; the listening pill grows out of it
               while you talk.</span></div>
             <label class="switch"><input type="checkbox" id="floating-button"><span></span></label></div>
+        </div>
+
+        <span class="section-label">Recordings and history</span>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>Keep a history</b>
+            <span>Used for “This week” on Home. Stays on this PC.</span></div>
+            <div class="sctl"><button class="secondary" id="clear-history">Clear History</button>
+              <label class="switch"><input type="checkbox" id="keep-history"><span></span></label></div></div>
+          <div class="srow"><div class="stext"><b>Keep recordings</b>
+            <span>Saves every recording and what Murmur heard to Documents › Murmur Recordings, to compare speech
+              models.</span></div>
+            <div class="sctl"><button class="secondary" id="show-recordings">Show</button>
+              <label class="switch"><input type="checkbox" id="keep-recordings"><span></span></label></div></div>
         </div>
 
         <span class="section-label">Search shortcut</span>

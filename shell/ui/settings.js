@@ -65,6 +65,9 @@ function renderDictation() {
   fill($("microphone"), microphones, d.microphone || "");
   $("quiet-voice").checked = d.quietVoice;
   $("floating-button").checked = d.floatingButton !== false;
+  $("keep-history").checked = d.keepHistory !== false;
+  $("clear-history").disabled = !(d.history || []).length;
+  $("keep-recordings").checked = !!d.keepRecordings;
   const about = { english: "Only English. The most accurate for it, accents included.",
                   multilingual: "Spanish, French, German and 22 more European languages, detected as you speak.",
                   hinglish: "Hindi and English, mixed as you like. Typed in English letters. A bigger model (about "
@@ -125,6 +128,10 @@ async function loadDictation() {
 $("dictation-on").addEventListener("change", () => choose("enabled", $("dictation-on").checked));
 $("quiet-voice").addEventListener("change", () => choose("quietVoice", $("quiet-voice").checked));
 $("floating-button").addEventListener("change", () => choose("floatingButton", $("floating-button").checked));
+$("keep-history").addEventListener("change", () => choose("keepHistory", $("keep-history").checked));
+$("keep-recordings").addEventListener("change", () => choose("keepRecordings", $("keep-recordings").checked));
+$("clear-history").onclick = () => invoke("dictation_action", { action: "clearHistory" }).then(loadDictation).catch(fail);
+$("show-recordings").onclick = () => invoke("dictation_action", { action: "showRecordings" }).catch(fail);
 $("dictation-key").addEventListener("change", () => choose("key", $("dictation-key").value));
 $("speech-model").addEventListener("change", () => choose("model", $("speech-model").value));
 $("microphone").addEventListener("change", () => choose("microphone", $("microphone").value));

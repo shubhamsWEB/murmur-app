@@ -62,7 +62,9 @@ function readiness() {
       return { title: "Speech didn't load", detail: "See Settings", problem: true, page: "settings" };
   }
   if (d.keyProblem) return { title: "Almost ready", detail: "The dictation key isn't working", problem: true, page: "settings" };
-  if (d.phase === "listening") return { title: "Listening…", detail: `Let go of ${keyTitle()} to finish`, busy: true };
+  if (d.phase === "listening") {
+    return { title: "Listening…", detail: d.handsFree ? `Tap ${keyTitle()} to finish, Esc to cancel` : `Let go of ${keyTitle()} to finish`, busy: true };
+  }
   if (d.phase === "working") return { title: "Writing it down…", detail: "One moment", busy: true };
   return { title: "Ready when you are", detail: `Hold ${keyTitle()} anywhere to talk`, busy: false, problem: false };
 }
@@ -100,6 +102,9 @@ function render() {
   $("live-key").replaceChildren(...keys.flatMap((key, i) => i ? [document.createElement("br"), document.createTextNode(`+ ${key}`)] : [document.createTextNode(key)]));
   $("live-key").classList.toggle("lit", dictation?.phase === "listening");
   $("gesture-keys").replaceChildren(...caps(keys));
+  $("hands-free-keys").replaceChildren(...caps(keys),
+    Object.assign(document.createElement("span"), { className: "plus", textContent: "×2" }));
+  renderWeek();
   $("search-keys").replaceChildren(...caps((settings.hotkey || "Ctrl+Space").split("+").filter(Boolean)));
   $("home-quiet").textContent = dictation?.quietVoice
     ? "On: soft and whispered speech is lifted before it's turned into words. Change it in Settings."
@@ -135,6 +140,24 @@ function pill(text, tone) {
 function setPill(element, [text, tone]) {
   element.className = `pill ${tone}`;
   element.textContent = text;
+}
+
+// This week (from Monday, on this PC's calendar): words dictated, minutes saved against typing (about 40 words a
+// minute typed, 150 spoken, as on the Mac), and words today. The history has when and how many words, never the text.
+function renderWeek() {
+  const on = dictation?.keepHistory !== false;
+  $("week-off").hidden = on;
+  for (const stat of document.querySelectorAll("#week .stat")) stat.hidden = !on;
+  if (!on) return;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const monday = today - ((now.getDay() + 6) % 7) * 86_400_000;
+  const items = (dictation?.history || []).filter((item) => item.kind === "dictation");
+  const words = (since) => items.filter((item) => item.at >= since).reduce((sum, item) => sum + item.words, 0);
+  const week = words(monday);
+  $("week-words").textContent = week.toLocaleString();
+  $("week-minutes").textContent = `${Math.round(week / 40 - week / 150)} min`;
+  $("week-today").textContent = words(today).toLocaleString();
 }
 
 function caps(keys) {
