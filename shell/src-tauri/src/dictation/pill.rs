@@ -171,22 +171,34 @@ pub(super) mod windows {
     }
 }
 
-/// Shown without taking the focus (on Windows, as a bare popup: `windows`).
+/// Shown without taking the focus (on Windows, as a bare popup: `windows`). On Windows the window's own thread does it,
+/// later: restyling or showing a window from another thread waits on that thread's answer, and dictation's thread,
+/// waiting so as it opened the pill, stopped hearing the key altogether.
 pub(super) fn show_quietly(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
-    if let Ok(hwnd) = window.hwnd() {
-        windows::show_without_activating(hwnd.0 as _);
-        return;
+    {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(hwnd) = target.hwnd() {
+                windows::show_without_activating(hwnd.0 as _);
+            }
+        });
     }
+    #[cfg(not(windows))]
     let _ = window.show();
 }
 
 pub(super) fn hide_quietly(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
-    if let Ok(hwnd) = window.hwnd() {
-        windows::hide(hwnd.0 as _);
-        return;
+    {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(hwnd) = target.hwnd() {
+                windows::hide(hwnd.0 as _);
+            }
+        });
     }
+    #[cfg(not(windows))]
     let _ = window.hide();
 }
 

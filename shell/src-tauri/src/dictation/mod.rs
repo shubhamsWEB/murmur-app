@@ -314,8 +314,10 @@ impl Inner {
     fn begin(self: &Arc<Self>) {
         let config = self.config();
         if !config.enabled {
+            self.note("key pressed: dictation is off");
             return;
         }
+        self.note("key pressed");
         if self.recognizer.lock().unwrap().is_none() {
             let state = self.model.lock().unwrap().clone();
             let text = match state["state"].as_str().unwrap_or_default() {
