@@ -1,0 +1,59 @@
+# Dictation's speech models on Windows, quickly: the shell's speech test (load, warm up, transcribe) with the sherpa-onnx
+# linked into Murmur.exe, for each model, without building the rest of the app. A crash here shows its exit code and
+# what sherpa-onnx and ONNX Runtime printed, which the app (a windowed program) can't. Runs when dictation's code or
+# this file changes on the windows branch.
+name: Windows speech
+
+on:
+  push:
+    branches: [windows]
+    paths: ["shell/src-tauri/src/dictation/**", ".github/workflows/windows-speech.yml", "scripts/fetch-speech-runtime.sh"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  speech:
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [hinglish, english]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: The model and a recording
+        shell: bash
+        run: |
+          mkdir -p model
+          if [[ ${{ matrix.model }} == hinglish ]]; then
+            base=https://github.com/shubhamsWEB/murmur-app/releases/download/hinglish-apex-v1
+            curl -fsSL -o model/manifest.json "$base/manifest.json"
+            python -c "import json; [print(f['sha256'] + '  model/' + f['name']) for f in json.load(open('model/manifest.json'))['files']]" > sums
+            for name in tokens.txt decoder.int8.onnx encoder.int8.onnx; do curl -fsSL -o "model/$name" "$base/$name"; done
+            sha256sum -c sums
+            apex=https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex/resolve/f3214eed20b4e4d4144e739982d911f87b9cb223
+            curl -fsSL -o apex.wav "$apex/audios/663eb653-d6b5-4fda-b5f2-9ef98adc0a61_0_1098400_1118688.wav"
+            echo "4c553f6b9e5984167dea3d1058ea4bf4c2bfa2ceee948a025c41a12b011f290e  apex.wav" | sha256sum -c -
+            pip install -q soundfile==0.14.0
+            python -c "import soundfile as s; a, r = s.read('apex.wav', dtype='float32'); s.write('speech.wav', a, r, subtype='PCM_16')"
+            echo "EXPECT=pandrah log" >> "$GITHUB_ENV"
+          else
+            base=https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2
+            for name in tokens.txt decoder.int8.onnx joiner.int8.onnx encoder.int8.onnx; do curl -fsSL -o "model/$name" "$base/$name"; done
+            curl -fsSL -o speech.wav "$base/test_wavs/0.wav"
+            echo "5fceacff0315d49cb59fcc505bcecf1ed5f2f35c2897b1e65a59f30e5d922150  speech.wav" | sha256sum -c -
+            echo "EXPECT=very like the old portrait" >> "$GITHUB_ENV"
+          fi
+          ls -la model
+          wmic cpu get name 2> /dev/null || true
+      - name: Load, warm up, transcribe
+        shell: bash
+        run: |
+          export PATH="$(dirname "$(command -v cl)"):$PATH"
+          scripts/fetch-speech-runtime.sh > /dev/null
+          cd shell/src-tauri
+          MURMUR_TEST_SPEECH_KIND=${{ matrix.model }} MURMUR_TEST_SPEECH_MODEL="$(cygpath -m "$GITHUB_WORKSPACE/model")" \
+            MURMUR_TEST_WAV="$(cygpath -m "$GITHUB_WORKSPACE/speech.wav")" MURMUR_TEST_EXPECT="$EXPECT" RUST_BACKTRACE=1 \
+            cargo test --release --locked --bin murmur-shell dictation::speech -- --nocapture

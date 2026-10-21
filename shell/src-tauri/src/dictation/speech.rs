@@ -265,7 +265,10 @@ mod tests {
         };
         let (samples, rate) = read_wav(Path::new(&wav));
         let model = Model::from_name(&std::env::var("MURMUR_TEST_SPEECH_KIND").unwrap_or_default());
+        println!("loading the {} model", model.name());
+        let started = std::time::Instant::now();
         let recognizer = Recognizer::load(model, Path::new(&folder)).expect("load");
+        println!("loaded in {:.1} s", started.elapsed().as_secs_f64());
         println!("warm-up {:.2} s", recognizer.warm_up());
         let leveled = crate::dictation::level::normalize_with(&samples, rate as f32, 40.0, model.lifts_words());
         let started = Instant::now();
