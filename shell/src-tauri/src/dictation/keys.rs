@@ -94,7 +94,11 @@ impl Tracker {
     }
 
     /// A key went down (`pressed`) or up. Returns what that means for dictation, if anything.
-    pub fn key(&mut self, combo: Combo, key: u32, pressed: bool) -> Option<Press> {
+    /// A key went down (`pressed`) or up. `still_down` says whether another key is really held now: a key let go
+    /// while an administrator's window or a Windows prompt (UAC, the lock screen) had the keyboard is never seen going
+    /// up, and remembered as held it blocked dictation, with any key, until Murmur restarted.
+    pub fn key(&mut self, combo: Combo, key: u32, pressed: bool, still_down: impl Fn(u32) -> bool) -> Option<Press> {
+        self.down.retain(|k| *k == key || still_down(*k));
         let repeat = pressed && self.down.contains(&key);
         if pressed { self.down.insert(key); } else { self.down.remove(&key); }
         if repeat {
@@ -139,6 +143,7 @@ mod hook {
     use std::sync::{Arc, Mutex, OnceLock};
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, HC_ACTION,
         KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
@@ -189,7 +194,9 @@ mod hook {
                 if (pressed || released) && info.flags & LLKHF_INJECTED == 0 {
                     let combo = *hooked.combo.lock().unwrap();
                     // Kept short: Windows drops a hook that takes too long. `on` only hands the press on.
-                    let press = hooked.tracker.lock().unwrap().key(combo, info.vkCode, pressed);
+                    let press = hooked.tracker.lock().unwrap().key(combo, info.vkCode, pressed, |k| {
+                        (GetAsyncKeyState(k as i32) as u16) & 0x8000 != 0
+                    });
                     if let Some(press) = press {
                         (hooked.on)(press);
                     }
@@ -207,43 +214,53 @@ mod tests {
     #[test]
     fn hold_and_let_go() {
         let mut keys = Tracker::new();
-        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, true), None);
-        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true), Some(Press::Down));
-        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true), None); // auto-repeat
-        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, true), None);
-        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false), Some(Press::Up));
-        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, false), None);
+        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, true, |_| true), None);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), None); // auto-repeat
+        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, true, |_| true), None);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false, |_| true), Some(Press::Up));
+        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, false, |_| true), None);
     }
 
     #[test]
     fn a_shortcut_cancels() {
         let mut keys = Tracker::new();
-        keys.key(Combo::CtrlWin, LCONTROL, true);
-        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true), Some(Press::Down));
-        assert_eq!(keys.key(Combo::CtrlWin, 0x44, true), Some(Press::Cancel)); // D: show the desktop
-        assert_eq!(keys.key(Combo::CtrlWin, 0x44, false), None);
-        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false), None);
+        keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.key(Combo::CtrlWin, 0x44, true, |_| true), Some(Press::Cancel)); // D: show the desktop
+        assert_eq!(keys.key(Combo::CtrlWin, 0x44, false, |_| true), None);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false, |_| true), None);
     }
 
     #[test]
     fn not_with_other_keys_already_down() {
         let mut keys = Tracker::new();
-        keys.key(Combo::CtrlWin, 0xA0, true); // Left Shift
-        keys.key(Combo::CtrlWin, LCONTROL, true);
-        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true), None);
+        keys.key(Combo::CtrlWin, 0xA0, true, |_| true); // Left Shift
+        keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), None);
     }
 
     #[test]
     fn right_alt_is_altgr_too() {
         let mut keys = Tracker::new();
         // AltGr: Windows sends Left Ctrl, then Right Alt.
-        assert_eq!(keys.key(Combo::RightAlt, LCONTROL, true), None);
-        assert_eq!(keys.key(Combo::RightAlt, RMENU, true), Some(Press::Down));
-        assert_eq!(keys.key(Combo::RightAlt, RMENU, false), Some(Press::Up));
-        assert_eq!(keys.key(Combo::RightAlt, LCONTROL, false), None); // AltGr's Left Ctrl goes up with it
+        assert_eq!(keys.key(Combo::RightAlt, LCONTROL, true, |_| true), None);
+        assert_eq!(keys.key(Combo::RightAlt, RMENU, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.key(Combo::RightAlt, RMENU, false, |_| true), Some(Press::Up));
+        assert_eq!(keys.key(Combo::RightAlt, LCONTROL, false, |_| true), None); // AltGr's Left Ctrl goes up with it
         // Right Ctrl alone.
-        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true), Some(Press::Down));
-        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, false), Some(Press::Up));
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, false, |_| true), Some(Press::Up));
+    }
+
+    #[test]
+    fn a_key_let_go_unseen_is_forgotten() {
+        // Left Shift went down, and came up while an administrator's window had the keyboard: never seen going up.
+        let mut keys = Tracker::new();
+        keys.key(Combo::RightCtrl, 0xA0, true, |_| true);
+        let held = |k: u32| k != 0xA0;
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true, held), Some(Press::Down));
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, false, held), Some(Press::Up));
     }
 
     #[test]
