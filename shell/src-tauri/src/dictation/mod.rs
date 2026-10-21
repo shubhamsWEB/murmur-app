@@ -8,6 +8,8 @@
 //! step, opening out of the Murmur button (logo.rs) when it's on.
 
 pub mod audio;
+pub mod cursor;
+pub mod fit;
 pub mod keys;
 pub mod level;
 pub mod logo;
@@ -39,7 +41,11 @@ pub struct Config {
     pub floating_button: bool,
 }
 
-/// Shorter than this is a tap, not a dictation.
+/// Hold the key to talk; a press shorter than this is a tap, not a dictation (as on the Mac).
+const TAP: Duration = Duration::from_millis(300);
+/// Two taps this close together start hands-free dictation; the next tap finishes it, Esc cancels it.
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
+/// Recordings shorter than this are dropped as accidental.
 const SHORTEST: Duration = Duration::from_millis(250);
 
 pub struct Dictation {
@@ -59,6 +65,12 @@ struct Inner {
     /// A helper launch for these arguments (the shell's: its program, environment and log folder).
     launch: Box<dyn Fn(Vec<String>, &str) -> Launch + Send + Sync>,
     recording: Mutex<Option<audio::Recording>>,
+    /// Hands-free: started by a double tap, finished by the next tap.
+    hands_free: AtomicBool,
+    /// When the key last went down, and when a tap last ended (for the double tap): the key watcher's times, not
+    /// when this thread got to them (opening the microphone takes it a moment).
+    pressed_at: Mutex<Option<Instant>>,
+    last_tap: Mutex<Option<Instant>>,
     /// Why the key can't be watched, if it can't.
     key_problem: Mutex<Option<String>>,
     /// What a dictation is doing: "idle", "listening" or "working" (Home's key lights up while you talk).
@@ -67,7 +79,7 @@ struct Inner {
 }
 
 enum Work {
-    Key(keys::Press),
+    Key(keys::Press, Instant),
 }
 
 impl Dictation {
@@ -93,6 +105,9 @@ impl Dictation {
             rerun: AtomicBool::new(false),
             launch: Box::new(launch),
             recording: Mutex::new(None),
+            hands_free: AtomicBool::new(false),
+            pressed_at: Mutex::new(None),
+            last_tap: Mutex::new(None),
             key_problem: Mutex::new(None),
             phase: Mutex::new("idle"),
             log: Mutex::new(log),
@@ -109,15 +124,16 @@ impl Dictation {
             .spawn(move || {
                 for job in jobs {
                     match job {
-                        Work::Key(keys::Press::Down) => worker.begin(),
-                        Work::Key(keys::Press::Up) => worker.end(),
-                        Work::Key(keys::Press::Cancel) => worker.cancel(),
+                        Work::Key(keys::Press::Down, at) => worker.key_down(at),
+                        Work::Key(keys::Press::Up, at) => worker.key_up(at),
+                        Work::Key(keys::Press::Cancel, _) => worker.shortcut(),
+                        Work::Key(keys::Press::Escape, _) => worker.escape(),
                     }
                 }
             })
             .expect("the dictation thread");
         if let Err(problem) = keys::listen(inner.combo.clone(), move |press| {
-            let _ = work.send(Work::Key(press));
+            let _ = work.send(Work::Key(press, Instant::now()));
         }) {
             inner.note(&format!("key: {problem}"));
             *inner.key_problem.lock().unwrap() = Some(problem);
@@ -311,13 +327,56 @@ impl Inner {
         }
     }
 
-    fn begin(self: &Arc<Self>) {
+    /// The key went down: a tap during hands-free dictation finishes it; otherwise dictation starts, hands-free when
+    /// this follows a tap closely enough.
+    fn key_down(self: &Arc<Self>, at: Instant) {
+        let recording = self.recording.lock().unwrap().is_some();
+        if recording {
+            if self.hands_free.load(Ordering::SeqCst) {
+                self.end();
+            }
+            return;
+        }
+        let double = self.last_tap.lock().unwrap().take().is_some_and(|tap| at.saturating_duration_since(tap) < DOUBLE_TAP);
+        *self.pressed_at.lock().unwrap() = Some(at);
+        self.begin(double);
+    }
+
+    /// The key went up: the end of a held dictation, or a tap (dropped, and remembered for a double tap).
+    fn key_up(self: &Arc<Self>, at: Instant) {
+        if self.hands_free.load(Ordering::SeqCst) || self.recording.lock().unwrap().is_none() {
+            return;
+        }
+        let pressed = self.pressed_at.lock().unwrap().unwrap_or(at);
+        if at.saturating_duration_since(pressed) < TAP {
+            self.cancel();
+            *self.last_tap.lock().unwrap() = Some(at);
+        } else {
+            self.end();
+        }
+    }
+
+    /// Another key pressed with the dictation key held: a shortcut, not dictation.
+    fn shortcut(&self) {
+        if !self.hands_free.load(Ordering::SeqCst) {
+            self.cancel();
+        }
+    }
+
+    fn escape(&self) {
+        if self.hands_free.load(Ordering::SeqCst) {
+            self.note("hands-free dictation cancelled");
+            self.cancel();
+        }
+    }
+
+    fn begin(self: &Arc<Self>, hands_free: bool) {
         let config = self.config();
         if !config.enabled {
             self.note("key pressed: dictation is off");
             return;
         }
-        self.note("key pressed");
+        self.note(if hands_free { "key pressed: hands-free" } else { "key pressed" });
         if self.recognizer.lock().unwrap().is_none() {
             let state = self.model.lock().unwrap().clone();
             let text = match state["state"].as_str().unwrap_or_default() {
@@ -344,7 +403,13 @@ impl Inner {
                 self.note(&format!("listening with {} ({} Hz), on in {:.2} s (first sound after {:.2} s)",
                                    recording.device, recording.sample_rate, started.elapsed().as_secs_f64(),
                                    recording.opened_in.as_secs_f64()));
-                pill::show(&self.app, "listening", "Listening");
+                let words = if hands_free {
+                    format!("Listening · tap {} to finish", config.key.title())
+                } else {
+                    "Listening".to_string()
+                };
+                pill::show(&self.app, "listening", &words);
+                self.hands_free.store(hands_free, Ordering::SeqCst);
                 *self.recording.lock().unwrap() = Some(recording);
                 self.set_phase("listening");
             }
@@ -356,6 +421,7 @@ impl Inner {
     }
 
     fn cancel(&self) {
+        self.hands_free.store(false, Ordering::SeqCst);
         if let Some(recording) = self.recording.lock().unwrap().take() {
             drop(recording.finish());
             pill::hide(&self.app);
@@ -364,6 +430,7 @@ impl Inner {
     }
 
     fn end(self: &Arc<Self>) {
+        self.hands_free.store(false, Ordering::SeqCst);
         let Some(recording) = self.recording.lock().unwrap().take() else { return };
         let held = recording.started.elapsed();
         let (rate, device) = (recording.sample_rate, recording.device.clone());
@@ -406,6 +473,8 @@ impl Inner {
             pill::flash(&self.app, "Didn't catch that", "info", 2.0);
             return;
         }
+        // Spacing, the first letter and the last full stop fitted to the sentence it lands in; never the words.
+        let text = cursor::fit(&text);
         match paste::insert(&text) {
             Ok(()) => pill::hide(&self.app),
             Err(error) => {

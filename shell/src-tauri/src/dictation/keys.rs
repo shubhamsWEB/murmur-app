@@ -17,6 +17,8 @@ pub enum Press {
     Down,
     Up,
     Cancel,
+    /// Esc, whenever it's pressed: it cancels hands-free dictation.
+    Escape,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +35,8 @@ const CONTROL: u32 = 0x11;
 const LWIN: u32 = 0x5B;
 const RWIN: u32 = 0x5C;
 const RMENU: u32 = 0xA5;
+#[cfg_attr(not(windows), allow(dead_code))]
+const ESCAPE: u32 = 0x1B;
 
 impl Combo {
     pub const ALL: [Combo; 3] = [Combo::CtrlWin, Combo::RightCtrl, Combo::RightAlt];
@@ -139,7 +143,7 @@ pub fn listen(_combo: Arc<Mutex<Combo>>, _on: impl Fn(Press) + Send + Sync + 'st
 
 #[cfg(windows)]
 mod hook {
-    use super::{Combo, Press, Tracker};
+    use super::{Combo, Press, Tracker, ESCAPE};
     use std::sync::{Arc, Mutex, OnceLock};
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -191,6 +195,9 @@ mod hook {
                 let message = wparam as u32;
                 let pressed = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
                 let released = message == WM_KEYUP || message == WM_SYSKEYUP;
+                if pressed && info.vkCode == ESCAPE && info.flags & LLKHF_INJECTED == 0 {
+                    (hooked.on)(Press::Escape);
+                }
                 if (pressed || released) && info.flags & LLKHF_INJECTED == 0 {
                     let combo = *hooked.combo.lock().unwrap();
                     // Kept short: Windows drops a hook that takes too long. `on` only hands the press on.
