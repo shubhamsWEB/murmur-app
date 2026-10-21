@@ -53,10 +53,12 @@ cp ../export-onnx.py export-apex.py
 ../venv/bin/python "$here/patch-export.py" export-apex.py
 ../venv/bin/python export-apex.py --model large-hinglish-apex 2>&1 | grep -v "Warning\|warn(" | tail -5
 rm -f large-hinglish-apex.pt onnx__* audioEncoder.* textDecoder.*
-# The decoder as sherpa-onnx's script does it; the encoder with 8-bit weights only (sherpa-onnx's int8 breaks it).
-../venv/bin/python "$here/quantize.py" large-hinglish-apex-decoder.onnx "$out/decoder.int8.onnx" 2>&1 | grep -v "^WARNING"
-../venv/bin/python "$here/quantize-weights.py" large-hinglish-apex-encoder.onnx "$out/encoder.int8.onnx" 2>&1 \
-  | grep -v "^WARNING\|INFO"
+# Both with 8-bit weights only, the arithmetic in float32: any 8-bit arithmetic changes what Apex writes, and
+# differently on different processors (quantize-weights.py says how).
+for part in encoder decoder; do
+  ../venv/bin/python "$here/quantize-weights.py" "large-hinglish-apex-$part.onnx" "$out/$part.int8.onnx" 2>&1 \
+    | grep -v "^WARNING\|INFO"
+done
 cp large-hinglish-apex-tokens.txt "$out/tokens.txt"
 cd ..
 
