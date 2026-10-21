@@ -7,14 +7,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME=sherpa-onnx-v1.13.8-win-x64-static-MT-Release-no-tts-lib
-REVISION=af77a4c27458870cfafe5ff6340909705cb8fa0f   # csukuangfj2/sherpa-onnx-libs on Hugging Face, sherpa-onnx's own mirror
-SHA256=fb9dc6ef420626b6aabc86780d68a108cff4cf38e63da32da0485d70959d7135
+# csukuangfj2/sherpa-onnx-libs on Hugging Face, sherpa-onnx's own mirror, as it was on 11 September 2026: the build of the
+# v1.13.8 release itself. The mirror's later uploads under the same name are builds of sherpa-onnx's development branch,
+# whose C structs no longer match the sherpa-onnx 1.13.8 crate's (Murmur crashed loading the model with one).
+REVISION=385f36e044e42502128f16297f14108e3850f2e4
+SHA256=f0aa074ddc39553b30208b53e84c12275d09702911c9faa8d34fa932428e4641
+RELEASE_COMMIT=11afbd00   # v1.13.8's commit, which sherpa-onnx records in its library
 OUT=Vendor/sherpa-onnx
 # Linked in this order (the sherpa-onnx-sys crate's list, without the text-to-speech libraries).
 LIBS=(sherpa-onnx-c-api sherpa-onnx-core kaldi-decoder-core sherpa-onnx-kaldifst-core sherpa-onnx-fstfar sherpa-onnx-fst
       kaldi-native-fbank-core kissfft-float onnxruntime ssentencepiece_core)
 
-if [[ "$(cat "$OUT/BUILD" 2>/dev/null)" != "$NAME" ]]; then
+if [[ "$(cat "$OUT/BUILD" 2>/dev/null)" != "$NAME $REVISION" ]]; then
   rm -rf "$OUT"
   mkdir -p "$OUT"
   echo "downloading $NAME"
@@ -26,7 +30,10 @@ if [[ "$(cat "$OUT/BUILD" 2>/dev/null)" != "$NAME" ]]; then
   for lib in "${LIBS[@]}"; do [[ -f "$OUT/lib/$lib.lib" ]] || { echo "no $lib.lib in $NAME" >&2; exit 1; }; done
   # No text to speech: nothing of espeak-ng or piper in it.
   if ls "$OUT/lib" | grep -Eqi 'espeak|piper|ucd'; then echo "$NAME has text-to-speech libraries" >&2; exit 1; fi
-  echo "$NAME" > "$OUT/BUILD"
+  # Built from the release the crate's bindings were made for, or its structs may not match them.
+  grep -aq "$RELEASE_COMMIT" "$OUT/lib/sherpa-onnx-core.lib" ||
+    { echo "$NAME wasn't built from sherpa-onnx v1.13.8 ($RELEASE_COMMIT)" >&2; exit 1; }
+  echo "$NAME $REVISION" > "$OUT/BUILD"
 fi
 
 lib_dir=$(cd "$OUT/lib" && pwd)
