@@ -1587,17 +1587,21 @@ fn set_processor_only(app: AppHandle, shell: State<'_, Arc<Shell>>, on: bool) ->
     Ok(())
 }
 
+// Dictation's commands run off the window's thread (`async`): listing the microphones, stopping a download or letting a
+// speech model go can take a moment, and on the window's thread that moment freezes every window ("not responding").
+
 /// Settings → Dictation: what's chosen, the choices, and how the speech model is coming along.
-#[tauri::command]
-fn dictation_info(dictation: State<'_, dictation::Dictation>) -> Value {
-    dictation.snapshot()
+#[tauri::command(async)]
+fn dictation_info(app: AppHandle) -> Value {
+    app.state::<dictation::Dictation>().snapshot()
 }
 
 /// One of Settings → Dictation's choices: "enabled" and "quietVoice" (true or false), "key", "model" and
 /// "microphone" (a name).
-#[tauri::command]
-fn set_dictation(shell: State<'_, Arc<Shell>>, dictation: State<'_, dictation::Dictation>, choice: String, value: Value)
-    -> Result<(), String> {
+#[tauri::command(async)]
+fn set_dictation(app: AppHandle, choice: String, value: Value) -> Result<(), String> {
+    let shell = app.state::<Arc<Shell>>();
+    let dictation = app.state::<dictation::Dictation>();
     let config = {
         let mut settings = shell.settings.lock().unwrap();
         let text = value.as_str().unwrap_or_default().to_string();
@@ -1659,9 +1663,9 @@ fn logo_menu_chosen(app: &AppHandle, id: &str) {
 }
 
 /// Settings → Dictation's Download (or Try Again) for the speech model.
-#[tauri::command]
-fn download_speech_model(dictation: State<'_, dictation::Dictation>) {
-    dictation.download();
+#[tauri::command(async)]
+fn download_speech_model(app: AppHandle) {
+    app.state::<dictation::Dictation>().download();
 }
 
 #[tauri::command]

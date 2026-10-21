@@ -116,7 +116,7 @@ impl Recognizer {
             }
         }
         config.model_config.tokens = path("tokens.txt");
-        config.model_config.num_threads = threads();
+        config.model_config.num_threads = threads(model);
         config.decoding_method = Some("greedy_search".into());
         let inner = OfflineRecognizer::create(&config).ok_or("sherpa-onnx couldn't load the speech model")?;
         Ok(Recognizer { inner, model })
@@ -150,7 +150,12 @@ impl Recognizer {
     }
 
     /// One second of silence through the model, so the first dictation doesn't pay for ONNX Runtime's first run.
+    /// Whisper isn't warmed up: a second of silence costs it as long as a dictation (the encoder always hears its full
+    /// window), all on the processor, for nothing.
     pub fn warm_up(&self) -> f64 {
+        if self.model == Model::Hinglish {
+            return 0.0;
+        }
         let started = Instant::now();
         let _ = self.transcribe(&vec![0.0; 16_000], 16_000);
         started.elapsed().as_secs_f64()
@@ -189,9 +194,15 @@ fn pieces(samples: &[f32], rate: u32, seconds: f32) -> Vec<&[f32]> {
 }
 
 /// Threads for the model: the processor's cores, leaving one for everything else, at most 8 (past that it barely helps).
-fn threads() -> i32 {
+/// Threads for the model: all but one core for Parakeet (a dictation takes a moment); half of them for Whisper, which
+/// works several seconds at a time and, given them all, left Windows too little to keep Murmur's windows answering
+/// ("not responding" while Hinglish warmed up).
+fn threads(model: Model) -> i32 {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    cores.saturating_sub(1).clamp(1, 8) as i32
+    match model {
+        Model::Hinglish => (cores / 2).clamp(1, 8) as i32,
+        Model::English | Model::Multilingual => cores.saturating_sub(1).clamp(1, 8) as i32,
+    }
 }
 
 /// Murmur's Speech Models folder for `model` (`SpeechModelFiles.installed`): %LOCALAPPDATA%\Murmur\Speech Models on
