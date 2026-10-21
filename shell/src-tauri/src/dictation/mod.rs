@@ -82,6 +82,8 @@ struct Inner {
     phase: Mutex<&'static str>,
     log: Mutex<Option<std::fs::File>>,
     history: history::History,
+    /// The last dictation, as typed (the tray's Paste Last Dictation). Kept in memory only.
+    last: Mutex<Option<String>>,
 }
 
 enum Work {
@@ -119,6 +121,7 @@ impl Dictation {
             phase: Mutex::new("idle"),
             log: Mutex::new(log),
             history: history::History::open(data),
+            last: Mutex::new(None),
         });
         if let Err(error) = pill::make(app) {
             inner.note(&format!("no pill: {error}"));
@@ -176,6 +179,23 @@ impl Dictation {
     /// Settings' Download (or Try Again).
     pub fn download(&self) {
         self.inner.start_download();
+    }
+
+    /// The tray's Paste Last Dictation: types the last dictation again where the cursor is now, once the menu has
+    /// closed and the focus is back in that app.
+    pub fn paste_last(&self) {
+        let inner = self.inner.clone();
+        std::thread::spawn(move || {
+            let Some(text) = inner.last.lock().unwrap().clone() else {
+                pill::flash(&inner.app, "Nothing dictated yet", "info", 2.0);
+                return;
+            };
+            std::thread::sleep(Duration::from_millis(250));
+            if let Err(error) = paste::insert(&text) {
+                inner.note(&format!("paste last: {error}"));
+                pill::flash(&inner.app, &format!("Couldn't type it: {error}"), "problem", 4.0);
+            }
+        });
     }
 
     /// Settings' Clear History.
@@ -504,6 +524,7 @@ impl Inner {
         }
         // Spacing, the first letter and the last full stop fitted to the sentence it lands in; never the words.
         let text = cursor::fit(&text);
+        *self.last.lock().unwrap() = Some(text.trim().to_string());
         match paste::insert(&text) {
             Ok(()) => {
                 pill::hide(&self.app);
@@ -514,7 +535,7 @@ impl Inner {
             }
             Err(error) => {
                 self.note(&format!("paste: {error}"));
-                pill::flash(&self.app, &format!("Couldn't type it: {error}"), "problem", 4.0);
+                pill::flash(&self.app, &format!("Couldn't type it: {error} · try Paste Last Dictation in the tray"), "problem", 4.0);
             }
         }
     }

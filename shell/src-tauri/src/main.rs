@@ -1732,6 +1732,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let accelerator = (shell.shortcut == Method::Grab).then(|| shell.hotkey());
     let search = MenuItem::with_id(app, "search", "Search…", true, accelerator.as_deref())?;
     let open = MenuItem::with_id(app, "open", "Open Murmur", true, None::<&str>)?;
+    let paste_last = MenuItem::with_id(app, "paste-last", "Paste Last Dictation", true, None::<&str>)?;
     let folders = MenuItem::with_id(app, "folders", "Folders…", true, None::<&str>)?;
     let index = MenuItem::with_id(app, "index", "Index Now", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause Indexing", true, None::<&str>)?;
@@ -1741,7 +1742,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &separator, &search, &open, &folders, &index, &pause, &settings, &check,
+        &[&status, &separator, &search, &paste_last, &open, &folders, &index, &pause, &settings, &check,
           &PredefinedMenuItem::separator(app)?, &quit_item],
     )?;
     // Murmur's logo, in its colors (tray_icon.rs).
@@ -1755,6 +1756,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "search" => show_panel(app),
             "open" => show_window_or_setup(app),
+            "paste-last" => app.state::<dictation::Dictation>().paste_last(),
             "folders" => later(app, |app| {
                 let set_up = app.state::<Arc<Shell>>().is_set_up();
                 let _ = if set_up { show_window_at(app, Some("folders")) } else { show_setup(app) };
