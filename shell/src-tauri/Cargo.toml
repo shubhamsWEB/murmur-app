@@ -36,7 +36,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
                                               "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Memory",
                                               # dictation: the key, the paste, the pill that never takes the focus
                                               "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
-                                              "Win32_System_LibraryLoader"] }
+                                              "Win32_System_LibraryLoader", "Win32_Graphics_Dwm"] }
 
 # GNOME's shortcut settings, `--toggle` handed to the running Murmur, and the panel's window on Wayland (all already in
 # Tauri's build on Linux).

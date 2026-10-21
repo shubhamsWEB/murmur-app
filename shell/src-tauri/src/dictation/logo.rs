@@ -86,16 +86,11 @@ pub fn pill_out(app: &AppHandle, out: bool) {
 fn update(app: &AppHandle) {
     let Some(window) = app.get_webview_window(LABEL) else { return };
     if ENABLED.load(Ordering::SeqCst) && !PILL_OUT.load(Ordering::SeqCst) {
-        if !window.is_visible().unwrap_or(false) {
-            #[cfg(windows)]
-            if let Ok(hwnd) = window.hwnd() {
-                super::pill::windows::show_without_activating(hwnd.0 as _);
-            }
-            #[cfg(not(windows))]
-            let _ = window.show();
+        if !super::pill::is_shown(&window) {
+            super::pill::show_quietly(&window);
         }
     } else {
-        let _ = window.hide();
+        super::pill::hide_quietly(&window);
     }
 }
 

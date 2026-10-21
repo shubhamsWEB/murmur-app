@@ -72,7 +72,7 @@ pub fn hide(app: &AppHandle) {
         std::thread::sleep(CLOSING);
         if GENERATION.load(Ordering::SeqCst) == generation {
             if let Some(window) = app.get_webview_window(LABEL) {
-                let _ = window.hide();
+                hide_quietly(&window);
             }
             super::logo::pill_out(&app, false);
         }
@@ -82,14 +82,9 @@ pub fn hide(app: &AppHandle) {
 fn send(app: &AppHandle, state: serde_json::Value) -> u64 {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(window) = app.get_webview_window(LABEL) {
-        if !window.is_visible().unwrap_or(false) {
+        if !is_shown(&window) {
             place(app, &window);
-            #[cfg(windows)]
-            if let Ok(hwnd) = window.hwnd() {
-                windows::show_without_activating(hwnd.0 as _);
-            }
-            #[cfg(not(windows))]
-            let _ = window.show();
+            show_quietly(&window);
         }
     }
     let _ = app.emit_to(LABEL, "pill", state);
@@ -122,27 +117,83 @@ fn place(app: &AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
+/// The pill's and the Murmur button's windows on Windows: bare popups (no title bar, frame or rounded outline) that
+/// are never activated and aren't in Alt+Tab, shown and hidden here rather than through Tauri, which puts its own window
+/// style back when it shows or hides a window (with a title bar: the Murmur button came out as a tiny "Murmur" title bar
+/// with a close button).
 #[cfg(windows)]
 pub(super) mod windows {
     use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        GetWindowLongPtrW, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
+        HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
+        SW_SHOWNOACTIVATE, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
 
-    /// Never activated, not in Alt+Tab.
+    /// A bare popup, never activated, not in Alt+Tab; no rounded corners or outline on Windows 11.
     pub fn never_activate(hwnd: HWND) {
         unsafe {
-            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize);
+            let frame = (WS_CAPTION | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX
+                | WS_MAXIMIZEBOX) as isize;
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !frame) | WS_POPUP as isize);
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
+                              (ex & !((WS_EX_APPWINDOW | WS_EX_WINDOWEDGE) as isize))
+                                  | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize);
+            let square: u32 = 1; // DWMWCP_DONOTROUND
+            let no_border: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+            DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &square as *const u32 as _, 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, &no_border as *const u32 as _, 4);
+            SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
     }
 
     /// Shown on top without taking the focus from the app the person is typing in.
     pub fn show_without_activating(hwnd: HWND) {
+        never_activate(hwnd);
         unsafe {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
     }
+
+    pub fn hide(hwnd: HWND) {
+        unsafe {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
+    pub fn visible(hwnd: HWND) -> bool {
+        unsafe { IsWindowVisible(hwnd) != 0 }
+    }
+}
+
+/// Shown without taking the focus (on Windows, as a bare popup: `windows`).
+pub(super) fn show_quietly(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        windows::show_without_activating(hwnd.0 as _);
+        return;
+    }
+    let _ = window.show();
+}
+
+pub(super) fn hide_quietly(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        windows::hide(hwnd.0 as _);
+        return;
+    }
+    let _ = window.hide();
+}
+
+pub(super) fn is_shown(window: &tauri::WebviewWindow) -> bool {
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        return windows::visible(hwnd.0 as _);
+    }
+    window.is_visible().unwrap_or(false)
 }
