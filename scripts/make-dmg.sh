@@ -9,6 +9,10 @@
 #     notarized and stapled: it opens on any Mac with no warnings. NOTARY_PROFILE=<name> to use another profile.
 #   • Otherwise your .sign-id identity (Apple Development) or ad-hoc: works, but other Macs show "Apple could not
 #     verify Murmur"; they open it once from System Settings → Privacy & Security → Open Anyway.
+#
+# On GitHub (the release workflow), notarization uses an App Store Connect API key instead of a keychain profile:
+# APPLE_API_KEY (the .p8 file's path), APPLE_API_KEY_ID and APPLE_API_ISSUER. REQUIRE_NOTARIZATION=1 makes a DMG that
+# isn't signed and notarized an error rather than a warning.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -54,19 +58,33 @@ rm -f "$DMG"
 hdiutil create -volname "Murmur $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG" > /dev/null
 rm -rf "$(dirname "$STAGE")"
 
+NOTARIZED=0
 if [[ $SIGNED_FOR_RELEASE == 1 ]]; then
   codesign --force --sign "$DEVELOPER_ID" --timestamp "$DMG"
-  if xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" > /dev/null 2>&1; then
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
+    NOTARY=(--key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+  elif xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" > /dev/null 2>&1; then
+    NOTARY=(--keychain-profile "$NOTARY_PROFILE")
+  else
+    NOTARY=()
+  fi
+  if [[ ${#NOTARY[@]} -gt 0 ]]; then
     echo "› Notarizing (a few minutes)"
-    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun notarytool submit "$DMG" "${NOTARY[@]}" --wait --timeout 30m | tee "$DIST/notary.log"
+    grep -q "status: Accepted" "$DIST/notary.log" || { echo "Apple didn't accept the DMG (above)" >&2; exit 1; }
     xcrun stapler staple "$DMG"
+    NOTARIZED=1
     echo "› Notarized and stapled: opens on any Mac without warnings"
   else
     echo "› Not notarized: no notary profile \"$NOTARY_PROFILE\" (see the top of this script)"
   fi
 fi
+if [[ "${REQUIRE_NOTARIZATION:-}" == 1 && $NOTARIZED != 1 ]]; then
+  echo "The DMG isn't signed with a Developer ID and notarized: not a release" >&2
+  exit 1
+fi
 
 SIZE="$(du -h "$DMG" | cut -f1)"
 echo
 echo "Done: $DMG ($SIZE)"
-open -R "$DMG"
+[[ -n "${CI:-}" ]] || open -R "$DMG"

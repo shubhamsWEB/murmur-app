@@ -1,0 +1,127 @@
+# Releases Murmur for Mac and Windows together, from a version tag (scripts/release.sh 1.4.0 sets the version, tags
+# v1.4.0 and pushes it):
+#   1. checks every version number says the tag's version and that scripts/release-notes/<version>.md is there
+#   2. builds the Mac DMG (mac.yml: signed, notarized, Sparkle-signed) and the Windows installer (windows.yml: with its
+#      checks, signed for updates) in parallel; if either fails, nothing is published
+#   3. publishes release v<version> as the newest: Murmur.dmg and Murmur-Windows-Setup.exe (the names the website and
+#      README link to through releases/latest/download/), Murmur-<version>.dmg, and Murmur_<version>_x64-setup.exe
+#      with its .sig (what the Windows updater downloads)
+#   4. writes the update feeds on main: updates/appcast.xml (Mac, Sparkle) and updates/windows-x86_64.json (Windows,
+#      Tauri), in that order after the release, so installed copies never see an update before its files are there.
+#      A feed whose key isn't set up yet (SPARKLE_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY) is skipped.
+# The website reads the newest release when it opens: nothing to deploy there.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The version's tag (v1.4.0), already pushed
+        required: true
+
+permissions:
+  contents: write   # the release, and the feeds on main
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: version
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          python3 scripts/set-version.py --check "$version"
+          [[ -s "scripts/release-notes/$version.md" ]] || { echo "no scripts/release-notes/$version.md" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  mac:
+    needs: check
+    uses: ./.github/workflows/mac.yml
+    with:
+      ref: ${{ needs.check.outputs.tag }}
+      release: true
+    secrets: inherit
+
+  windows:
+    needs: check
+    uses: ./.github/workflows/windows.yml
+    with:
+      ref: ${{ needs.check.outputs.tag }}
+    secrets: inherit
+
+  publish:
+    needs: [check, mac, windows]
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: built
+      - name: The release's files
+        run: |
+          mkdir -p out
+          ls -R built
+          cp "built/Murmur-mac/Murmur-$VERSION.dmg" out/
+          cp "built/Murmur-mac/Murmur-$VERSION.dmg" out/Murmur.dmg
+          setup="built/Murmur-windows-x64/Murmur_${VERSION}_x64-setup.exe"
+          cp "$setup" out/
+          cp "$setup" out/Murmur-Windows-Setup.exe
+          [[ -f "$setup.sig" ]] && cp "$setup.sig" out/ || echo "no .sig: the Windows feed isn't written"
+          git show "$TAG:scripts/release-notes/$VERSION.md" > notes.md
+          cat notes.md - > release-notes.md <<'TXT'
+
+          **Mac**: download **Murmur.dmg**, open it and drag Murmur to Applications. Needs an Apple silicon Mac on macOS 14 or later.
+
+          **Windows**: download **Murmur-Windows-Setup.exe** and run it; it installs for your account, no admin rights needed. If SmartScreen warns, click **More info → Run anyway**. Needs 64-bit Windows 10 or 11.
+
+          Both download their speech and search models on first launch, and copies already installed update themselves.
+          TXT
+          (cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Publish
+        run: |
+          files=(out/*)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+            gh release edit "$TAG" --notes-file release-notes.md --latest --prerelease=false --draft=false
+          else
+            gh release create "$TAG" "${files[@]}" --verify-tag --title "Murmur $VERSION" --notes-file release-notes.md --latest
+          fi
+      - name: Update feeds
+        run: |
+          build=$(git show "$TAG:Resources/Info.plist" | python3 -c 'import plistlib,sys; print(plistlib.loads(sys.stdin.buffer.read())["CFBundleVersion"])')
+          if [[ -f built/Murmur-mac/sparkle.txt ]]; then
+            python3 scripts/appcast.py "$VERSION" "$build" "out/Murmur-$VERSION.dmg" built/Murmur-mac/sparkle.txt notes.md updates/appcast.xml
+          fi
+          if ls out/*.sig > /dev/null 2>&1; then
+            python3 scripts/update-feed.py out updates --notes notes.md --tag "$TAG"
+          fi
+          git add updates
+          if git diff --cached --quiet; then echo "no feeds to write (no update keys yet)"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update feeds: Murmur $VERSION"
+          for attempt in 1 2 3; do
+            git pull --rebase -q origin main && git push origin HEAD:main && break
+            sleep 5
+          done
