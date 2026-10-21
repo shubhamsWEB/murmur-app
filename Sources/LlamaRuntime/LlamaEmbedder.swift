@@ -53,7 +53,7 @@ public final class LlamaEmbedder: Embedder {
             throw WorkerError.notFound("\(LlamaModels.mediaFile) (images and audio) isn't downloaded yet")
         }
         var modelParams = llama_model_default_params()
-        modelParams.n_gpu_layers = 999
+        modelParams.n_gpu_layers = Self.cpuOnly ? 0 : 999
         guard let model = llama_model_load_from_file(models.text.path, modelParams) else {
             throw WorkerError.failed("can't load \(models.text.path)")
         }
@@ -79,7 +79,7 @@ public final class LlamaEmbedder: Embedder {
         var media: OpaquePointer?
         if let mediaFile = models.media, !textOnly {
             var mediaParams = mtmd_context_params_default()
-            mediaParams.use_gpu = true
+            mediaParams.use_gpu = !Self.cpuOnly
             mediaParams.print_timings = false
             mediaParams.warmup = true
             mediaParams.image_min_tokens = 1      // never rescale: images arrive at their final size (ImageSizing)
@@ -313,6 +313,23 @@ public final class LlamaEmbedder: Embedder {
         }
     }
 
+    /// The GPU left out: where this machine's speed check found its processor faster than its GPU
+    /// (`MeasuredCosts.Speed.device`; the helpers set it before the model loads), or `MURMUR_DEVICE=cpu`.
+    nonisolated(unsafe) public static var cpuOnly = ProcessInfo.processInfo.environment["MURMUR_DEVICE"] == "cpu"
+
+    /// A GPU llama.cpp can run on here (Metal on a Mac; CUDA or Vulkan elsewhere, when their backend loaded and found
+    /// one), before `cpuOnly` leaves it out.
+    public static let hasGPU: Bool = {
+        _ = backend
+        return gpuFound
+    }()
+    nonisolated(unsafe) private static var gpuFound = false
+
+    private static func isGPU(_ device: ggml_backend_dev_t?) -> Bool {
+        let type = ggml_backend_dev_type(device)
+        return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU
+    }
+
     /// llama.cpp's process-wide setup, once.
     private static let backend: Void = {
         llama_log_set(LlamaLog.callback, LlamaLog.userData)
@@ -321,6 +338,9 @@ public final class LlamaEmbedder: Embedder {
         loadBackends()
         #endif
         llama_backend_init()
+        #if os(macOS)
+        gpuFound = (0..<ggml_backend_dev_count()).contains { isGPU(ggml_backend_dev_get($0)) }   // Metal
+        #endif
     }()
 
     #if !os(macOS)
@@ -345,9 +365,19 @@ public final class LlamaEmbedder: Embedder {
             ggml_backend_load_all_from_path(folder)
         }
         if ggml_backend_dev_count() == 0 { ggml_backend_load_all() }
+        gpuFound = (0..<ggml_backend_dev_count()).contains { isGPU(ggml_backend_dev_get($0)) }
+        if cpuOnly {
+            // Unloaded rather than just unused: a GPU backend would still set itself up (Vulkan: seconds).
+            for index in (0..<ggml_backend_reg_count()).reversed() {
+                let registry = ggml_backend_reg_get(index)
+                if (0..<ggml_backend_reg_dev_count(registry)).contains(where: { isGPU(ggml_backend_reg_dev_get(registry, $0)) }) {
+                    ggml_backend_unload(registry)
+                }
+            }
+        }
         LlamaLog.shared.line("backends: " + (0..<ggml_backend_reg_count()).map {
             String(cString: ggml_backend_reg_name(ggml_backend_reg_get($0)))
-        }.joined(separator: ", "))
+        }.joined(separator: ", ") + (cpuOnly && gpuFound ? " (the GPU left out: the processor was faster here)" : ""))
     }
     #endif
 }

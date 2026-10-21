@@ -47,16 +47,24 @@ public enum Crawler {
                 FolderSelection.isInside($0, root.path) || FolderSelection.isInside($0, real)
             }.flatMap { [$0, FolderSelection.realPath($0)] }
             #if os(Windows)
-            guard let walker = FileSystem.walk(root, keys: keys) else { continue }
+            guard let walker = FileSystem.walk(root) else { continue }
             #else
             guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: keys,
                                              options: [.skipsHiddenFiles, .skipsPackageDescendants],
                                              errorHandler: { _, _ in true }) else { continue }
             #endif
             func visit(_ url: URL) {
+                #if os(Windows)
+                // Foundation's resource values can trap on 2–4 GiB files, even for isDirectory alone.
+                // DirectoryWalk supplies this bit from WIN32_FIND_DATAW without asking Foundation.
+                let values: URLResourceValues? = nil
+                let isDirectory = url.hasDirectoryPath
+                #else
                 let values = try? url.resourceValues(forKeys: Set(keys))
+                let isDirectory = values?.isDirectory == true
+                #endif
                 let isPackage = FileSystem.isPackage(url, values)
-                if values?.isDirectory == true, !isPackage {
+                if isDirectory, !isPackage {
                     if let reason = Rules.skipReason(forFolder: url, home: home, excluded: skips)
                         ?? (options.code ? Rules.codeSkipReason(forFolder: url) : nil) {
                         walker.skipDescendants()
@@ -215,9 +223,19 @@ enum GitFiles {
         guard let git = FileSystem.git else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: git)
-        process.arguments = ["-C", repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+        // A repo that arrived unzipped or copied keeps its own .git/config, which can name a program (core.fsmonitor
+        // runs for ls-files; hooks could for anything else): those settings are overridden, and the system's and
+        // the user's config files are left out, so no config git reads here can run anything.
+        #if os(Windows)
+        let nullDevice = "NUL"
+        #else
+        let nullDevice = "/dev/null"
+        #endif
+        process.arguments = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=\(nullDevice)", "-C", repo,
+                             "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
         // Reading only: never wait for, or take, the repo's lock (an editor's git may be busy in it).
-        process.environment = ["GIT_OPTIONAL_LOCKS": "0", "PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()]
+        process.environment = ["GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": nullDevice,
+                               "PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()]
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

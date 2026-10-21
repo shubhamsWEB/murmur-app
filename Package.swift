@@ -11,6 +11,7 @@ let vendor = "\(Context.packageDirectory)/Vendor"
 let llamaModule = "Sources/CLlama"                        // static llama.cpp with Metal (scripts/build-llama.sh)
 let llamaLink: [LinkerSetting] = [.unsafeFlags(["-L\(vendor)/llama/lib"])]
 let engineDependencies: [Target.Dependency] = []
+let testDependencies: [Target.Dependency] = []
 let engineLink: [LinkerSetting] = []
 let portableTargets: [Target] = []
 #else
@@ -29,6 +30,7 @@ let llamaModule = "Sources/CLlamaShared"
 #endif
 let llamaLink: [LinkerSetting] = [.unsafeFlags(["-L\(vendor)/llama/lib"] + runpath)]
 let engineDependencies: [Target.Dependency] = ["CSQLite", "CStb", "CMiniz", "CPDFium"]
+let testDependencies: [Target.Dependency] = ["CMiniz"]   // the portable readers' tests write zips with it
 let engineLink: [LinkerSetting] = [.unsafeFlags(["-L\(vendor)/pdfium/lib"] + runpath)]
 let portableTargets: [Target] = [
     // SQLite with FTS5 (Windows has no system SQLite, Linux's may lack FTS5 or its headers).
@@ -107,7 +109,8 @@ let package = Package(
         // its indexing helper and its query encoder.
         .executableTarget(name: "MurmurEngine", dependencies: ["MurmurIndex", "LlamaRuntime"]),
         // Pictures/ holds ImageTests' pictures (scripts/testbed/make_test_pictures.swift), read by path.
-        .testTarget(name: "MurmurIndexTests", dependencies: ["MurmurIndex"], exclude: ["Pictures"]),
+        .testTarget(name: "MurmurIndexTests", dependencies: ["MurmurIndex"] + testDependencies,
+                    exclude: ["Pictures", "Videos"]),
         // Reference/ holds the fixed inputs and vectors of ReferenceVectorTests, read by path.
         .testTarget(name: "LlamaRuntimeTests", dependencies: ["LlamaRuntime"], exclude: ["Reference"]),
     ] + appTargets

@@ -23,6 +23,10 @@ evals/*.local.json
 # The Tauri shell (shell/): Cargo builds and the schemas tauri-build writes
 shell/src-tauri/target/
 shell/src-tauri/gen/
+# What the Windows packaging writes: the helper folder, the notices, the speech runtime's link settings
+shell/src-tauri/helper/
+shell/src-tauri/THIRD-PARTY-NOTICES.txt
+shell/.cargo/
 dist/
 
 # The product website lives in its own repo (murmur-web)

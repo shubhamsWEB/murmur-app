@@ -1,0 +1,114 @@
+# Builds Murmur for Windows (x64): the Tauri shell (shell/) with the search engine (murmur-engine.exe) and dictation, as
+# a per-user NSIS installer (no admin prompt), kept as the run's artifact; nothing is published. By hand from the
+# Actions tab (Run workflow), or `gh workflow run windows.yml -f ref=<branch or tag>`; and on every push to the
+# `windows` branch (Run workflow is offered only once this file is on the default branch). The Mac app is built and released
+# on a Mac (scripts/release.sh). After the build, dictation's speech recognition transcribes a recording on Windows,
+# and the installer is installed and launched hidden: first-run setup indexes a few files and the search panel finds
+# one (scripts/check-windows-package.sh). With the update signing key in the repository's secrets
+# (TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD), the installer comes with the .sig the update feed
+# needs (scripts/update-feed.py). Based on DigUp's packages workflow (https://github.com/ARahim3/DigUp).
+name: Windows
+
+on:
+  push:
+    branches: [windows]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag to build
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      # The small ffmpeg is built once per version of its build script (build-ffmpeg.sh does nothing when it's there).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: ffmpeg
+        with:
+          path: Vendor/ffmpeg
+          key: ffmpeg-windows-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        with:
+          msystem: MINGW64
+          release: false   # the runner's own MSYS2
+          update: true
+          install: >-
+            make mingw-w64-x86_64-gcc mingw-w64-x86_64-meson mingw-w64-x86_64-ninja mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkgconf mingw-w64-x86_64-zlib
+      - name: ffmpeg
+        # The small LGPL ffmpeg the installer carries: only what the search engine reads, so its licenses are FFmpeg's,
+        # dav1d's and zlib's. Built with MSYS2's MinGW compilers, before the MSVC environment.
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: scripts/build-ffmpeg.sh
+      - uses: compnerd/gha-setup-swift@bbae8ce86bac5a3449f3992b3d88bc4ca25f2057 # v0.5.0
+        with:
+          swift-version: swift-6.4.0-release
+          swift-build: 6.4.0-RELEASE
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Vulkan SDK
+        # llama.cpp's Vulkan backend beside the CPU ones: a PC whose graphics card runs the search model faster uses it.
+        shell: bash
+        run: |
+          version=1.4.363.0
+          temp=$(cygpath -u "$RUNNER_TEMP")
+          curl -fsSL -o "$temp/vulkansdk.exe" \
+            "https://sdk.lunarg.com/sdk/download/$version/windows/vulkansdk-windows-X64-$version.exe"
+          echo "94a82d378f7a5e3e54c9db7d2fb7016af136e14ac0a18dbf0f2f67a36352d141  $temp/vulkansdk.exe" | sha256sum -c -
+          "$temp/vulkansdk.exe" --root "C:\\VulkanSDK\\$version" --accept-licenses --default-answer --confirm-command install
+          echo "VULKAN_SDK=C:\\VulkanSDK\\$version" >> "$GITHUB_ENV"
+          echo "C:\\VulkanSDK\\$version\\Bin" >> "$GITHUB_PATH"
+      - name: Build
+        shell: bash
+        run: |
+          # MSVC's tools before Git's: Git's /usr/bin/link (coreutils) would stand in for link.exe.
+          export PATH="$(dirname "$(command -v cl)"):$PATH"
+          scripts/fetch-vendor.sh
+          scripts/build-llama.sh
+          scripts/package-windows.sh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Murmur-windows-x64
+          path: |
+            shell/src-tauri/target/release/bundle/nsis/*.exe
+            shell/src-tauri/target/release/bundle/nsis/*.exe.sig
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: speech-model
+          key: parakeet-tdt-0.6b-v2-int8-1ab9323
+      - name: Dictation's speech recognition
+        # The engine downloads the English speech model as the app does (each file checked), then the shell's speech
+        # test runs the dictation path, level then Parakeet through the sherpa-onnx linked into the app, on a LibriSpeech
+        # recording from the model's own repository.
+        shell: bash
+        run: |
+          export PATH="$(dirname "$(command -v cl)"):$PATH"
+          shell/src-tauri/helper/murmur-engine.exe download-speech-model --model english --to "$(cygpath -m "$PWD/speech-model")" \
+            | tail -3
+          curl -fsSL -o "$RUNNER_TEMP/speech.wav" \
+            "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/test_wavs/0.wav"
+          echo "5fceacff0315d49cb59fcc505bcecf1ed5f2f35c2897b1e65a59f30e5d922150  $RUNNER_TEMP/speech.wav" | sha256sum -c -
+          cd shell/src-tauri
+          MURMUR_TEST_SPEECH_MODEL="$(cygpath -m "$GITHUB_WORKSPACE/speech-model")" MURMUR_TEST_WAV="$(cygpath -m "$RUNNER_TEMP/speech.wav")" \
+            MURMUR_TEST_EXPECT="very like the old portrait" \
+            cargo test --release --locked --bin murmur-shell dictation:: -- --nocapture
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: models
+          key: embeddinggemma-2-q8_0-bfcd298-windows
+      - name: The installer
+        shell: bash
+        run: MODELS="$PWD/models" scripts/check-windows-package.sh shell/src-tauri/target/release/bundle/nsis/*-setup.exe

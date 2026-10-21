@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Murmur</title>
+  <link rel="stylesheet" href="pill.css">
+</head>
+<body>
+  <!-- The dictation pill (src-tauri/src/dictation/pill.rs): the Mac's DictationHUD. Closed, it's a small Starling
+       capsule; it opens to show what's happening, and closes back into it. -->
+  <div class="stage" id="stage">
+    <div class="pill" id="pill">
+      <div class="contents" id="contents">
+        <span class="indicator" id="indicator">
+          <span class="halo" id="halo"></span>
+          <svg class="bird" id="bird" viewBox="10 26 82 62" aria-hidden="true">
+            <path d="M30 58 L12 47 L16 67 Z" fill="#E2554A"/>
+            <ellipse cx="48" cy="60" rx="24" ry="19" fill="#FF6F61"/>
+            <circle cx="66" cy="42" r="13" fill="#FF6F61"/>
+            <path d="M78 40.5 L89 44 L78 47.5 Z" fill="#FBF7F2"/>
+            <circle cx="69" cy="39" r="2.6" fill="#221E1C"/>
+            <path class="wave" d="M31 60 q4.5 -8 9 0 t9 0 t9 0" stroke="#FFF6EF" stroke-width="3.6" stroke-linecap="round" fill="none"/>
+          </svg>
+          <span class="spinner" id="spinner"></span>
+          <span class="mark" id="mark"></span>
+        </span>
+        <span class="text" id="text"></span>
+      </div>
+    </div>
+  </div>
+  <script src="pill.js"></script>
+</body>
+</html>

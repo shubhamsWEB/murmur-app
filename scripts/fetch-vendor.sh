@@ -9,7 +9,7 @@ SQLITE_ZIP=2026/sqlite-amalgamation-3540000.zip       # SQLite 3.54.0
 STB_COMMIT=2c980bb59875b0d32144a71867fbdebb2f77cd20   # nothings/stb, 2026-08-02
 MINIZ_VERSION=3.1.2
 PDFIUM_TAG=chromium/8086
-STAMP="sqlite $SQLITE_ZIP stb $STB_COMMIT miniz $MINIZ_VERSION pdfium $PDFIUM_TAG"
+STAMP="sqlite $SQLITE_ZIP stb $STB_COMMIT miniz $MINIZ_VERSION pdfium $PDFIUM_TAG, with licenses"
 if [[ "$(cat Vendor/VENDOR 2>/dev/null)" == "$STAMP" ]]; then exit 0; fi
 
 case "$(uname -s)-$(uname -m)" in
@@ -51,7 +51,7 @@ echo "miniz ($MINIZ_VERSION)"
 curl -sSL -o "$T/miniz.zip" "https://github.com/richgel999/miniz/releases/download/$MINIZ_VERSION/miniz-$MINIZ_VERSION.zip"
 unzip_py "$T/miniz.zip" "$T/miniz"
 rm -rf Vendor/miniz && mkdir -p Vendor/miniz/include
-cp "$T"/miniz/miniz.c Vendor/miniz/ && cp "$T"/miniz/*.h Vendor/miniz/include/
+cp "$T"/miniz/miniz.c Vendor/miniz/ && cp "$T"/miniz/*.h Vendor/miniz/include/ && cp "$T"/miniz/LICENSE Vendor/miniz/
 
 echo "PDFium ($PDFIUM_TAG, $PDFIUM)"
 curl -sSL -o "$T/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG/\//%2F}/$PDFIUM.tgz"

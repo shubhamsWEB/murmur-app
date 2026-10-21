@@ -21,7 +21,8 @@ import Testing
         #expect(measured.costs.image == Costs().image)   // 10 pictures aren't enough to go by
         measured.add("image", units: 10, seconds: 3)
         #expect(measured.costs.image == 0.3)
-        #expect(measured.costs.docChunk == Costs().docChunk)
+        // Pictures went 2.5 times slower than expected: kinds not measured yet are expected at that pace.
+        #expect(abs(measured.costs.docChunk - Costs().docChunk * 2.5) < 1e-9)
     }
 
     @Test func aSlowerMacScalesTheFixedCostsUntilItsOwnAreMeasured() {
@@ -29,10 +30,30 @@ import Testing
         measured.speed = MeasuredCosts.Speed(embedding: 3, ocr: 2)
         #expect(measured.costs.image == Costs().image * 3)
         #expect(measured.costs.screenshot == Costs().screenshot * 3)   // the slower of the two sets the pace
-        measured.add("image", units: 40, seconds: 8)
-        #expect(measured.costs.image == 0.2)                         // what it measured wins
         measured.speed = MeasuredCosts.Speed(embedding: 0.001, ocr: 1)
         #expect(measured.costs.docChunk == Costs().docChunk * 0.25)   // a check that's off by far is held in
+        measured.speed = MeasuredCosts.Speed(embedding: 3, ocr: 2)
+        measured.add("image", units: 40, seconds: 8)
+        #expect(measured.costs.image == 0.2)                         // what it measured wins
+    }
+
+    /// An RTX 4050 laptop's check, timed at a bad moment, took it for 30 times slower than the M4 Pro; its first index
+    /// then went about as fast as the M4 Pro's (142 screenshots in 47 s, 189 PDF pages in 63 s, 54 minutes of video in
+    /// 96 s). Its pictures, not measured yet, follow the kinds that were.
+    @Test func aCheckTimedAtABadMomentIsPutRightByIndexing() throws {
+        var measured = MeasuredCosts()
+        let kinds = ["image", "screenshot", "pdfPage", "docChunk", "audioSecond", "videoSecond", "codeStretch"]
+        measured.speed = MeasuredCosts.Speed(embedding: 1, ocr: 1, device: "gpu")
+        measured.speed?.kinds = Dictionary(uniqueKeysWithValues: kinds.map { ($0, 30) })
+        #expect(abs(measured.costs.image - Costs().image * 30) < 1e-9)
+        #expect(measured.pace == nil)
+        measured.add("screenshot", units: 142, seconds: 47)
+        measured.add("pdfPage", units: 189, seconds: 63)
+        measured.add("videoSecond", units: 3240, seconds: 96)
+        let pace = try #require(measured.pace)
+        #expect(pace > 0.03 && pace < 0.1)   // the check was 10 to 30 times off
+        #expect(measured.costs.image > 0.1 && measured.costs.image < 0.4)
+        #expect(measured.costs.screenshot == 47.0 / 142)
     }
 
     @Test func recentWorkCountsMost() {
@@ -60,5 +81,8 @@ import Testing
         let saved = MeasuredCosts.load(from: folder)
         #expect(saved.speed == MeasuredCosts.Speed(embedding: 1.5, ocr: 1))
         #expect(saved.tallies["docChunk"]?.units == 2)   // the speed joined what was there
+        MeasuredCosts.setSpeed(MeasuredCosts.Speed(embedding: 1, ocr: 1, kinds: ["image": 2], device: "cpu"), in: folder,
+                               forgetTallies: true)
+        #expect(MeasuredCosts.load(from: folder).tallies.isEmpty)   // measured on the other device
     }
 }

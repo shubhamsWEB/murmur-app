@@ -15,12 +15,28 @@ import Foundation
 ///   {"event":"done","folder":…} | {"event":"error","message":…}             the end (exit 0 | 1)
 func downloadModel(_ args: Arguments) throws -> Int32 {
     let folder = args.values["--to"].map(Arguments.folderURL) ?? ModelFiles.installed
+    return try download(ModelFiles.missing(in: folder), total: ModelFiles.totalBytes, into: folder, useCache: true)
+}
+
+/// `murmur-engine download-speech-model [--model english|multilingual] [--to DIR]`: the speech model the Windows and
+/// Linux app dictates with (`SpeechModelFiles`), into DIR (default: Murmur's Speech Models/<model>). The same events.
+func downloadSpeechModel(_ args: Arguments) throws -> Int32 {
+    let name = args.values["--model"] ?? SpeechModelFiles.english.rawValue
+    guard let model = SpeechModelFiles(rawValue: name) else {
+        throw CLIError("no speech model called \(name): english or multilingual")
+    }
+    let folder = args.values["--to"].map(Arguments.folderURL) ?? model.installed
+    return try download(model.missing(in: folder), total: model.totalBytes, into: folder, useCache: false)
+}
+
+/// Downloads `missing` into `folder` (each file checked before it gets its name), saying how it goes as JSON lines.
+/// `useCache`: copy a file from the Hugging Face cache when it's there (the embedding model's pinned snapshot).
+private func download(_ missing: [ModelFiles.File], total: Int64, into folder: URL, useCache: Bool) throws -> Int32 {
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    let missing = ModelFiles.missing(in: folder)
-    var done = ModelFiles.totalBytes - missing.reduce(0) { $0 + $1.bytes }
+    var done = total - missing.reduce(0) { $0 + $1.bytes }
     for file in missing {
         let final = folder.appendingPathComponent(file.name)
-        if let cached = ModelFiles.cachedCopy(of: file), (try? ModelFiles.sha256(of: cached)) == file.sha256 {
+        if useCache, let cached = ModelFiles.cachedCopy(of: file), (try? ModelFiles.sha256(of: cached)) == file.sha256 {
             emit(["event": "file", "name": file.name, "bytes": file.bytes, "from": "cache"])
             let partial = folder.appendingPathComponent(file.name + ".partial")
             try? FileManager.default.removeItem(at: partial)
@@ -32,7 +48,7 @@ func downloadModel(_ args: Arguments) throws -> Int32 {
         emit(["event": "file", "name": file.name, "bytes": file.bytes, "from": "download"])
         var failures = 0
         while true {
-            switch fetch(file, into: folder, before: done) {
+            switch fetch(file, into: folder, before: done, total: total) {
             case .downloaded(let partial):
                 emit(["event": "verifying", "name": file.name])
                 guard try ModelFiles.sha256(of: partial) == file.sha256 else {
@@ -67,12 +83,12 @@ func downloadModel(_ args: Arguments) throws -> Int32 {
 }
 
 /// One try at one file: blocks until `FileFetcher` is through with it.
-private func fetch(_ file: ModelFiles.File, into folder: URL, before done: Int64) -> FileFetcher.Outcome {
+private func fetch(_ file: ModelFiles.File, into folder: URL, before done: Int64, total: Int64) -> FileFetcher.Outcome {
     let finished = DispatchSemaphore(value: 0)
     let result = OutcomeBox()
     let fetcher = FileFetcher(file: file, folder: folder, progress: { written in
         emit(["event": "progress", "name": file.name, "bytes": written, "total": file.bytes,
-              "all_bytes": done + written, "all_total": ModelFiles.totalBytes])
+              "all_bytes": done + written, "all_total": total])
     }, waiting: {
         emit(["event": "waiting"])
     }, done: { outcome in

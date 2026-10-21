@@ -92,7 +92,7 @@ struct StoppedFile: Codable {
     }
 
     func write(to url: URL) {
-        try? JSONEncoder().encode(self).write(to: url, options: .atomic)
+        try? JSONEncoder().encode(self).writeReplacing(url)
     }
 
     /// The note an earlier helper left, removed as it's read.

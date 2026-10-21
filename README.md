@@ -54,6 +54,22 @@ https://github.com/user-attachments/assets/f2899c74-865d-43b0-b801-a354198d21c6
 
 Murmur needs a Mac with Apple silicon on macOS 14 or later. The speech and search models download on first launch.
 
+### Windows (preview)
+
+Murmur for Windows does dictation and file search; commands and the assistant are Mac-only for now. It's built with
+the **Windows** workflow (Actions tab → Windows → Run workflow), which uploads `Murmur_<version>_x64-setup.exe` as the
+run's artifact.
+
+1. Run the installer. It installs for your account only, so it needs no admin rights. If SmartScreen warns about an
+   unrecognised app, click **More info → Run anyway** (the installer isn't code-signed yet).
+2. Choose the folders Murmur may search. The search model (865 MB) and the speech model (about 650 MB) download by
+   themselves.
+3. Hold **Ctrl + Windows**, speak, and let go: the words are typed where your cursor is. Right Ctrl or Right Alt can be
+   the key instead (Settings → Dictation, where you also pick the microphone and English or Multilingual).
+
+It needs 64-bit Windows 10 or 11. Speech runs on the processor (NVIDIA's Parakeet through
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)), and nothing you say leaves the PC.
+
 ## Using it
 
 | Keys | Does |
@@ -156,6 +172,27 @@ echo "Apple Development: Your Name (TEAMID)" > .sign-id
 </details>
 
 <details>
+<summary><b>Windows</b></summary>
+
+The Windows app is the Tauri shell in `shell/` (Rust and HTML), with the search engine (`murmur-engine.exe`, from
+`Sources/MurmurEngine`) as its helper. GitHub Actions builds it (`.github/workflows/windows.yml`): the engine with
+Swift 6.4, llama.cpp with its Vulkan backend, a small LGPL ffmpeg, then the NSIS installer. The run also transcribes a
+recording with the speech model and installs and launches the app to check that search works.
+
+To build on a Windows PC instead, follow the workflow's steps in Git Bash inside a Visual Studio developer prompt:
+`scripts/fetch-vendor.sh`, `scripts/build-llama.sh`, `scripts/build-ffmpeg.sh` (in MSYS2's MINGW64 shell), then
+`scripts/package-windows.sh`.
+
+Dictation links sherpa-onnx's build **without** text to speech (`scripts/fetch-speech-runtime.sh`). The crate's default
+build includes espeak-ng, which is GPL-3.0, and `package-windows.sh` refuses to package an app that contains it.
+
+**Updates:** the app checks `updates/windows-x86_64.json` on `main`. Releases must be signed with the update key, whose
+public half is in `shell/src-tauri/tauri.conf.json`. Add the private key as the repository secret
+`TAURI_SIGNING_PRIVATE_KEY`, plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, which is empty for the current key. Then
+`scripts/update-feed.py <folder with the installer and its .sig> updates` writes the feed for a published release.
+</details>
+
+<details>
 <summary><b>Publishing a release</b></summary>
 
 1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
@@ -175,7 +212,9 @@ notarizes the app so it opens without the security prompt. Needs the GitHub CLI:
 ## Credits and license
 
 Murmur is built on [DigUp](https://github.com/ARahim3/DigUp) by Abdur Rahim, which provides its file index and search.
-Speech recognition runs on [FluidAudio](https://github.com/FluidInference/FluidAudio). Full notices are in
-[`Resources/Acknowledgements.txt`](Resources/Acknowledgements.txt).
+Speech recognition runs on [FluidAudio](https://github.com/FluidInference/FluidAudio) on the Mac and on
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with ONNX Runtime on Windows. The Windows app is DigUp's Tauri
+shell. Full notices are in [`Resources/Acknowledgements.txt`](Resources/Acknowledgements.txt); the Windows installer
+carries its own, made by `scripts/notices.py`.
 
 Released under the [MIT License](LICENSE).

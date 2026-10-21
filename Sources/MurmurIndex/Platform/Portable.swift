@@ -21,6 +21,25 @@ public func autoreleasepool<Result>(invoking body: () throws -> Result) rethrows
 }
 #endif
 
+extension Data {
+    /// Writes the file whole, replacing what was there, so a reader sees the old contents or the new, never half. On
+    /// Windows the replace is refused while another program has the file open (error 32, a sharing violation, which
+    /// Foundation reports as "You don't have permission"): a virus scanner or the search indexer reading the file just
+    /// written. costs.json lost a write that way about once in five test runs. So it's tried again for a second, then
+    /// the file is written in place.
+    public func writeReplacing(_ url: URL) throws {
+        #if os(Windows)
+        for _ in 0..<10 {
+            if (try? write(to: url, options: .atomic)) != nil { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        try write(to: url)
+        #else
+        try write(to: url, options: .atomic)
+        #endif
+    }
+}
+
 /// Where Murmur keeps its own files on each OS: the model and the index.
 public enum AppPaths {
     /// macOS: ~/Library/Application Support/Murmur. Windows: %LOCALAPPDATA%\Murmur. Linux: $XDG_DATA_HOME/murmur-engine, or

@@ -20,9 +20,14 @@ import Foundation
 ///                                               (typing never waits on one) and kept in <index>/previews until the
 ///                                               next start
 ///   {"op":"reload"}                           → {"ok":true,"vectors":n,"code_vectors":n}: after indexing changed the index
-///   {"op":"folders","roots":[…],"skipped":[…],"types":[…],"code_roots":[…],"code_skipped":[…]} → {"ok":true}
+///   {"op":"summaries","code":bool}            → {"roots":[{"path","missing","unreadable","files","indexed","pending",
+///                                               "failed","skipped","unfinished","kinds":{kind: n}}]}: what's indexed
+///                                               under each chosen folder (each code folder, with `code`)
+///   {"op":"folders","roots":[…],"skipped":[…],"types":[…],"code_roots":[…],"code_skipped":[…]} → {"ok":true}: each
+///                                               optional; no code folders closes the code index
 ///   {"op":"prewarm"}                          → {"ok":true}: starts the encoder and loads the vectors (the panel opening)
-///   {"op":"status"}                           → {"encoder":"stopped|starting|ready|unavailable","vectors":n,…}
+///   {"op":"status"}                           → {"encoder":"stopped|starting|ready|unavailable","vectors":n,"files":n,
+///                                               "searchable":n,"pending":n,"unfinished":n,…}
 ///   {"op":"quit"}                             → {"ok":true}, then exit
 /// The encoder exits after `--encoder-idle` seconds without a query and the vectors are released (as in the app);
 /// keyword search keeps working and the next query brings both back.
@@ -67,9 +72,10 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
         try openCode()
     }
 
+    /// The code index is open while there are code folders: without any, a shell can delete it (Windows won't delete an
+    /// open file).
     private func openCode() throws {
-        guard !codeRoots.isEmpty || FileManager.default.fileExists(atPath: directory.appendingPathComponent(IndexStore.codeFile).path)
-        else { return }
+        guard !codeRoots.isEmpty else { return }
         let store = try IndexStore(directory: directory, file: IndexStore.codeFile)
         codeStore = store
         codeSearcher = try Searcher(store: store, loadVectors: false)
@@ -177,13 +183,21 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                 try openCode()
             }
             return ["ok": true, "vectors": searcher.vectorCount, "code_vectors": codeSearcher?.vectorCount ?? 0]
+        case "summaries":
+            let code = request["code"] as? Bool ?? false
+            return ["roots": (code ? codeRoots : roots).map { summary(of: $0, in: code ? codeStore : store) }]
         case "folders":
             if let value = request["roots"] as? [String] { roots = value.map { Arguments.folderURL($0).path } }
             if let value = request["skipped"] as? [String] { skipped = value.map { Arguments.folderURL($0).path } }
             if let value = request["types"] as? [String] { types = IndexOptions.extensions(value.joined(separator: ",")) }
             if let value = request["code_roots"] as? [String] { codeRoots = value.map { Arguments.folderURL($0).path } }
             if let value = request["code_skipped"] as? [String] { codeSkipped = value.map { Arguments.folderURL($0).path } }
-            if codeSearcher == nil { try openCode() }
+            if codeRoots.isEmpty {
+                codeSearcher = nil
+                codeStore = nil
+            } else if codeSearcher == nil {
+                try openCode()
+            }
             return ["ok": true]
         case "prewarm":
             lastQuery = Date()
@@ -191,9 +205,22 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             if !searcher.vectorsLoaded { try searcher.reload() }
             return ["ok": true, "encoder": encoderState, "vectors": searcher.vectorCount]
         case "status":
-            return ["encoder": encoderState, "vectors": searcher.vectorsLoaded ? searcher.vectorCount : 0,
-                    "code_vectors": codeSearcher?.vectorsLoaded == true ? codeSearcher!.vectorCount : 0,
-                    "index": store.file.path]
+            var reply: [String: Any] = ["encoder": encoderState, "vectors": searcher.vectorsLoaded ? searcher.vectorCount : 0,
+                                        "code_vectors": codeSearcher?.vectorsLoaded == true ? codeSearcher!.vectorCount : 0,
+                                        "index": store.file.path]
+            // What's in the index, as the index helper counts it: a shell knows it before any indexing runs.
+            if let counts = try? store.counts() {
+                var files = 0, searchable = 0, pending = 0
+                for states in counts.byKindAndState.values {
+                    for (state, count) in states {
+                        files += count
+                        if state == "done" || state == "partial" { searchable += count }
+                        if state == "pending" { pending += count }
+                    }
+                }
+                reply.merge(["files": files, "searchable": searchable, "pending": pending, "unfinished": counts.unfinished]) { $1 }
+            }
+            return reply
         default:
             throw CLIError("unknown op \(op)")
         }
@@ -201,6 +228,32 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
 
     private func write(_ fields: [String: Any]) {
         output.withLock { emit(fields) }
+    }
+
+    /// What's indexed under one folder, as the Mac app's `Engine.rootSummaries` counts it: its files by state and kind.
+    private func summary(of root: String, in store: IndexStore?) -> [String: Any] {
+        let folder = URL(fileURLWithPath: root)
+        let missing = !Arguments.isFolder(folder)
+        var fields: [String: Any] = ["path": root, "missing": missing, "unreadable": !missing && !Arguments.isReadable(folder)]
+        var states = ["indexed": 0, "pending": 0, "failed": 0, "skipped": 0, "unfinished": 0]
+        var kinds: [String: Int] = [:]
+        let files = (try? store?.files(under: [root])) ?? []
+        for file in files {
+            kinds[file.kind.rawValue, default: 0] += 1
+            switch file.state {
+            case "done": states["indexed", default: 0] += 1
+            case "partial":
+                states["indexed", default: 0] += 1
+                states["unfinished", default: 0] += 1
+            case "pending": states["pending", default: 0] += 1
+            case "failed": states["failed", default: 0] += 1
+            default: states["skipped", default: 0] += 1
+            }
+        }
+        fields.merge(states) { $1 }
+        fields["files"] = files.count
+        fields["kinds"] = kinds
+        return fields
     }
 
     // MARK: Previews

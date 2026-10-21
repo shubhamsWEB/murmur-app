@@ -17,10 +17,23 @@ public enum ModelFiles {
         public let name: String
         public let bytes: Int64
         public let sha256: String
+        /// The Hugging Face repository and the pinned revision it comes from: the embedding model's unless said
+        /// (the speech models on Windows come from others: `SpeechModelFiles`).
+        public let repository: String
+        public let revision: String
+
+        public init(name: String, bytes: Int64, sha256: String, repository: String = ModelFiles.repository,
+                    revision: String = ModelFiles.revision) {
+            self.name = name
+            self.bytes = bytes
+            self.sha256 = sha256
+            self.repository = repository
+            self.revision = revision
+        }
 
         /// Hugging Face's address for this file at the pinned revision (it redirects to a CDN that takes HTTP ranges).
         public var url: URL {
-            URL(string: "https://huggingface.co/\(ModelFiles.repository)/resolve/\(ModelFiles.revision)/\(name)")!
+            URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(name)")!
         }
     }
 

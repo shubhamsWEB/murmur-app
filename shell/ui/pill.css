@@ -1,0 +1,79 @@
+/* The dictation pill: a charcoal capsule, the coral Starling that swells with your voice, cream words. It opens out of
+   a small Starling capsule on a quick ease-out with a long soft landing (no bounce), the words fading in just behind
+   its edge, and closes back the same way, faster. Sizes change on one capsule, measured, so nothing reflows. */
+:root {
+  --ink: rgba(34, 30, 28, 0.94);
+  --cream: #fbf7f2;
+  --coral: #ff6f61;
+  --open: cubic-bezier(0.16, 1, 0.3, 1);
+  --close: cubic-bezier(0.5, 0, 0.75, 0);
+}
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+body { font: 500 13px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; user-select: none; cursor: default; }
+
+.stage { height: 100%; display: flex; align-items: center; justify-content: center; }
+
+.pill {
+  position: relative;
+  width: 44px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset, 0 4px 14px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(0.6);
+  transition: width 0.46s var(--open), height 0.46s var(--open), opacity 0.18s ease-out, transform 0.3s var(--open);
+}
+.pill.shown { opacity: 1; transform: none; }
+.pill.open { height: 42px; }
+.pill.closing { transition: width 0.24s var(--close), height 0.24s var(--close), opacity 0.2s 0.06s ease-in, transform 0.24s var(--close); }
+
+/* What it shows, laid out at full size the whole time and revealed as the capsule widens. */
+.contents {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 0 10px;
+  white-space: nowrap;
+}
+.text {
+  color: var(--cream);
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: opacity 0.2s ease-in;
+}
+.pill.open .text { opacity: 1; transition: opacity 0.26s 0.07s ease-out; }
+
+.indicator { position: relative; width: 26px; height: 26px; flex: none; display: grid; place-items: center; }
+.bird { position: absolute; width: 22px; height: 17px; transition: transform 0.09s ease-out; }
+.pill:not(.open) .bird { width: 17px; }
+.halo {
+  position: absolute; width: 14px; height: 14px; border-radius: 50%;
+  background: rgba(255, 111, 97, 0.22); opacity: 0; transition: transform 0.09s ease-out, opacity 0.2s;
+}
+.listening .halo { opacity: 1; }
+.listening .bird .wave { animation: wave 1.2s ease-in-out infinite; }
+@keyframes wave { 50% { transform: translateY(-1.5px); } }
+
+.spinner {
+  position: absolute; width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid rgba(255, 111, 97, 0.25); border-top-color: var(--coral);
+  opacity: 0; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.working .spinner, .starting .spinner { opacity: 1; }
+.working .bird, .starting .bird, .working .halo, .starting .halo { opacity: 0; }
+
+.mark { position: absolute; display: none; font: 700 15px/1 "Segoe UI", sans-serif; color: var(--cream); }
+.message.problem .mark { display: block; color: var(--coral); }
+.message.problem .bird { opacity: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pill, .pill.closing, .text, .pill.open .text { transition-duration: 0.01s; transition-delay: 0s; }
+  .listening .bird .wave, .spinner { animation: none; }
+}

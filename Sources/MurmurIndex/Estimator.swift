@@ -40,6 +40,8 @@ public struct Estimate: Sendable {
     /// The code index (`IndexOptions.code`): its stretches of code, and about how big it gets on disk.
     public var codeStretches = 0
     public var bytes = 0.0
+    /// The first pass's seconds by kind (a progress bar's time left: what's still to come of each kind).
+    public var kindSeconds: [FileKind: Double] = [:]
 
     public init() {}
 
@@ -56,6 +58,7 @@ public struct Estimate: Sendable {
         sum.laterSeconds += b.laterSeconds
         sum.codeStretches += b.codeStretches
         sum.bytes += b.bytes
+        sum.kindSeconds.merge(b.kindSeconds, uniquingKeysWith: +)
         return sum
     }
 }
@@ -67,6 +70,8 @@ public enum Estimator {
         var estimate = Estimate()
         for file in candidates {
             estimate.files[file.kind, default: 0] += 1
+            let before = estimate.seconds
+            defer { estimate.kindSeconds[file.kind, default: 0] += estimate.seconds - before }
             switch file.kind {
             case .image: estimate.seconds += costs.image
             case .screenshot: estimate.seconds += costs.screenshot

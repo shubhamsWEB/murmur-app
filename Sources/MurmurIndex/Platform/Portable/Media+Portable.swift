@@ -133,14 +133,24 @@ extension VideoExtractor {
         let step = max(interval, duration / Double(maxFrames))
         let first = min(0.5, duration / 2)
         let prefix = "frame-\(UUID().uuidString)-"
-        try FFmpeg.run(FFmpeg.ffmpeg, ["-v", "error", "-nostdin", "-ss", String(first), "-i", url.path, "-an", "-vf",
-                                       "fps=\(1 / step),scale=\(maxPixel):\(maxPixel):force_original_aspect_ratio=decrease",
+        // Frame n is the one shown at first + n * step: fps's slots start at `first`, and round=up gives each slot the
+        // last frame at or before it (its default gives the last before the slot's middle, half a step later). Every
+        // frame is decoded anyway, so reading from the start costs nothing over seeking to `first`, and an MPEG-TS has
+        // no index: a seek there lands past the keyframe, and nothing decodes until the next one.
+        try FFmpeg.run(FFmpeg.ffmpeg, ["-v", "error", "-nostdin", "-i", url.path, "-an", "-vf",
+                                       "fps=fps=\(1 / step):start_time=\(first):round=up,"
+                                       + "scale=\(maxPixel):\(maxPixel):force_original_aspect_ratio=decrease",
                                        "-q:v", "3", "-f", "image2", folder.appendingPathComponent(prefix + "%06d.jpg").path]) { _ in }
         let names = try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasPrefix(prefix) }.sorted()
         var frames: [MediaPiece] = []
         var lastHash: UInt64?
         for (index, name) in names.enumerated() {
             let path = folder.appendingPathComponent(name).path
+            let start = first + Double(index) * step
+            guard start < duration else {   // fps can fill a slot past the end
+                try? FileManager.default.removeItem(atPath: path)
+                continue
+            }
             if let image = RGBImage.load(path) {
                 let hash = image.averageHash()
                 if let lastHash, (hash ^ lastHash).nonzeroBitCount <= 4 {
@@ -149,7 +159,7 @@ extension VideoExtractor {
                 }
                 lastHash = hash
             }
-            frames.append(MediaPiece(path: path, start: first + Double(index) * step, end: duration))
+            frames.append(MediaPiece(path: path, start: start, end: duration))
         }
         // Each kept frame stands for the stretch until the next kept frame.
         for index in frames.indices.dropLast() { frames[index].end = frames[index + 1].start }
@@ -158,10 +168,21 @@ extension VideoExtractor {
 
     /// The frame shown at `seconds`, its long side at most `pixels`, as a JPEG for a preview.
     static func frame(at seconds: Double, of url: URL, pixels: Int, to out: URL) async throws {
-        try FFmpeg.run(FFmpeg.ffmpeg, ["-v", "error", "-nostdin", "-ss", String(max(0, seconds)), "-i", url.path,
-                                       "-frames:v", "1", "-vf",
-                                       "scale='min(iw,\(pixels))':'min(ih,\(pixels))':force_original_aspect_ratio=decrease",
-                                       "-q:v", "3", "-y", out.path]) { _ in }
+        let at = max(0, seconds)
+        let rest = ["-frames:v", "1", "-vf",
+                    "scale='min(iw,\(pixels))':'min(ih,\(pixels))':force_original_aspect_ratio=decrease",
+                    "-q:v", "3", "-y", out.path]
+        // Seeking before reading starts at the keyframe before the moment and decodes on to it: quick at any length. An
+        // MPEG-TS has no index, so its seek lands on the moment itself, and nothing decodes until the next keyframe (a
+        // later frame is written, or none): seek to a while before and read on. ffmpeg may then exit with an error for
+        // the frames it couldn't decode on the way, though the frame it wrote is the right one.
+        let lead = Rules.isMPEGTransportStream(url) ? min(at, 12) : 0   // x264 keeps up to 250 frames between keyframes
+        try? FFmpeg.run(FFmpeg.ffmpeg, ["-v", "error", "-nostdin", "-ss", String(at - lead), "-i", url.path]
+                                       + (lead > 0 ? ["-ss", String(lead)] : []) + rest) { _ in }
+        if !FileManager.default.fileExists(atPath: out.path) {
+            // Nothing written: read from the start to the moment.
+            try FFmpeg.run(FFmpeg.ffmpeg, ["-v", "error", "-nostdin", "-i", url.path, "-ss", String(at)] + rest) { _ in }
+        }
         guard FileManager.default.fileExists(atPath: out.path) else {
             throw ExtractError.unreadable("no frame at \(seconds) s")
         }

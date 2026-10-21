@@ -1,0 +1,10 @@
+{
+  "mainBinaryName": "Murmur",
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
