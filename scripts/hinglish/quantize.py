@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The int8 models sherpa-onnx runs, from the export's float32 ones, one at a time in a process of its own (the
+"""The int8 decoder sherpa-onnx runs (the encoder is quantize-weights.py's), from the export's float32 one, one at a time in a process of its own (the
 encoder is 2.6 GB: quantised in the export's own process, beside the model, it needs more memory than a runner has).
 What sherpa-onnx's export script does at its end: dynamic quantisation of the MatMuls, weights in QInt8. With
 --per-channel each output channel of a weight gets its own scale: Apex's encoder needs that (quantised per tensor, as

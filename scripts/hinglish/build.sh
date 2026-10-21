@@ -53,20 +53,15 @@ cp ../export-onnx.py export-apex.py
 ../venv/bin/python "$here/patch-export.py" export-apex.py
 ../venv/bin/python export-apex.py --model large-hinglish-apex 2>&1 | grep -v "Warning\|warn(" | tail -5
 rm -f large-hinglish-apex.pt onnx__* audioEncoder.* textDecoder.*
-# The decoder as sherpa-onnx's script does it; the encoder per channel (per tensor it repeats words), signed first, then
-# unsigned: the first that writes what the same weights write in PyTorch, near enough, is the one published.
+# The decoder as sherpa-onnx's script does it; the encoder with 8-bit weights only (sherpa-onnx's int8 breaks it).
 ../venv/bin/python "$here/quantize.py" large-hinglish-apex-decoder.onnx "$out/decoder.int8.onnx" 2>&1 | grep -v "^WARNING"
+../venv/bin/python "$here/quantize-weights.py" large-hinglish-apex-encoder.onnx "$out/encoder.int8.onnx" 2>&1 \
+  | grep -v "^WARNING\|INFO"
 cp large-hinglish-apex-tokens.txt "$out/tokens.txt"
 cd ..
-passed=
-for variant in "--per-channel" "--per-channel --uint8"; do
-  # shellcheck disable=SC2086
-  venv/bin/python "$here/quantize.py" $variant export/large-hinglish-apex-encoder.onnx "$out/encoder.int8.onnx" 2>&1 \
-    | grep -v "^WARNING"
-  if venv/bin/python "$here/check.py" "$out" apex/audios; then passed=$variant; break; fi
-done
-[[ -n $passed ]] || { echo "no int8 encoder writes what Apex does: nothing published" >&2; exit 1; }
-echo "encoder quantised with: $passed"
+
+# What the same weights write in PyTorch, near enough.
+venv/bin/python "$here/check.py" "$out" apex/audios
 
 curl -fsSL -o "$out/LICENSE-Oriserve-Apache-2.0.txt" https://www.apache.org/licenses/LICENSE-2.0.txt
 cat > "$out/README.txt" <<TEXT
