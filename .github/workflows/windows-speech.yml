@@ -30,7 +30,7 @@ jobs:
           if [[ ${{ matrix.model }} == hinglish ]]; then
             base=https://github.com/shubhamsWEB/murmur-app/releases/download/hinglish-apex-v1
             curl -fsSL -o model/manifest.json "$base/manifest.json"
-            python -c "import json; [print(f['sha256'] + '  model/' + f['name']) for f in json.load(open('model/manifest.json'))['files']]" > sums
+            python -c "import json; [print(f['sha256'] + '  model/' + f['name']) for f in json.load(open('model/manifest.json'))['files']]" | tr -d '\r' > sums
             for name in tokens.txt decoder.int8.onnx encoder.int8.onnx; do curl -fsSL -o "model/$name" "$base/$name"; done
             sha256sum -c sums
             apex=https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex/resolve/f3214eed20b4e4d4144e739982d911f87b9cb223
