@@ -1,0 +1,44 @@
+# Publishes a Windows beta: the installer a Windows workflow run already built and checked (its artifact, never a new
+# build), as Murmur-Windows-Setup.exe in a pre-release of its own that's never "latest", so the Mac's download link
+# (releases/latest/download/Murmur.dmg) and the update feed are untouched. What to publish is
+# .github/windows-beta/release.json (the tag, the title, the run, the installer's SHA-256) with notes.md beside it; a
+# push to main that changes them publishes it. A tag already published isn't replaced: a new beta gets a new tag.
+name: Windows release
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/windows-beta/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # the release
+  actions: read     # the run's artifact
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(jq -r .tag .github/windows-beta/release.json)
+          title=$(jq -r .title .github/windows-beta/release.json)
+          run=$(jq -r .run .github/windows-beta/release.json)
+          sha=$(jq -r .sha256 .github/windows-beta/release.json)
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "$tag is published already: nothing to do"
+            exit 0
+          fi
+          [[ $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq '.name + " " + .conclusion') == "Windows success" ]] \
+            || { echo "run $run isn't a Windows build that passed its checks" >&2; exit 1; }
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq .head_sha)
+          gh run download "$run" --repo "$GITHUB_REPOSITORY" -n Murmur-windows-x64 -D artifact
+          installer=$(ls artifact/*-setup.exe | head -1)
+          cp "$installer" Murmur-Windows-Setup.exe
+          echo "$sha  Murmur-Windows-Setup.exe" | sha256sum -c -
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$commit" --prerelease --latest=false \
+            --title "$title" --notes-file .github/windows-beta/notes.md Murmur-Windows-Setup.exe
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,assets --jq '.tagName, .isPrerelease, .assets[].name'
