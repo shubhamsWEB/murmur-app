@@ -1,13 +1,16 @@
 //! Dictation, as the Mac app has it: hold the dictation key, speak, let go, and the words are typed where you are.
 //! Everything happens on this computer: the microphone (audio.rs), the level (level.rs, the Mac's AudioLevel), Parakeet
-//! through sherpa-onnx (speech.rs), the paste (paste.rs). The key (keys.rs) and the paste work on Windows for now.
+//! or Whisper through sherpa-onnx (speech.rs), the paste (paste.rs). The key (keys.rs) and the paste work on Windows
+//! for now.
 //!
-//! The speech model (650 MB) is downloaded by the helper (`murmur-engine download-speech-model`, checked file by file)
-//! the first time dictation is on, then loaded once and kept warm. The pill (pill.rs, ui/pill.html) shows each step.
+//! The speech model (about 650 MB) is downloaded by the helper (`murmur-engine download-speech-model`, checked file by
+//! file) the first time dictation is on, then loaded once and kept warm. The pill (pill.rs, ui/pill.html) shows each
+//! step, opening out of the Murmur button (logo.rs) when it's on.
 
 pub mod audio;
 pub mod keys;
 pub mod level;
+pub mod logo;
 pub mod paste;
 mod pill;
 pub mod speech;
@@ -32,6 +35,8 @@ pub struct Config {
     pub microphone: String,
     /// A stronger boost for soft speech and whispers (on by default, as on the Mac).
     pub quiet_voice: bool,
+    /// The Murmur button on screen (on by default, as on the Mac).
+    pub floating_button: bool,
 }
 
 /// Shorter than this is a tap, not a dictation.
@@ -56,6 +61,8 @@ struct Inner {
     recording: Mutex<Option<audio::Recording>>,
     /// Why the key can't be watched, if it can't.
     key_problem: Mutex<Option<String>>,
+    /// What a dictation is doing: "idle", "listening" or "working" (Home's key lights up while you talk).
+    phase: Mutex<&'static str>,
     log: Mutex<Option<std::fs::File>>,
 }
 
@@ -87,11 +94,13 @@ impl Dictation {
             launch: Box::new(launch),
             recording: Mutex::new(None),
             key_problem: Mutex::new(None),
+            phase: Mutex::new("idle"),
             log: Mutex::new(log),
         });
         if let Err(error) = pill::make(app) {
             inner.note(&format!("no pill: {error}"));
         }
+        logo::set_enabled(app, inner.config().floating_button);
         // Key presses arrive on the hook's thread, which must answer Windows at once: the work happens here.
         let (work, jobs) = mpsc::channel::<Work>();
         let worker = inner.clone();
@@ -124,6 +133,7 @@ impl Dictation {
     /// A new choice from Settings: the key changes at once; another model is loaded (or downloaded).
     pub fn configure(&self, config: Config) {
         let before = self.config();
+        logo::set_enabled(&self.inner.app, config.floating_button);
         *self.inner.combo.lock().unwrap() = config.key;
         *self.inner.config.lock().unwrap() = config.clone();
         if config.model != before.model {
@@ -159,7 +169,7 @@ impl Inner {
     /// The model there and loaded, or on its way: loaded when it's there, downloaded (dictation on) when it isn't.
     fn prepare(self: &Arc<Self>) {
         let Some(folder) = self.folder() else { return };
-        if speech::installed(&folder) {
+        if speech::installed(self.config().model, &folder) {
             self.load();
         } else {
             self.set_model(json!({"state": "missing"}));
@@ -227,7 +237,7 @@ impl Inner {
             let result = inner.folder().ok_or("no folder for the speech model".to_string())
                 .and_then(|folder| {
                     let started = Instant::now();
-                    let recognizer = speech::Recognizer::load(&folder)?;
+                    let recognizer = speech::Recognizer::load(model, &folder)?;
                     let warm = recognizer.warm_up();
                     inner.note(&format!("{} model loaded in {:.1} s (warm-up {:.2} s)", model.name(),
                                         started.elapsed().as_secs_f64(), warm));
@@ -263,7 +273,7 @@ impl Inner {
     fn state(&self, microphones: bool) -> Value {
         let config = self.config();
         let keys: Vec<Value> = keys::Combo::ALL.iter().map(|combo| json!({"id": combo.name(), "title": combo.title()})).collect();
-        let models: Vec<Value> = [speech::Model::English, speech::Model::Multilingual]
+        let models: Vec<Value> = speech::Model::ALL
             .iter()
             .map(|model| json!({"id": model.name(), "title": model.title()}))
             .collect();
@@ -281,6 +291,8 @@ impl Inner {
             "folder": self.folder().map(|folder| folder.display().to_string()),
             "microphone": config.microphone,
             "quietVoice": config.quiet_voice,
+            "floatingButton": config.floating_button,
+            "phase": *self.phase.lock().unwrap(),
         });
         if microphones {
             state["microphones"] = json!(audio::microphones());
@@ -289,6 +301,15 @@ impl Inner {
     }
 
     // MARK: A dictation
+
+    fn set_phase(&self, phase: &'static str) {
+        let mut now = self.phase.lock().unwrap();
+        if *now != phase {
+            *now = phase;
+            drop(now);
+            self.changed();
+        }
+    }
 
     fn begin(self: &Arc<Self>) {
         let config = self.config();
@@ -304,7 +325,7 @@ impl Inner {
                     _ => "Getting dictation ready…".to_string(),
                 },
                 "loading" | "checking" => "Getting dictation ready…".to_string(),
-                "failed" => "The speech model didn't download · Settings → Dictation".to_string(),
+                "failed" => "The speech model didn't download · see Murmur's Settings".to_string(),
                 _ => {
                     self.start_download();
                     "Downloading the speech model…".to_string()
@@ -323,6 +344,7 @@ impl Inner {
                                    recording.opened_in.as_secs_f64()));
                 pill::show(&self.app, "listening", "Listening");
                 *self.recording.lock().unwrap() = Some(recording);
+                self.set_phase("listening");
             }
             Err(error) => {
                 self.note(&format!("microphone: {error}"));
@@ -335,6 +357,7 @@ impl Inner {
         if let Some(recording) = self.recording.lock().unwrap().take() {
             drop(recording.finish());
             pill::hide(&self.app);
+            self.set_phase("idle");
         }
     }
 
@@ -345,37 +368,49 @@ impl Inner {
         let samples = recording.finish();
         if held < SHORTEST {
             pill::hide(&self.app);
+            self.set_phase("idle");
             return;
         }
-        let Some(recognizer) = self.recognizer.lock().unwrap().clone() else { return };
+        let Some(recognizer) = self.recognizer.lock().unwrap().clone() else {
+            self.set_phase("idle");
+            return;
+        };
         pill::show(&self.app, "working", "Writing it down");
+        self.set_phase("working");
         let inner = self.clone();
         let quiet = self.config().quiet_voice;
         std::thread::spawn(move || {
-            let started = Instant::now();
-            let seconds = samples.len() as f64 / rate as f64;
-            let leveled = level::normalize(&samples, rate as f32, if quiet { 40.0 } else { 30.0 });
-            if leveled.speech_db < -55.0 {
-                inner.note(&format!("{seconds:.1} s, no sound (speech {:.0} dBFS) from {device}", leveled.speech_db));
-                pill::flash(&inner.app, &format!("No sound from {device} · choose another in Settings"), "problem", 4.0);
-                return;
-            }
-            let text = speech::tidy(&recognizer.transcribe(&leveled.samples, rate));
-            inner.note(&format!("{seconds:.1} s of audio → {} characters in {:.2} s (speech {:.0} dBFS, noise {:.0}, gain {:+.0} dB{})",
-                                text.chars().count(), started.elapsed().as_secs_f64(), leveled.speech_db,
-                                leveled.noise_db, leveled.gain_db, if quiet { ", quiet voice" } else { "" }));
-            if text.is_empty() {
-                pill::flash(&inner.app, "Didn't catch that", "info", 2.0);
-                return;
-            }
-            match paste::insert(&text) {
-                Ok(()) => pill::hide(&inner.app),
-                Err(error) => {
-                    inner.note(&format!("paste: {error}"));
-                    pill::flash(&inner.app, &format!("Couldn't type it: {error}"), "problem", 4.0);
-                }
-            }
+            inner.transcribe_and_type(&recognizer, &samples, rate, &device, quiet);
+            inner.set_phase("idle");
         });
+    }
+
+    /// The words in the recording, typed where the person is (or the pill says why not).
+    fn transcribe_and_type(&self, recognizer: &speech::Recognizer, samples: &[f32], rate: u32, device: &str, quiet: bool) {
+        let started = Instant::now();
+        let seconds = samples.len() as f64 / rate as f64;
+        let leveled = level::normalize_with(samples, rate as f32, if quiet { 40.0 } else { 30.0 },
+                                            self.config().model.lifts_words());
+        if leveled.speech_db < -55.0 {
+            self.note(&format!("{seconds:.1} s, no sound (speech {:.0} dBFS) from {device}", leveled.speech_db));
+            pill::flash(&self.app, &format!("No sound from {device} · choose another in Settings"), "problem", 4.0);
+            return;
+        }
+        let text = recognizer.words(&leveled.samples, rate);
+        self.note(&format!("{seconds:.1} s of audio → {} characters in {:.2} s (speech {:.0} dBFS, noise {:.0}, gain {:+.0} dB{})",
+                           text.chars().count(), started.elapsed().as_secs_f64(), leveled.speech_db,
+                           leveled.noise_db, leveled.gain_db, if quiet { ", quiet voice" } else { "" }));
+        if text.is_empty() {
+            pill::flash(&self.app, "Didn't catch that", "info", 2.0);
+            return;
+        }
+        match paste::insert(&text) {
+            Ok(()) => pill::hide(&self.app),
+            Err(error) => {
+                self.note(&format!("paste: {error}"));
+                pill::flash(&self.app, &format!("Couldn't type it: {error}"), "problem", 4.0);
+            }
+        }
     }
 
     /// A line in dictation.log (in the shell's log folder), with the time.

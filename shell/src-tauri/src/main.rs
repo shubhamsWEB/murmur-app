@@ -652,7 +652,7 @@ fn main() {
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, dictation_info,
-            set_dictation, download_speech_model
+            set_dictation, download_speech_model, logo_clicked, logo_menu
         ])
         .build(tauri::generate_context!())
         .expect("Murmur couldn't start");
@@ -759,6 +759,18 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     });
     app.manage(shell.clone());
     // Dictation: the key, the pill, the speech model (downloaded by the helper the first time).
+    // The Murmur button on screen, where it was left (dictation turns it on or off).
+    let at = shell.settings.lock().unwrap().floating_button_at;
+    let saver = shell.clone();
+    if let Err(error) = dictation::logo::make(&handle, at, move |x, y| {
+        let mut settings = saver.settings.lock().unwrap();
+        if settings.floating_button_at != Some((x, y)) {
+            settings.floating_button_at = Some((x, y));
+            let _ = settings.save(&saver.settings_path);
+        }
+    }) {
+        eprintln!("no Murmur button: {error}");
+    }
     let dictation = {
         let config = shell.settings.lock().unwrap().dictation();
         let helper = shell.clone();
@@ -1072,8 +1084,16 @@ fn toggle_panel(app: &AppHandle) {
 /// made when it opens and gone when it closes, so a closed window costs nothing. A search the panel hands over is in
 /// `window_search`: a new window takes it as it loads, an open one is told.
 fn show_window(app: &AppHandle) -> tauri::Result<()> {
+    show_window_at(app, None)
+}
+
+/// The window on one of its pages (home, search, folders, settings, about): told so when it's open, else opened on it.
+fn show_window_at(app: &AppHandle, page: Option<&str>) -> tauri::Result<()> {
     let shell = app.state::<Arc<Shell>>().inner().clone();
     if let Some(window) = app.get_webview_window(WINDOW) {
+        if let Some(page) = page {
+            let _ = window.emit("show-page", page);
+        }
         if let Some((query, kind)) = shell.window_search.lock().unwrap().take() {
             let _ = window.emit("window-search", json!({"query": query, "kind": kind}));
         }
@@ -1084,12 +1104,13 @@ fn show_window(app: &AppHandle) -> tauri::Result<()> {
     }
     // Debug runs look at it hidden: a window on screen takes the keyboard.
     let hidden = shell.options.debug_window.is_some() && !shell.options.debug_show;
-    let mut builder = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::App("window.html".into()))
+    let url = page.map_or_else(|| "window.html".to_string(), |page| format!("window.html?page={page}"));
+    let mut builder = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::App(url.into()))
         .title("Murmur")
-        .min_inner_size(820.0, 520.0)
+        .min_inner_size(MIN_WIDTH, 560.0)
         .visible(false);
     // Where it was left, at the size it had, while that's still on a screen; else sized to this screen, centered.
-    let place = shell.settings.lock().unwrap().window.clone().filter(|place| place.width >= 820.0 && place.height >= 520.0);
+    let place = shell.settings.lock().unwrap().window.clone().filter(|place| place.width >= MIN_WIDTH && place.height >= 560.0);
     let position = place.as_ref().and_then(|place| place.x.zip(place.y)).filter(|&(x, y)| {
         app.monitor_from_point(f64::from(x) + 40.0, f64::from(y) + 20.0).ok().flatten().is_some()
     });
@@ -1151,12 +1172,15 @@ fn remember_place(window: &tauri::WebviewWindow) {
 
 /// The window's size: 1040 × 700, or less on a small screen (a laptop's 1366 × 768 at 125% has 1093 × 614 to show
 /// it in), but never under its least, 820 × 520.
+/// The window's narrowest: the sidebar (232) and Search's results beside its preview.
+const MIN_WIDTH: f64 = 1000.0;
+
 fn window_size(app: &AppHandle) -> (f64, f64) {
     let screen = app.cursor_position().ok().and_then(|pointer| app.monitor_from_point(pointer.x, pointer.y).ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten());
     let Some(screen) = screen else { return (1040.0, 700.0) };
     let area = screen.work_area().size.to_logical::<f64>(screen.scale_factor());
-    ((area.width * 0.9).clamp(820.0, 1040.0), (area.height * 0.9).clamp(520.0, 700.0))
+    ((area.width * 0.9).clamp(MIN_WIDTH, 1200.0), (area.height * 0.9).clamp(560.0, 760.0))
 }
 
 /// Code search's folders: setup's folder list for code, with Save.
@@ -1195,23 +1219,9 @@ fn show_setup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Settings: opening at login, centering the panel (where the desktop places windows), and where the shortcut is.
+/// Settings: the window's Settings page (window.html; it used to be a window of its own).
 fn show_settings(app: &AppHandle) -> tauri::Result<()> {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.show();
-        let _ = window.set_focus();
-        return Ok(());
-    }
-    let options = &app.state::<Arc<Shell>>().options;
-    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Murmur Settings")
-        .inner_size(660.0, 620.0)
-        .resizable(false)
-        .maximizable(false)
-        .center()
-        .visible(!options.debug_settings || options.debug_show)
-        .build()?;
-    Ok(())
+    show_window_at(app, Some("settings"))
 }
 
 /// What the Settings window shows.
@@ -1597,6 +1607,7 @@ fn set_dictation(shell: State<'_, Arc<Shell>>, dictation: State<'_, dictation::D
             "key" => settings.dictation_key = text,
             "model" => settings.speech_model = text,
             "microphone" => settings.microphone = text,
+            "floatingButton" => settings.floating_button_off = !value.as_bool().unwrap_or(true),
             _ => return Err(format!("no dictation setting called {choice}")),
         }
         settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
@@ -1604,6 +1615,47 @@ fn set_dictation(shell: State<'_, Arc<Shell>>, dictation: State<'_, dictation::D
     };
     dictation.configure(config);
     Ok(())
+}
+
+/// The Murmur button was clicked: Murmur's window (or setup, the first time).
+#[tauri::command]
+fn logo_clicked(app: AppHandle) {
+    show_window_or_setup(&app);
+}
+
+/// The Murmur button's menu (a right-click): open Murmur, Settings, or hide the button.
+#[tauri::command]
+fn logo_menu(app: AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window(dictation::logo::LABEL).ok_or("no Murmur button")?;
+    let item = |id: &str, text: &str| MenuItem::with_id(&app, id, text, true, None::<&str>);
+    let menu = Menu::with_items(&app, &[
+        &item("logo-open", "Open Murmur").map_err(|e| e.to_string())?,
+        &item("logo-settings", "Settings…").map_err(|e| e.to_string())?,
+        &PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?,
+        &item("logo-hide", "Hide Murmur Button").map_err(|e| e.to_string())?,
+    ]).map_err(|e| e.to_string())?;
+    window.popup_menu(&menu).map_err(|e| e.to_string())
+}
+
+/// What the Murmur button's menu chose.
+fn logo_menu_chosen(app: &AppHandle, id: &str) {
+    match id {
+        "logo-open" => show_window_or_setup(app),
+        "logo-settings" => later(app, |app| {
+            let _ = show_settings(app);
+        }),
+        "logo-hide" => {
+            let shell = app.state::<Arc<Shell>>();
+            let config = {
+                let mut settings = shell.settings.lock().unwrap();
+                settings.floating_button_off = true;
+                let _ = settings.save(&shell.settings_path);
+                settings.dictation()
+            };
+            app.state::<dictation::Dictation>().configure(config);
+        }
+        _ => {}
+    }
 }
 
 /// Settings → Dictation's Download (or Try Again) for the speech model.
@@ -1656,7 +1708,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let accelerator = (shell.shortcut == Method::Grab).then(|| shell.hotkey());
     let search = MenuItem::with_id(app, "search", "Search…", true, accelerator.as_deref())?;
     let open = MenuItem::with_id(app, "open", "Open Murmur", true, None::<&str>)?;
-    let folders = MenuItem::with_id(app, "folders", "Choose Folders…", true, None::<&str>)?;
+    let folders = MenuItem::with_id(app, "folders", "Folders…", true, None::<&str>)?;
     let index = MenuItem::with_id(app, "index", "Index Now", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause Indexing", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -1680,7 +1732,8 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
             "search" => show_panel(app),
             "open" => show_window_or_setup(app),
             "folders" => later(app, |app| {
-                let _ = show_setup(app);
+                let set_up = app.state::<Arc<Shell>>().is_set_up();
+                let _ = if set_up { show_window_at(app, Some("folders")) } else { show_setup(app) };
             }),
             "index" => run_index(app),
             "pause" => {
@@ -1696,6 +1749,8 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move { updates::check(&app, true).await });
             }
             "quit" => quit(app),
+            // A menu's events reach every handler: the Murmur button's (logo_menu) too.
+            id if id.starts_with("logo-") => logo_menu_chosen(app, id),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

@@ -1,9 +1,10 @@
-// Murmur's Settings window, its tabs after the Mac app's (Sources/MurmurApp/SettingsWindow.swift). Dictation (Windows):
-// turning it on, the key held to talk, the speech model and its download, the microphone, Quiet Voice. General: opening at
-// login, centering the search panel where the desktop places windows itself (it costs memory, so it's a choice), where
-// the shortcut lives, and updates. Folders: how indexing goes (with Pause), each folder searched and how far along it is, the
-// folders and file types skipped, and the set hours. Code: code search's folders (added in setup's folder list for code),
-// the editor its results open in, turning it off. Storage: the model, the index, privacy.
+// The Settings, Folders and About pages of Murmur's window (window.html), after the Mac app's (Home.swift). Settings:
+// dictation (turning it on, the key held to talk, the speech model and its download, the microphone, Quiet Voice, the
+// Murmur button), the search shortcut, and Murmur itself (opening at sign-in, the tray icon, centering the panel, the
+// processor, updates). Folders: how indexing goes (with Pause), each folder searched and how far along it is, the
+// folders and file types skipped, the set hours, and code search. About: the models, the index, privacy. In a scope of
+// its own, beside window.js; home.js tells it which page is up (window.murmurSettings).
+(() => {
 "use strict";
 
 const tauri = window.__TAURI__;
@@ -29,7 +30,7 @@ let dictation = null;        // dictation_info: the key, the speech model and ho
 
 // MARK: Tabs
 
-function showTab(name) {
+function showTabUnused(name) {
   for (const button of document.querySelectorAll("#tabs button")) {
     button.setAttribute("aria-selected", String(button.dataset.tab === name));
   }
@@ -38,7 +39,8 @@ function showTab(name) {
   if (name === "code") loadCodeSummaries();
 }
 
-for (const button of document.querySelectorAll("#tabs button")) button.onclick = () => showTab(button.dataset.tab);
+let current = null;   // the page up: "settings", "folders", "about", or another of the window's
+const folderPageUp = () => current === "folders";
 
 // MARK: Dictation (dictation/mod.rs)
 
@@ -46,26 +48,10 @@ const megabytes = (bytes) => `${Math.round((bytes || 0) / 1e6).toLocaleString()}
 
 function renderDictation() {
   const d = dictation;
-  const button = document.querySelector('#tabs button[data-tab="dictation"]');
-  button.hidden = !d || !d.available;
   if (!d) return;
   $("dictation-on").checked = d.enabled;
 
-  const text = element("span", "text");
-  for (const key of d.keys) {
-    const choice = element("label", "choice");
-    const radio = element("input");
-    radio.type = "radio";
-    radio.name = "dictation-key";
-    radio.value = key.id;
-    radio.checked = key.id === d.key;
-    radio.onchange = () => choose("key", key.id);
-    choice.append(radio, document.createTextNode(`Hold ${key.title}`));
-    text.append(choice);
-  }
-  text.append(element("span", "info",
-    "Pressing another key while it's held (a shortcut such as Ctrl + Windows + D) cancels the dictation."));
-  $("dictation-keys").replaceChildren(text);
+  fill($("dictation-key"), d.keys.map((key) => [key.id, `Hold ${key.title}`]), d.key);
   $("dictation-key-problem").hidden = !d.keyProblem;
   $("dictation-key-problem").textContent = d.keyProblem ? `The dictation key isn't working: ${d.keyProblem}` : "";
 
@@ -78,6 +64,12 @@ function renderDictation() {
   if (d.microphone && !d.microphones.includes(d.microphone)) microphones.push([d.microphone, `${d.microphone} (not connected)`]);
   fill($("microphone"), microphones, d.microphone || "");
   $("quiet-voice").checked = d.quietVoice;
+  $("floating-button").checked = d.floatingButton !== false;
+  const about = { english: "Only English. The most accurate for it, accents included.",
+                  multilingual: "Spanish, French, German and 22 more European languages, detected as you speak.",
+                  hinglish: "Hindi and English, mixed as you like. Typed in English letters. A bigger model (about "
+                    + "1 GB), so it takes a moment longer than English." };
+  $("speech-about").textContent = about[d.model] || "";
 }
 
 /// The speech model's line: ready, or how its download goes, or why it stopped.
@@ -132,6 +124,8 @@ async function loadDictation() {
 
 $("dictation-on").addEventListener("change", () => choose("enabled", $("dictation-on").checked));
 $("quiet-voice").addEventListener("change", () => choose("quietVoice", $("quiet-voice").checked));
+$("floating-button").addEventListener("change", () => choose("floatingButton", $("floating-button").checked));
+$("dictation-key").addEventListener("change", () => choose("key", $("dictation-key").value));
 $("speech-model").addEventListener("change", () => choose("model", $("speech-model").value));
 $("microphone").addEventListener("change", () => choose("microphone", $("microphone").value));
 $("speech-download").onclick = () => { invoke("download_speech_model").catch(fail); };
@@ -239,7 +233,7 @@ $("change-shortcut").onclick = () => {
 /// How indexing goes: the status line, a bar while something's under way, the counts, and Pause or Resume.
 function renderStatus() {
   const state = info.state || {};
-  $("status-line").textContent = state.line || "";
+  $("index-status-line").textContent = state.line || "";
   $("status-bar").hidden = state.progress == null;
   $("status-fill").style.width = `${Math.round(100 * (state.progress || 0))}%`;
   const parts = [`${(state.searchable || 0).toLocaleString()} of ${(state.files || 0).toLocaleString()} files searchable`];
@@ -583,8 +577,7 @@ async function refresh() {
   renderFields();
   renderStorage();
   renderCode();
-  if (!$("folders").hidden) loadSummaries();
-  if (!$("code").hidden) loadCodeSummaries();
+  if (folderPageUp()) { loadSummaries(); loadCodeSummaries(); }
 }
 
 // Back from the code folders window (or anything else that changed the settings): shown as they are now.
@@ -600,7 +593,7 @@ tauri.event.listen("state", ({ payload }) => {
   renderUpdates();
   // The code index's progress isn't in the state: its folders are asked again while the tab is up.
   const counts = payload.searchable !== before.searchable || payload.pending !== before.pending;
-  const load = !$("folders").hidden && counts ? loadSummaries : !$("code").hidden ? loadCodeSummaries : null;
+  const load = folderPageUp() ? (counts ? loadSummaries : loadCodeSummaries) : null;
   if (load && !summariesTimer) {
     summariesTimer = setTimeout(() => { summariesTimer = null; load(); }, 2000);
   }
@@ -613,8 +606,18 @@ async function start() {
     invoke("debug_report", { report: { settings: true, hotkey: info.hotkey, openAtLogin: info.openAtLogin,
                                        canOpenAtLogin: info.canOpenAtLogin, folders: info.folders } }).catch(() => {});
   }
-  const asked = new URLSearchParams(location.search).get("tab");   // dev snapshots: ?tab=folders
-  showTab(asked || (dictation && dictation.available ? "dictation" : "general"));
 }
 
+window.murmurSettings = {
+  /// A page came up: Folders keeps its counts current while it's up.
+  shown(page) {
+    current = page;
+    if (page === "folders") { loadSummaries(); loadCodeSummaries(); }
+  },
+  refresh: () => refresh().catch(() => {}),
+  dictation: () => dictation,
+  info: () => info,
+};
+
 start();
+})();

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Murmur</title>
+  <style>
+    /* The Murmur button (src-tauri/src/dictation/logo.rs), as the Mac's FloatingLogo: the charcoal capsule with the
+       cream Starling, the listening pill's closed look. */
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; cursor: default; user-select: none; }
+    .stage { height: 100%; display: grid; place-items: center; }
+    .logo {
+      width: 44px; height: 22px; border-radius: 999px; display: grid; place-items: center;
+      background: rgba(34, 30, 28, 0.94);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.10) inset, 0 2px 8px rgba(0, 0, 0, 0.22);
+      transition: transform 0.15s ease-out;
+    }
+    .logo:hover { transform: scale(1.06); }
+    .logo:active { transform: scale(0.97); }
+    .logo svg { width: 17px; height: 17px; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="logo" id="logo" title="Click to open Murmur · drag to move · right-click for more">
+      <svg viewBox="10 26 82 62" aria-hidden="true">
+        <path d="M30 58 L12 47 L16 67 Z" fill="#FBF7F2"/>
+        <ellipse cx="48" cy="60" rx="24" ry="19" fill="#FBF7F2"/>
+        <circle cx="66" cy="42" r="13" fill="#FBF7F2"/>
+        <path d="M78 40.5 L89 44 L78 47.5 Z" fill="#FBF7F2"/>
+        <circle cx="69" cy="39" r="2.6" fill="#221E1C"/>
+        <path d="M31 60 q4.5 -8 9 0 t9 0 t9 0" stroke="#221E1C" stroke-width="3.6" stroke-linecap="round" fill="none"/>
+      </svg>
+    </div>
+  </div>
+  <script>
+    // A click opens Murmur; pressing and moving drags it (a few pixels of movement is a drag, not a click); a
+    // right-click shows its menu. The shell keeps where it's left.
+    "use strict";
+    const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+    let down = null, dragging = false;
+    document.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      down = { x: event.screenX, y: event.screenY };
+      dragging = false;
+    });
+    document.addEventListener("mousemove", (event) => {
+      if (!down || dragging || !(event.buttons & 1)) return;
+      const dx = event.screenX - down.x, dy = event.screenY - down.y;
+      if (dx * dx + dy * dy < 9) return;
+      dragging = true;
+      down = null;
+      window.__TAURI__.window.getCurrentWindow().startDragging().catch(() => {});
+    });
+    document.addEventListener("mouseup", (event) => {
+      if (event.button === 0 && down && !dragging) invoke("logo_clicked").catch(() => {});
+      down = null;
+    });
+    document.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      invoke("logo_menu").catch(() => {});
+    });
+  </script>
+</body>
+</html>

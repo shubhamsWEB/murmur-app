@@ -1,0 +1,50 @@
+# Builds Murmur for Windows' Hinglish speech model (scripts/hinglish/build.sh: Oriserve's Whisper-Hindi2Hinglish-Apex in
+# sherpa-onnx's format, int8, checked against what the same weights write in PyTorch) and publishes it as the release
+# hinglish-apex-v1, which `murmur-engine download-speech-model --model hinglish` downloads from (its manifest.json lists
+# each file's size and SHA-256). The release is a pre-release and never "latest", so the Mac app's download link
+# (releases/latest) is untouched; once it exists it isn't replaced (a new build would be hinglish-apex-v2, and
+# SpeechModelFiles.hinglishRelease would point there). Runs when the scripts change on the windows branch, or by hand.
+name: Hinglish model
+
+on:
+  push:
+    branches: [windows]
+    paths: ["scripts/hinglish/**", ".github/workflows/hinglish-model.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to publish the release
+
+env:
+  TAG: hinglish-apex-v1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Already published?
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "$TAG is published already: nothing to do"
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and check
+        if: steps.published.outputs.yes != 'true'
+        # /mnt has the runner's spare disk (the float32 encoder alone is 2.6 GB).
+        run: |
+          sudo mkdir -p /mnt/hinglish && sudo chown "$USER" /mnt/hinglish
+          scripts/hinglish/build.sh /mnt/hinglish/work /mnt/hinglish/out
+      - name: Publish
+        if: steps.published.outputs.yes != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd /mnt/hinglish/out
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Hinglish speech model for Windows (Whisper-Hindi2Hinglish-Apex, int8)" \
+            --notes-file README.txt \
+            manifest.json tokens.txt decoder.int8.onnx encoder.int8.onnx README.txt LICENSE-Oriserve-Apache-2.0.txt

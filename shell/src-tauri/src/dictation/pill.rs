@@ -1,7 +1,8 @@
 //! The pill: a small window near the bottom of the screen showing what dictation is doing (the Mac's DictationHUD;
 //! its page is ui/pill.html, which draws and animates it). It never takes the focus, so the words still go where the
 //! person was typing, and clicks go through it. The page is told what to show; the window is hidden once the page's
-//! closing animation is through.
+//! closing animation is through. With the Murmur button on (logo.rs), the pill opens out of it, where it is, and the
+//! button hides while the pill is out.
 
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,6 +74,7 @@ pub fn hide(app: &AppHandle) {
             if let Some(window) = app.get_webview_window(LABEL) {
                 let _ = window.hide();
             }
+            super::logo::pill_out(&app, false);
         }
     });
 }
@@ -81,7 +83,7 @@ fn send(app: &AppHandle, state: serde_json::Value) -> u64 {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(window) = app.get_webview_window(LABEL) {
         if !window.is_visible().unwrap_or(false) {
-            place(&window);
+            place(app, &window);
             #[cfg(windows)]
             if let Ok(hwnd) = window.hwnd() {
                 windows::show_without_activating(hwnd.0 as _);
@@ -91,11 +93,20 @@ fn send(app: &AppHandle, state: serde_json::Value) -> u64 {
         }
     }
     let _ = app.emit_to(LABEL, "pill", state);
+    super::logo::pill_out(app, true);
     generation
 }
 
-/// Bottom centre of the screen the pointer is on, above the taskbar.
-fn place(window: &tauri::WebviewWindow) {
+/// Centred on the Murmur button when it's on (the pill's closed capsule is the button's size, so it grows out of it);
+/// otherwise bottom centre of the screen the pointer is on, above the taskbar.
+fn place(app: &AppHandle, window: &tauri::WebviewWindow) {
+    if let Some(centre) = super::logo::anchor(app) {
+        let scale = window.monitor_from_point(centre.x as f64, centre.y as f64).ok().flatten()
+            .map_or(1.0, |monitor| monitor.scale_factor());
+        let (width, height) = ((WIDTH * scale) as i32, (HEIGHT * scale) as i32);
+        let _ = window.set_position(tauri::PhysicalPosition::new(centre.x - width / 2, centre.y - height / 2));
+        return;
+    }
     let monitor = window
         .cursor_position()
         .ok()
@@ -112,7 +123,7 @@ fn place(window: &tauri::WebviewWindow) {
 }
 
 #[cfg(windows)]
-mod windows {
+pub(super) mod windows {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,

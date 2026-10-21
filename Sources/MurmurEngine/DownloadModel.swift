@@ -1,5 +1,8 @@
 import MurmurIndex
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// `murmur-engine download-model [--to DIR]`: the model files into DIR (default: Murmur's own Models folder), for shells that
 /// set Murmur up on first launch (the Mac app downloads them itself, with the same `FileFetcher`). A file already in the
@@ -18,15 +21,63 @@ func downloadModel(_ args: Arguments) throws -> Int32 {
     return try download(ModelFiles.missing(in: folder), total: ModelFiles.totalBytes, into: folder, useCache: true)
 }
 
-/// `murmur-engine download-speech-model [--model english|multilingual] [--to DIR]`: the speech model the Windows and
-/// Linux app dictates with (`SpeechModelFiles`), into DIR (default: Murmur's Speech Models/<model>). The same events.
+/// `murmur-engine download-speech-model [--model english|hinglish|multilingual] [--to DIR]`: the speech model the
+/// Windows and Linux app dictates with (`SpeechModelFiles`), into DIR (default: Murmur's Speech Models/<model>). The same
+/// events. Hinglish's files are listed in its release's manifest, read first.
 func downloadSpeechModel(_ args: Arguments) throws -> Int32 {
     let name = args.values["--model"] ?? SpeechModelFiles.english.rawValue
     guard let model = SpeechModelFiles(rawValue: name) else {
-        throw CLIError("no speech model called \(name): english or multilingual")
+        throw CLIError("no speech model called \(name): english, hinglish or multilingual")
     }
     let folder = args.values["--to"].map(Arguments.folderURL) ?? model.installed
-    return try download(model.missing(in: folder), total: model.totalBytes, into: folder, useCache: false)
+    var files = model.files
+    if model == .hinglish {
+        guard let listed = hinglishManifest() else { return 1 }
+        files = listed
+    }
+    let total = files.reduce(0) { $0 + $1.bytes }
+    return try download(SpeechModelFiles.missing(files, in: folder), total: total, into: folder, useCache: false)
+}
+
+/// The Hinglish model's files, from its release's manifest (tried again a few times, as the files are).
+private func hinglishManifest() -> [ModelFiles.File]? {
+    let address = SpeechModelFiles.hinglishRelease.appendingPathComponent("manifest.json")
+    var failures = 0
+    while true {
+        let finished = DispatchSemaphore(value: 0)
+        let reply = ManifestBox()
+        var request = URLRequest(url: address)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 30
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let data, status == 200 {
+                reply.data = data
+            } else {
+                reply.problem = error?.localizedDescription ?? "the Hinglish model's list answered \(status)"
+            }
+            finished.signal()
+        }.resume()
+        finished.wait()
+        if let data = reply.data {
+            if let files = try? SpeechModelFiles.hinglishFiles(manifest: data) { return files }
+            emit(["event": "error", "message": "the Hinglish model's list of files isn't right"])
+            return nil
+        }
+        failures += 1
+        guard failures <= 6 else {
+            emit(["event": "error", "message": reply.problem ?? "can't reach the Hinglish model"])
+            return nil
+        }
+        let seconds = min(60, 1 << min(failures, 6))
+        emit(["event": "retry", "message": reply.problem ?? "", "seconds": seconds])
+        Thread.sleep(forTimeInterval: Double(seconds))
+    }
+}
+
+private final class ManifestBox: @unchecked Sendable {   // written once, before the semaphore is signalled
+    var data: Data?
+    var problem: String?
 }
 
 /// Downloads `missing` into `folder` (each file checked before it gets its name), saying how it goes as JSON lines.

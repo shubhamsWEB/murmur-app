@@ -3,7 +3,13 @@
 // one in a preview pane with why it matched, and a status bar with indexing. Before a search it shows the home:
 // examples to try, what's indexed, the shortcut. The Mac app's search window (Sources/MurmurApp/SearchWindow.swift) is
 // the reference; the helper (`murmur-engine search-service`) does the work, and results.js has what a result says.
+// It's the Search page of Murmur's window (window.html), in a scope of its own; home.js switches the pages.
+(() => {
 "use strict";
+
+/// Another page of the window: Settings, Folders (home.js).
+const showPage = (page) => window.murmurPage(page);
+const searchUp = () => !$("page-search").hidden;
 
 const TYPING_PAUSE = 120;   // ms after the last keystroke until the search runs (the query was embedded meanwhile)
 const LIMIT = 120;
@@ -935,7 +941,7 @@ function showMainMenu() {
     [paused ? "Resume Indexing" : "Pause Indexing", () => invoke("pause_indexing", { paused: !paused }).catch(failed),
      null, folders],
     null,
-    ["Settings…", () => invoke("open_settings").catch(failed), `${MOD},`],
+    ["Settings…", () => showPage("settings"), `${MOD},`],
     state.app.update
       ? [`Update to Murmur ${state.app.update.version}…`, () => invoke("offer_update").catch(failed), null,
          state.app.update.state === "available"]
@@ -964,11 +970,11 @@ $("toggle-preview").onclick = () => {
   renderSide();
 };
 $("settings").onmousedown = (event) => event.preventDefault();
-$("settings").onclick = () => invoke("open_settings").catch(failed);
+$("settings").onclick = () => showPage("settings");
 $("settings").title = `Settings (${MOD},)`;
 $("more").onmousedown = (event) => event.preventDefault();
 $("more").onclick = () => ($menu.hidden ? showMainMenu() : hideMenu());
-$("status-line").onclick = () => invoke("choose_folders").catch(failed);
+$("status-line").onclick = () => showPage("folders");
 $("update").onclick = () => invoke("offer_update").catch(failed);
 $kinds.onmousedown = (event) => event.preventDefault();
 
@@ -983,6 +989,14 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing) return;   // an input method is composing: its keys
   const modifier = isMac ? event.metaKey : event.ctrlKey;
   const plain = !event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey;
+  // On the other pages the keys are theirs: only Ctrl+, (Settings) and Ctrl+W (close) are the window's.
+  if (!searchUp()) {
+    if (modifier && !event.altKey && !event.shiftKey && (event.key === "," || event.key.toLowerCase() === "w")) {
+      event.preventDefault();
+      if (event.key === ",") showPage("settings"); else invoke("close_window").catch(() => {});
+    }
+    return;
+  }
   if (!$menu.hidden && event.key === "Escape") {
     event.preventDefault();
     hideMenu();
@@ -1003,7 +1017,7 @@ document.addEventListener("keydown", (event) => {
     switch (event.key.toLowerCase()) {
       case ",":
         event.preventDefault();
-        invoke("open_settings").catch(failed);
+        showPage("settings");
         return;
       case "w":
         event.preventDefault();
@@ -1082,6 +1096,7 @@ tauri.event.listen("state", ({ payload }) => {
 
 // The panel handed its search over (Ctrl+O, "Show all…"): this window was already open.
 tauri.event.listen("window-search", ({ payload }) => {
+  showPage("search");
   state.filter = payload.kind || null;
   setQuery(payload.query || "");
   $query.focus();
@@ -1127,6 +1142,7 @@ async function start() {
   state.info = { ...state.info, ...info };
   state.app = info.state || {};
   if (info.search) {
+    showPage("search");
     state.filter = info.search.kind || null;
     $query.value = info.search.query || "";
     state.query = $query.value;
@@ -1135,7 +1151,7 @@ async function start() {
   updatePreviewButton();
   render();
   loadIndexed();
-  $query.focus();
+  if (searchUp()) $query.focus();
   if (state.query) run();
   ask({ op: "prewarm" }).catch(() => {});
   if (info.debugQuery != null) debugSearch(info.debugQuery);
@@ -1196,3 +1212,4 @@ function report() {
 }
 
 start();
+})();

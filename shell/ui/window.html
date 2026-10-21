@@ -4,45 +4,267 @@
   <meta charset="utf-8">
   <title>Murmur</title>
   <link rel="stylesheet" href="window.css">
+  <link rel="stylesheet" href="home.css">
 </head>
+<!-- Murmur's window, as the Mac app's (Sources/MurmurApp/Home.swift): its sidebar (brand, pages, how Murmur is doing,
+     About & Help) and the page. Search fills its page (window.js); Settings, Folders and About are settings.js's;
+     Home and the sidebar are home.js's. -->
 <body>
-  <header class="top">
-    <div class="bar">
-      <label class="field" id="field">
-        <span class="glass" id="glass" aria-hidden="true"></span>
-        <input id="query" type="text" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Search">
-        <button class="clear" id="clear" title="Clear" aria-label="Clear" hidden>
-          <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/><path d="M7 7 L13 13 M13 7 L7 13"/></svg>
-        </button>
-      </label>
-      <button class="tool" id="toggle-preview" aria-pressed="true">
-        <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M14.5 5 V19"/></svg>
-      </button>
-      <button class="tool" id="settings" aria-label="Settings">
-        <svg viewBox="0 0 24 24"><path d="M18.7 10.0 L21.3 10.5 L21.3 13.5 L18.7 14.0 L18.2 15.3 L19.6 17.5 L17.5 19.6 L15.3 18.2 L14.0 18.7 L13.5 21.3 L10.5 21.3 L10.0 18.7 L8.7 18.2 L6.5 19.6 L4.4 17.5 L5.8 15.3 L5.3 14.0 L2.7 13.5 L2.7 10.5 L5.3 10.0 L5.8 8.7 L4.4 6.5 L6.5 4.4 L8.7 5.8 L10.0 5.3 L10.5 2.7 L13.5 2.7 L14.0 5.3 L15.3 5.8 L17.5 4.4 L19.6 6.5 L18.2 8.7 Z"/><circle cx="12" cy="12" r="3"/></svg>
-      </button>
-      <button class="tool" id="more" title="More" aria-label="More" aria-haspopup="menu">
-        <svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18.5" cy="12" r="1.6"/></svg>
-      </button>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-tile"><img src="icon.png" alt=""></span>
+      <span class="brand-text"><b>Murmur</b><span>Voice for your PC</span></span>
     </div>
-    <nav class="kinds" id="kinds" aria-label="Kinds of files"></nav>
-  </header>
+    <nav class="nav" aria-label="Pages">
+      <button data-page="home"><svg viewBox="0 0 24 24"><path d="M4 11 L12 4 L20 11 V20 H14.5 V14.5 H9.5 V20 H4 Z"/></svg>Home</button>
+      <button data-page="search"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15 L20 20"/></svg>Search<span class="accessory" id="nav-hotkey"></span></button>
+      <span class="nav-label">Make it yours</span>
+      <button data-page="folders"><svg viewBox="0 0 24 24"><path d="M3.5 6.5 H9.5 L11.5 8.5 H20.5 V18.5 H3.5 Z"/></svg>Folders<span class="accessory" id="nav-folders"></span></button>
+      <button data-page="settings"><svg viewBox="0 0 24 24"><path d="M18.7 10.0 L21.3 10.5 L21.3 13.5 L18.7 14.0 L18.2 15.3 L19.6 17.5 L17.5 19.6 L15.3 18.2 L14.0 18.7 L13.5 21.3 L10.5 21.3 L10.0 18.7 L8.7 18.2 L6.5 19.6 L4.4 17.5 L5.8 15.3 L5.3 14.0 L2.7 13.5 L2.7 10.5 L5.3 10.0 L5.8 8.7 L4.4 6.5 L6.5 4.4 L8.7 5.8 L10.0 5.3 L10.5 2.7 L13.5 2.7 L14.0 5.3 L15.3 5.8 L17.5 4.4 L19.6 6.5 L18.2 8.7 Z"/><circle cx="12" cy="12" r="3"/></svg>Settings<span class="accessory" id="nav-settings"></span></button>
+    </nav>
+    <div class="nav-spacer"></div>
+    <button class="ready-card" id="ready-card">
+      <span class="dot" id="ready-dot"></span>
+      <span class="ready-text"><b id="ready-title"></b><span id="ready-detail"></span></span>
+    </button>
+    <button class="about-link" data-page="about">About &amp; Help</button>
+  </aside>
 
-  <div class="split">
-    <main class="content" id="content"></main>
-    <aside class="side" id="side" aria-live="polite"></aside>
+  <div class="pages">
+    <!-- Home: is Murmur ready, how to talk to it, where each model is. -->
+    <section class="page pane" id="page-home" hidden>
+      <div class="column wide">
+        <header class="home-head">
+          <h1><span class="dot dot-lg" id="home-dot"></span><span id="home-title"></span></h1>
+          <p id="home-subtitle"></p>
+        </header>
+        <div class="fix" id="home-fix" hidden>
+          <span class="fix-icon">!</span><span class="fix-text" id="home-fix-text"></span>
+          <button class="primary compact" id="home-fix-go"></button>
+        </div>
+        <div class="hero card">
+          <div class="hero-main">
+            <div class="live-key" id="live-key"></div>
+            <div class="gestures">
+              <div class="gesture"><span class="caps" id="gesture-keys"></span>
+                <span class="gesture-text"><b>Hold to dictate</b><span>Talk, let go, and it's typed where your cursor is.</span></span></div>
+              <div class="gesture"><span class="caps"><span class="cap">Esc</span></span>
+                <span class="gesture-text"><b>Changed your mind?</b><span>Press any other key while holding to cancel.</span></span></div>
+              <div class="gesture"><span class="caps" id="search-keys"></span>
+                <span class="gesture-text"><b>Find a file</b><span>Describe it: “the lease PDF”, “zebra in a video”.</span></span></div>
+            </div>
+          </div>
+          <div class="hero-side">
+            <span class="section-label">Quiet Voice</span>
+            <p id="home-quiet"></p>
+          </div>
+        </div>
+        <h2 class="block-title">On this PC</h2>
+        <div class="model-cards">
+          <button class="model-card" data-page="settings">
+            <span class="model-name">Speech</span><span class="model-detail" id="card-speech"></span>
+            <span class="pill" id="card-speech-state"></span>
+            <span class="thin" id="card-speech-bar" hidden><span id="card-speech-fill"></span></span>
+          </button>
+          <button class="model-card" data-page="folders">
+            <span class="model-name">File search</span><span class="model-detail">EmbeddingGemma 2</span>
+            <span class="pill" id="card-search-state"></span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Search: the search window as it was (window.js). -->
+    <section class="page search-page" id="page-search" hidden>
+      <header class="top">
+        <div class="bar">
+          <label class="field" id="field">
+            <span class="glass" id="glass" aria-hidden="true"></span>
+            <input id="query" type="text" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Search">
+            <button class="clear" id="clear" title="Clear" aria-label="Clear" hidden>
+              <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/><path d="M7 7 L13 13 M13 7 L7 13"/></svg>
+            </button>
+          </label>
+          <button class="tool" id="toggle-preview" aria-pressed="true">
+            <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M14.5 5 V19"/></svg>
+          </button>
+          <button class="tool" id="settings" aria-label="Settings" hidden></button>
+          <button class="tool" id="more" title="More" aria-label="More" aria-haspopup="menu">
+            <svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18.5" cy="12" r="1.6"/></svg>
+          </button>
+        </div>
+        <nav class="kinds" id="kinds" aria-label="Kinds of files"></nav>
+      </header>
+      <div class="split">
+        <main class="content" id="content"></main>
+        <aside class="side" id="side" aria-live="polite"></aside>
+      </div>
+      <footer class="status">
+        <span class="ring" id="ring" hidden></span>
+        <button class="status-line" id="status-line" title="Folders and indexing"></button>
+        <span class="spacer"></span>
+        <span class="count" id="count"></span>
+        <button class="update" id="update" title="See what's new and update" hidden></button>
+      </footer>
+    </section>
+
+    <!-- Settings: dictation first, then Murmur itself (settings.js). -->
+    <section class="page pane" id="page-settings" hidden>
+      <div class="column">
+        <header class="page-head"><h1>Settings</h1><p>How dictation listens and types, and how Murmur runs.</p></header>
+
+        <span class="section-label">Dictation</span>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>Dictation</b>
+            <span>Hold the dictation key and talk; let go and the words are typed where you're typing. Speech is turned
+              into text on this PC: nothing you say leaves it.</span></div>
+            <label class="switch"><input type="checkbox" id="dictation-on"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>Dictation key</b>
+            <span>Pressing another key while it's held (a shortcut such as Ctrl + Windows + D) cancels the dictation.</span>
+            <span class="problem" id="dictation-key-problem" hidden></span></div>
+            <select class="field" id="dictation-key"></select></div>
+          <div class="srow"><div class="stext"><b>Language</b><span id="speech-about"></span></div>
+            <select class="field" id="speech-model"></select></div>
+          <div class="srow sub"><div class="stext"><b id="speech-status"></b>
+            <span class="thin" id="speech-bar" hidden><span id="speech-fill"></span></span>
+            <span id="speech-detail"></span></div>
+            <button class="secondary" id="speech-download" hidden>Download</button></div>
+          <div class="srow"><div class="stext"><b>Microphone</b><span>The default follows Windows' sound settings.</span></div>
+            <select class="field" id="microphone"></select></div>
+          <div class="srow"><div class="stext"><b>Quiet Voice</b>
+            <span>Lifts a soft or whispered voice (up to 40 dB) before it's turned into words, so you can dictate quietly
+              in a shared room.</span></div>
+            <label class="switch"><input type="checkbox" id="quiet-voice"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>Murmur button on screen</b>
+            <span>A small Murmur pill you can drag anywhere. Click it to open Murmur; the listening pill grows out of it
+              while you talk.</span></div>
+            <label class="switch"><input type="checkbox" id="floating-button"><span></span></label></div>
+        </div>
+
+        <span class="section-label">Search shortcut</span>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>Open the search panel</b>
+            <span>Press it in any app and describe what you remember.</span>
+            <span class="note" id="recording" hidden></span>
+            <span class="note" id="shortcut-note" hidden></span>
+            <code class="command" id="shortcut-command" hidden></code></div>
+            <div class="sctl"><div class="keys" id="keys"></div><button class="secondary" id="change-shortcut" hidden>Change…</button></div></div>
+        </div>
+
+        <span class="section-label">Murmur</span>
+        <div class="card rows">
+          <div class="srow" id="login-option" hidden><div class="stext"><b>Open Murmur when you sign in</b>
+            <span>Murmur lives in the tray, listens for the dictation key and keeps your folders indexed.</span></div>
+            <label class="switch"><input type="checkbox" id="login"><span></span></label></div>
+          <div class="srow" id="tray-click-option" hidden><div class="stext"><b>Clicking the tray icon</b>
+            <span>Right-click it for the menu.</span></div>
+            <div class="sctl segmented"><label><input type="radio" name="tray-click" value="window"><span>Opens Murmur</span></label>
+              <label><input type="radio" name="tray-click" value="panel"><span>Search panel</span></label></div></div>
+          <div class="srow" id="center-option" hidden><div class="stext"><b>Center the search panel</b>
+            <span>Centered, Murmur keeps a transparent window over the whole screen: about 50 MB more memory on a 1080p
+              screen.</span></div>
+            <label class="switch"><input type="checkbox" id="center"><span></span></label></div>
+          <div class="srow" id="processor-option"><div class="stext"><b>Run the search model on the processor</b>
+            <span>Murmur uses the graphics card where it measured faster. If searches find nothing or the wrong files,
+              turn this on: the model then runs on the processor, more slowly, from the next indexing on.</span></div>
+            <label class="switch"><input type="checkbox" id="processor"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>Check for updates automatically</b><span id="update-info"></span></div>
+            <label class="switch"><input type="checkbox" id="update-checks"><span></span></label></div>
+          <div class="srow"><div class="stext"><button class="link" id="update-version"></button></div>
+            <button class="secondary" id="check-now">Check Now</button></div>
+        </div>
+        <p class="problem" id="problem" hidden></p>
+      </div>
+    </section>
+
+    <!-- Folders: what's searched, how indexing goes, and code (settings.js). -->
+    <section class="page pane" id="page-folders" hidden>
+      <div class="column">
+        <header class="page-head"><h1>Folders</h1><p>What Murmur reads so you can find files by describing them.</p></header>
+        <div class="card status-card">
+          <div class="status-text">
+            <div class="index-line" id="index-status-line"></div>
+            <div class="thin" id="status-bar" hidden><span id="status-fill"></span></div>
+            <div class="status-detail" id="status-detail"></div>
+          </div>
+          <button class="secondary" id="pause" hidden>Pause</button>
+        </div>
+
+        <span class="section-label">Folders to search</span>
+        <div class="card list" id="folder-rows"></div>
+        <button class="link" id="add-folders">Add Folders…</button>
+
+        <span class="section-label">Skip these folders</span>
+        <div class="card list" id="skipped-rows"></div>
+        <button class="link" id="skip-folder">Skip a Folder…</button>
+
+        <span class="section-label">Skip these file types</span>
+        <input class="field wide" id="types" type="text" placeholder="e.g. heic, txt" spellcheck="false" autocomplete="off">
+        <p class="note">Murmur reads pictures, PDFs, documents (txt, md, rtf, docx, odt, html), audio and video. Keys,
+          certificates and password files are never read, nor are hidden folders.</p>
+
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>Index only at set hours</b>
+            <span>Files are read only between these times, and what changed meanwhile is picked up when they begin.
+              Search works all day.</span>
+            <span class="times" id="times" hidden>From <input type="time" id="hours-start"> to <input type="time" id="hours-end"></span></div>
+            <label class="switch"><input type="checkbox" id="hours"><span></span></label></div>
+        </div>
+
+        <span class="section-label">Code</span>
+        <p class="note">Murmur can find code by what it does. Type “code:” in the search and say what the code does.
+          Results open in your editor at the line.</p>
+        <div class="card status-card" id="code-status" hidden>
+          <div class="status-text">
+            <div class="index-line" id="code-status-line"></div>
+            <div class="status-detail" id="code-status-detail"></div>
+          </div>
+        </div>
+        <div class="card list" id="code-rows"></div>
+        <button class="link" id="add-code">Add Code Folders…</button>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>Open code in</b>
+            <span>Murmur reads what git keeps: source, configuration, docs and notebooks. It leaves out what git ignores,
+              dependencies, build output, data files, keys and password files.</span></div>
+            <select class="field" id="code-editor"></select></div>
+        </div>
+        <button class="link danger" id="code-off" hidden>Turn Off Code Search…</button>
+        <div class="confirm" id="code-off-confirm" hidden>
+          <p id="code-off-text"></p>
+          <div class="actions"><button class="secondary" id="code-off-cancel">Cancel</button><button class="danger" id="code-off-go">Turn Off</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- About & Help: the models, the index, privacy, this version. -->
+    <section class="page pane" id="page-about" hidden>
+      <div class="column">
+        <header class="page-head"><h1>About &amp; Help</h1><p>What Murmur runs, where it keeps things, and what it sends.</p></header>
+        <span class="section-label">Models</span>
+        <div class="card facts">
+          <div class="fact"><span>Speech</span><span id="about-speech"></span></div>
+          <div class="fact"><span>File search</span><span>EmbeddingGemma 2 · Google · Apache 2.0 · 865 MB</span></div>
+          <div class="fact"><span>Status</span><span id="model-status"></span></div>
+          <div class="fact"><span>Location</span><button class="path-button" id="model-path"></button></div>
+        </div>
+        <span class="section-label">Index</span>
+        <div class="card facts">
+          <div class="fact"><span>Size on disk</span><span id="index-size"></span></div>
+          <div class="fact"><span>Location</span><button class="path-button" id="index-path"></button></div>
+        </div>
+        <span class="section-label">Privacy</span>
+        <p class="note">Murmur turns speech into text and reads the folders you choose on this PC. It goes online only to
+          download its models, once, and to check for updates, which sends nothing about you or your files.</p>
+        <p class="note"><span id="version"></span> <button class="link inline" id="licenses" hidden>Licenses</button></p>
+      </div>
+    </section>
   </div>
-
-  <footer class="status">
-    <span class="ring" id="ring" hidden></span>
-    <button class="status-line" id="status-line" title="Folders and indexing"></button>
-    <span class="spacer"></span>
-    <span class="count" id="count"></span>
-    <button class="update" id="update" title="See what's new and update" hidden></button>
-  </footer>
 
   <div class="menu" id="menu" role="menu" hidden></div>
   <script src="results.js"></script>
+  <script src="shortcut.js"></script>
   <script src="window.js"></script>
+  <script src="settings.js"></script>
+  <script src="home.js"></script>
 </body>
 </html>

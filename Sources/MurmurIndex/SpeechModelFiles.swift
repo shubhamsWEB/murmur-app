@@ -1,17 +1,25 @@
 import Foundation
 
-/// The speech-to-text models Murmur's Windows and Linux app dictates with: NVIDIA's Parakeet TDT 0.6B, as sherpa-onnx's
-/// int8 ONNX conversion, at pinned revisions (the Mac app runs Parakeet on the Neural Engine through FluidAudio
-/// instead). English is v2, the most accurate for English; Multilingual is v3, 25 European languages. The shell
+/// The speech-to-text models Murmur's Windows and Linux app dictates with, the Mac app's three (which it runs through
+/// FluidAudio and WhisperKit instead). English is NVIDIA's Parakeet TDT 0.6B v2, the most accurate for English;
+/// Multilingual is v3, 25 European languages: sherpa-onnx's int8 ONNX conversions, at pinned revisions. Hinglish is
+/// Oriserve's Whisper-Hindi2Hinglish-Apex, converted to sherpa-onnx's Whisper format by the repository's Hinglish model
+/// workflow (.github/workflows/hinglish-model.yml, scripts/hinglish/), from Oriserve's weights at a pinned revision,
+/// and published as a release of Murmur's repository with a manifest of its files (sizes, SHA-256). The shell
 /// downloads one with `murmur-engine download-speech-model` and runs it itself (sherpa-onnx, in shell/src-tauri).
 public enum SpeechModelFiles: String, CaseIterable, Sendable {
     case english
+    case hinglish
     case multilingual
+
+    /// The release the Hinglish model's files and their manifest are in.
+    public static let hinglishRelease = URL(string: "https://github.com/shubhamsWEB/murmur-app/releases/download/hinglish-apex-v1/")!
 
     /// Where the model's files are kept: Murmur's folder, Speech Models/<name>.
     public var folderName: String {
         switch self {
         case .english: return "parakeet-tdt-0.6b-v2-int8"
+        case .hinglish: return "whisper-hinglish-apex-int8"
         case .multilingual: return "parakeet-tdt-0.6b-v3-int8"
         }
     }
@@ -20,8 +28,11 @@ public enum SpeechModelFiles: String, CaseIterable, Sendable {
         AppPaths.applicationSupport.appendingPathComponent("Speech Models").appendingPathComponent(folderName)
     }
 
+    /// The pinned files (Hinglish's come from its release's manifest: `files(manifest:)`).
     public var files: [ModelFiles.File] {
         switch self {
+        case .hinglish:
+            return []
         case .english:
             let repository = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
             let revision = "1ab9323565ddb038682214b292f588070a538ce2"
@@ -63,6 +74,30 @@ public enum SpeechModelFiles: String, CaseIterable, Sendable {
 
     /// The files not in `folder` yet (only verified files get their final name, so being there is enough).
     public func missing(in folder: URL) -> [ModelFiles.File] {
+        Self.missing(files, in: folder)
+    }
+
+    public static func missing(_ files: [ModelFiles.File], in folder: URL) -> [ModelFiles.File] {
         files.filter { !FileManager.default.fileExists(atPath: folder.appendingPathComponent($0.name).path) }
+    }
+
+    /// The Hinglish model's files from its release's manifest.json: {"files": [{"name", "bytes", "sha256"}, …]}, each
+    /// downloaded from the release. Only the three files sherpa-onnx loads, with sane sizes, are taken.
+    public static func hinglishFiles(manifest: Data) throws -> [ModelFiles.File] {
+        struct Manifest: Decodable {
+            struct Entry: Decodable { let name: String; let bytes: Int64; let sha256: String }
+            let files: [Entry]
+        }
+        let entries = try JSONDecoder().decode(Manifest.self, from: manifest).files
+        let wanted: Set = ["tokens.txt", "decoder.int8.onnx", "encoder.int8.onnx"]
+        let files = entries.filter { wanted.contains($0.name) }.map { entry in
+            ModelFiles.File(name: entry.name, bytes: entry.bytes, sha256: entry.sha256.lowercased(), repository: "",
+                            revision: "", address: hinglishRelease.appendingPathComponent(entry.name))
+        }
+        guard Set(files.map(\.name)) == wanted,
+              files.allSatisfy({ $0.bytes > 0 && $0.bytes < 2_000_000_000 && $0.sha256.count == 64 }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return files
     }
 }

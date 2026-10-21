@@ -50,6 +50,9 @@ pub struct Settings {
     pub speech_model: String,
     pub microphone: String,
     pub quiet_voice_off: bool,
+    /// The Murmur button on screen (on unless turned off), and where it was left (physical pixels).
+    pub floating_button_off: bool,
+    pub floating_button_at: Option<(i32, i32)>,
 }
 
 impl Settings {
@@ -61,6 +64,7 @@ impl Settings {
             model: crate::dictation::speech::Model::from_name(&self.speech_model),
             microphone: self.microphone.clone(),
             quiet_voice: !self.quiet_voice_off,
+            floating_button: !self.floating_button_off,
         }
     }
 }

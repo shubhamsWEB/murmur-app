@@ -32,7 +32,7 @@ let usage = """
                                               see SearchService): for shells that can't link MurmurIndex
       murmur-engine download-model [--to DIR]         the model files, from the Hugging Face cache or downloaded with
                                               resume, checked (JSON lines: see DownloadModel)
-      murmur-engine download-speech-model [--model english|multilingual] [--to DIR]
+      murmur-engine download-speech-model [--model english|hinglish|multilingual] [--to DIR]
                                               the Windows and Linux app's speech model (Parakeet), the same way
 
     Options:

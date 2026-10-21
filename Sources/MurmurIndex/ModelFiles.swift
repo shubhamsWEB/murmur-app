@@ -21,19 +21,23 @@ public enum ModelFiles {
         /// (the speech models on Windows come from others: `SpeechModelFiles`).
         public let repository: String
         public let revision: String
+        /// Where it's downloaded from when that isn't Hugging Face (the Hinglish speech model: a GitHub release).
+        public let address: URL?
 
         public init(name: String, bytes: Int64, sha256: String, repository: String = ModelFiles.repository,
-                    revision: String = ModelFiles.revision) {
+                    revision: String = ModelFiles.revision, address: URL? = nil) {
             self.name = name
             self.bytes = bytes
             self.sha256 = sha256
             self.repository = repository
             self.revision = revision
+            self.address = address
         }
 
-        /// Hugging Face's address for this file at the pinned revision (it redirects to a CDN that takes HTTP ranges).
+        /// Hugging Face's address for this file at the pinned revision (it redirects to a CDN that takes HTTP ranges),
+        /// or the file's own address.
         public var url: URL {
-            URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(name)")!
+            address ?? URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(name)")!
         }
     }
 

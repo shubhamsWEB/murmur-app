@@ -65,10 +65,16 @@ run's artifact.
 2. Choose the folders Murmur may search. The search model (865 MB) and the speech model (about 650 MB) download by
    themselves.
 3. Hold **Ctrl + Windows**, speak, and let go: the words are typed where your cursor is. Right Ctrl or Right Alt can be
-   the key instead (Settings → Dictation, where you also pick the microphone and English or Multilingual).
+   the key instead (Murmur's window → Settings, where you also pick the microphone and the language: English,
+   Hinglish, or 25 European languages).
 
-It needs 64-bit Windows 10 or 11. Speech runs on the processor (NVIDIA's Parakeet through
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)), and nothing you say leaves the PC.
+Murmur's window is the Mac's: Home, Search, Folders and Settings in its sidebar. The Murmur button sits above the
+taskbar (drag it anywhere; click it to open Murmur), and the listening pill grows out of it while you talk.
+
+It needs 64-bit Windows 10 or 11. Speech runs on the processor through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx):
+NVIDIA's Parakeet for English and the European languages, and Oriserve's
+[Whisper-Hindi2Hinglish-Apex](https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex) for Hinglish, as on the Mac.
+Nothing you say leaves the PC.
 
 ## Using it
 
@@ -185,6 +191,11 @@ To build on a Windows PC instead, follow the workflow's steps in Git Bash inside
 
 Dictation links sherpa-onnx's build **without** text to speech (`scripts/fetch-speech-runtime.sh`). The crate's default
 build includes espeak-ng, which is GPL-3.0, and `package-windows.sh` refuses to package an app that contains it.
+
+**Hinglish:** the **Hinglish model** workflow converts Oriserve's weights to sherpa-onnx's format
+(`scripts/hinglish/build.sh`), checks the result against what the same weights write in PyTorch, and publishes it as
+the pre-release `hinglish-apex-v1` (never "latest", so the Mac download link is untouched). The app downloads it from
+there, checking each file against the release's `manifest.json`.
 
 **Updates:** the app checks `updates/windows-x86_64.json` on `main`. Releases must be signed with the update key, whose
 public half is in `shell/src-tauri/tauri.conf.json`. Add the private key as the repository secret

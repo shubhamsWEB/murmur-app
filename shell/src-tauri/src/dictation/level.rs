@@ -15,7 +15,9 @@ pub struct Leveled {
     pub gain_db: f32,
 }
 
-pub fn normalize(input: &[f32], sample_rate: f32, max_gain_db: f32) -> Leveled {
+/// The recording at a steady speaking level. `lift_words`: whether soft words get their own lift (Parakeet hears soft
+/// words better for it; Whisper, which evens out loudness itself, can drop a soft last word when it's lifted).
+pub fn normalize_with(input: &[f32], sample_rate: f32, max_gain_db: f32, lift_words: bool) -> Leveled {
     if input.len() <= 320 {
         return Leveled { samples: input.to_vec(), speech_db: -120.0, noise_db: -120.0, gain_db: 0.0 };
     }
@@ -65,7 +67,7 @@ pub fn normalize(input: &[f32], sample_rate: f32, max_gain_db: f32) -> Leveled {
     // Word by word: a 20 ms frame of speech (well above the noise) that's quieter than the target gets up to 12 dB
     // more, rising over ~60 ms and falling back at once for loud frames and gently in pauses.
     let word_target = 0.06f32; // about −24 dBFS
-    let max_lift = 4.0f32; // +12 dB
+    let max_lift = if lift_words { 4.0f32 } else { 1.0 }; // +12 dB
     let speech_floor = (noise * 2.0).max(0.0005) * gain;
     let mut lifts = vec![1.0f32; levels.len()];
     let mut current = 1.0f32;
@@ -97,7 +99,11 @@ pub fn normalize(input: &[f32], sample_rate: f32, max_gain_db: f32) -> Leveled {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::normalize_with;
+
+    fn normalize(input: &[f32], rate: f32, max_gain_db: f32) -> super::Leveled {
+        normalize_with(input, rate, max_gain_db, true)
+    }
 
     fn tone(amplitude: f32, seconds: f32, rate: f32) -> Vec<f32> {
         (0..(seconds * rate) as usize)
