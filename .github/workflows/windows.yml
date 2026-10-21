@@ -12,6 +12,8 @@ name: Windows
 on:
   push:
     branches: [windows]
+    # The Hinglish model has a workflow of its own (hinglish-model.yml).
+    paths-ignore: ["scripts/hinglish/**", ".github/workflows/hinglish-model.yml"]
   workflow_dispatch:
     inputs:
       ref:
