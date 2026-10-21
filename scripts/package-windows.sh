@@ -50,8 +50,10 @@ resources='{"helper/":"helper/","THIRD-PARTY-NOTICES.txt":"THIRD-PARTY-NOTICES.t
 (cd shell/src-tauri && npx --yes "@tauri-apps/cli@$TAURI_CLI" build --bundles nsis \
   --config "{\"bundle\":{\"resources\":$resources$signing}}")
 # The speech runtime went in without text to speech: nothing of espeak-ng (GPL-3.0) in Murmur.exe.
-app=shell/src-tauri/target/release/murmur-shell.exe
-[[ -f $app ]] || { echo "no $app" >&2; exit 1; }
+# (Tauri's CLI names the built app after the product: Murmur.exe, not Cargo's murmur-shell.exe.)
+app=shell/src-tauri/target/release/Murmur.exe
+[[ -f $app ]] || app=shell/src-tauri/target/release/murmur-shell.exe
+[[ -f $app ]] || { echo "no Murmur.exe in shell/src-tauri/target/release" >&2; exit 1; }
 if grep -aq -e "espeak-ng-data" -e "espeak_ng_" "$app"; then
   echo "Murmur.exe has espeak-ng in it: it was linked with sherpa-onnx's text-to-speech build" >&2
   exit 1
