@@ -43,7 +43,7 @@ for file in "$helper"/*.exe "$helper"/*.dll; do
     lower=$(echo "$dll" | tr '[:upper:]' '[:lower:]')
     [[ -e "$helper/$dll" ]] && continue
     case "$lower" in api-ms-*|ext-ms-*|vulkan-1.dll) continue ;; esac
-    if [[ $lower =~ ^(vcomp|vcruntime|msvcp|concrt|vccorlib|ucrtbased|msvcr) || ! -e "/c/Windows/System32/$dll" ]]; then
+    if [[ $lower =~ ^(vcomp|vcruntime|msvcp|concrt|vccorlib|ucrtbased|msvcr[0-9]) || ! -e "/c/Windows/System32/$dll" ]]; then
       missing+=" $(basename "$file")→$dll"
     fi
   done
