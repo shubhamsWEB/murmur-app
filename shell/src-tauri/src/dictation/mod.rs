@@ -21,6 +21,7 @@ pub mod logo;
 pub mod paste;
 mod pill;
 pub mod speech;
+pub mod worker;
 
 /// The pill, for commands: what they're doing, a word for a moment, or closed.
 pub fn pill_show(app: &AppHandle, mode: &str, text: &str) {
@@ -79,7 +80,9 @@ struct Inner {
     app: AppHandle,
     config: Mutex<Config>,
     combo: Arc<Mutex<keys::Combo>>,
-    recognizer: Mutex<Option<Arc<speech::Recognizer>>>,
+    recognizer: Mutex<Option<Arc<worker::Engine>>>,
+    /// The log folder (the speech worker's output goes there).
+    logs: PathBuf,
     loading: AtomicBool,
     /// The speech model: {"state": "missing|downloading|checking|waiting|loading|ready|failed", …}.
     model: Mutex<Value>,
@@ -143,6 +146,7 @@ impl Dictation {
             combo: Arc::new(Mutex::new(config.key)),
             config: Mutex::new(config),
             recognizer: Mutex::new(None),
+            logs: logs.clone(),
             loading: AtomicBool::new(false),
             model: Mutex::new(json!({"state": "missing"})),
             download,
@@ -377,7 +381,7 @@ impl Inner {
             let result = inner.folder().ok_or("no folder for the speech model".to_string())
                 .and_then(|folder| {
                     let started = Instant::now();
-                    let recognizer = speech::Recognizer::load(model, &folder)?;
+                    let recognizer = worker::Engine::load(model, &folder, &inner.logs.join("speech-worker.log"))?;
                     let warm = recognizer.warm_up();
                     inner.note(&format!("{} model loaded in {:.1} s (warm-up {:.2} s)", model.name(),
                                         started.elapsed().as_secs_f64(), warm));
@@ -394,6 +398,7 @@ impl Inner {
                 Err(error) => {
                     inner.note(&format!("can't load the speech model: {error}"));
                     inner.set_model(json!({"state": "failed", "message": error}));
+                    pill::flash(&inner.app, &format!("Dictation couldn't start: {error}"), "problem", 5.0);
                 }
             }
         });
@@ -527,6 +532,11 @@ impl Inner {
                     _ => "Getting dictation ready…".to_string(),
                 },
                 "loading" | "checking" => "Getting dictation ready…".to_string(),
+                // Downloaded but it didn't load, or stopped (the Hinglish worker): another try.
+                "failed" if self.folder().is_some_and(|folder| speech::installed(self.config().model, &folder)) => {
+                    self.load();
+                    "Getting dictation ready…".to_string()
+                }
                 "failed" => "The speech model didn't download · see Murmur's Settings".to_string(),
                 _ => {
                     self.start_download();
@@ -629,7 +639,7 @@ impl Inner {
     }
 
     /// The words in the recording, typed where the person is (or the pill says why not).
-    fn transcribe_and_type(&self, recognizer: &speech::Recognizer, samples: &[f32], rate: u32, device: &str, quiet: bool) {
+    fn transcribe_and_type(&self, recognizer: &worker::Engine, samples: &[f32], rate: u32, device: &str, quiet: bool) {
         let started = Instant::now();
         let seconds = samples.len() as f64 / rate as f64;
         let leveled = level::normalize_with(samples, rate as f32, if quiet { 40.0 } else { 30.0 },
@@ -639,7 +649,17 @@ impl Inner {
             pill::flash(&self.app, &format!("No sound from {device} · choose another in Settings"), "problem", 4.0);
             return;
         }
-        let text = recognizer.words(&leveled.samples, rate);
+        let text = match recognizer.words(&leveled.samples, rate) {
+            Ok(text) => text,
+            Err(error) => {
+                // The worker stopped (Hinglish): Murmur carries on, and the model loads again on the next press.
+                self.note(&format!("{error}: see speech-worker.log"));
+                *self.recognizer.lock().unwrap() = None;
+                self.set_model(json!({"state": "failed", "message": error}));
+                pill::flash(&self.app, &format!("Dictation stopped: {error} · press the key to try again"), "problem", 5.0);
+                return;
+            }
+        };
         let config = self.config();
         if config.keep_recordings {
             match history::keep_recording(samples, rate, &text, config.model.name()) {

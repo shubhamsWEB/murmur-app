@@ -622,6 +622,11 @@ fn show_window_or_setup(app: &AppHandle) {
 }
 
 fn main() {
+    // Murmur.exe started again as the speech worker (dictation/worker.rs): only that, no app.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(dictation::worker::ARGUMENT) {
+        std::process::exit(dictation::worker::serve(&args[2..]));
+    }
     let options = match Options::from_args() {
         Ok(options) => options,
         Err(error) => {
