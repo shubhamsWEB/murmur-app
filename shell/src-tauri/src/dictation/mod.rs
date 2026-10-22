@@ -84,6 +84,8 @@ struct Inner {
     history: history::History,
     /// The last dictation, as typed (the tray's Paste Last Dictation). Kept in memory only.
     last: Mutex<Option<String>>,
+    /// What the dictation thread is doing and since when (for the watchdog).
+    busy: Mutex<Option<(Instant, keys::Press)>>,
 }
 
 enum Work {
@@ -122,6 +124,7 @@ impl Dictation {
             log: Mutex::new(log),
             history: history::History::open(data),
             last: Mutex::new(None),
+            busy: Mutex::new(None),
         });
         if let Err(error) = pill::make(app) {
             inner.note(&format!("no pill: {error}"));
@@ -134,15 +137,44 @@ impl Dictation {
             .name("murmur-dictation".into())
             .spawn(move || {
                 for job in jobs {
-                    match job {
-                        Work::Key(keys::Press::Down, at) => worker.key_down(at),
-                        Work::Key(keys::Press::Up, at) => worker.key_up(at),
-                        Work::Key(keys::Press::Cancel, _) => worker.shortcut(),
-                        Work::Key(keys::Press::Escape, _) => worker.escape(),
+                    let Work::Key(press, at) = job;
+                    *worker.busy.lock().unwrap() = Some((Instant::now(), press));
+                    match press {
+                        keys::Press::Down => worker.key_down(at),
+                        keys::Press::Up => worker.key_up(at),
+                        keys::Press::Cancel => worker.shortcut(),
+                        keys::Press::Escape => worker.escape(),
+                        keys::Press::Revived => worker.note("key watcher: Windows had dropped it, so it was put back (this press still counts)"),
                     }
+                    *worker.busy.lock().unwrap() = None;
                 }
             })
             .expect("the dictation thread");
+        // Says in the log when the dictation thread is stuck (a microphone that won't open or close, say): every key
+        // press waits behind it, so it would look as if the key had stopped working.
+        let watched = inner.clone();
+        std::thread::Builder::new()
+            .name("murmur-dictation-watchdog".into())
+            .spawn(move || {
+                let mut said: Option<Instant> = None;
+                loop {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let busy = *watched.busy.lock().unwrap();
+                    match busy {
+                        Some((since, press)) if since.elapsed() > Duration::from_secs(8) && said != Some(since) => {
+                            watched.note(&format!("the dictation thread has been busy for {:.0} s with {press:?}: key presses wait behind it",
+                                                  since.elapsed().as_secs_f64()));
+                            said = Some(since);
+                        }
+                        None if said.is_some() => {
+                            watched.note("the dictation thread is free again");
+                            said = None;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("the dictation watchdog");
         if let Err(problem) = keys::listen(inner.combo.clone(), move |press| {
             let _ = work.send(Work::Key(press, Instant::now()));
         }) {
