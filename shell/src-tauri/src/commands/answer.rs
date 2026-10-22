@@ -2,6 +2,10 @@
 //! small card near the bottom of the screen, as the Mac's answer panel, with Copy and Close. Its page is
 //! ui/answer.html; it asks for the answer when it loads (`answer_text`) and is told new ones ("answer" events).
 //! Unlike the pill it takes the focus, so Esc closes it and the text can be selected.
+//!
+//! The window is made the first time there's an answer, not at launch, and from the event loop: a page that calls
+//! into Murmur while Murmur is still making its other windows at launch deadlocked WebView2 (Murmur froze with no
+//! window). Its commands are all off the main thread for the same reason.
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -13,8 +17,8 @@ const ABOVE_BOTTOM: f64 = 64.0;
 
 static LATEST: Mutex<String> = Mutex::new(String::new());
 
-/// Makes the (hidden) window at launch, so showing an answer is quick.
-pub fn make(app: &AppHandle) {
+/// Makes the window, shown (on the main thread, from its event loop).
+fn make(app: &AppHandle) {
     let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("answer.html".into()))
         .title("Murmur")
         .inner_size(WIDTH, HEIGHT)
@@ -26,19 +30,35 @@ pub fn make(app: &AppHandle) {
         .skip_taskbar(true)
         .visible(false)
         .build();
-    if let Err(error) = built {
-        eprintln!("murmur-shell: no answer window: {error}");
+    match built {
+        Ok(window) => {
+            place(&window, HEIGHT);
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        Err(error) => eprintln!("murmur-shell: no answer window: {error}"),
     }
 }
 
-/// Shows an answer.
+/// Shows an answer (from a command's thread). The first time, the window is made; its page then asks for the text.
 pub fn show(app: &AppHandle, text: &str) {
     *LATEST.lock().unwrap() = text.trim().to_string();
-    let Some(window) = app.get_webview_window(LABEL) else { return };
-    let _ = app.emit_to(LABEL, "answer", text.trim());
-    place(&window, HEIGHT);
-    let _ = window.show();
-    let _ = window.set_focus();
+    match app.get_webview_window(LABEL) {
+        Some(window) => {
+            let _ = app.emit_to(LABEL, "answer", text.trim());
+            place(&window, HEIGHT);
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        None => {
+            let main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if main.get_webview_window(LABEL).is_none() {
+                    make(&main);
+                }
+            });
+        }
+    }
 }
 
 pub fn latest() -> String {

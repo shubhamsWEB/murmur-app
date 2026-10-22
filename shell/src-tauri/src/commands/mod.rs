@@ -85,7 +85,6 @@ pub fn hits(answer: &Value) -> Vec<FileHit> {
 
 impl Assistant {
     pub fn new(app: &AppHandle, memory_file: Option<PathBuf>, choices: Choices, hooks: Hooks) -> Assistant {
-        answer::make(app);
         #[cfg(windows)]
         actions::warm();
         let assistant = Assistant {

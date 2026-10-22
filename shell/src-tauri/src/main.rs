@@ -50,6 +50,19 @@ const FIELD_HEIGHT: f64 = 56.0;
 /// The window's label.
 const WINDOW: &str = "main";
 
+/// startup.log in the log folder: each step of starting, and of opening the window, with the time (kept to the last
+/// launch). A launch that stops or hangs shows where.
+static STARTUP_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn step(what: &str) {
+    use std::io::Write;
+    let Some(path) = STARTUP_LOG.get() else { return };
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{millis} {what}");
+    }
+}
+
 /// What the commands and events share.
 struct Shell {
     options: Options,
@@ -680,6 +693,9 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     let handle = app.handle().clone();
     let logs = app.path().app_log_dir()?;
     std::fs::create_dir_all(&logs)?;
+    let _ = std::fs::write(logs.join("startup.log"), "");
+    let _ = STARTUP_LOG.set(logs.join("startup.log"));
+    step(&format!("starting Murmur {}", env!("CARGO_PKG_VERSION")));
     // A release build ends at once on a panic, with nothing on screen: what happened, and where, goes to crash.log.
     let crash_log = logs.join("crash.log");
     let before = std::panic::take_hook();
@@ -774,6 +790,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         logs,
     });
     app.manage(shell.clone());
+    step("settings read; the Murmur button next");
     // Dictation: the key, the pill, the speech model (downloaded by the helper the first time).
     // The Murmur button on screen, where it was left (dictation turns it on or off).
     let at = shell.settings.lock().unwrap().floating_button_at;
@@ -794,6 +811,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         dictation::Dictation::start(&handle, config, shell.logs.clone(), &data, move |args, log| helper.launch(args, log))
     };
     app.manage(dictation);
+    step("dictation started");
     // Commands & AI: what's said as a command is carried out; dictation can be tidied by the model first.
     let assistant = {
         let choices = shell.settings.lock().unwrap().assistant();
@@ -827,15 +845,18 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         }))
     };
     app.manage(assistant);
+    step("commands ready");
     if shell.settings.lock().unwrap().delete_code_index {
         delete_code_index(&shell);
     }
 
     make_panel(&handle, shell.centers_panel())?;
+    step("panel made");
     // No tray (a session without a taskbar, a Linux desktop without one): the hotkey and the panel still work.
     if let Err(error) = make_tray(&handle, &shell) {
         eprintln!("murmur-shell: no tray icon: {error}");
     }
+    step("tray made");
     match shell.shortcut {
         Method::Grab => {
             let hotkey = shell.hotkey();
@@ -901,6 +922,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
             eprintln!("murmur-shell: can't open the window: {error}");
         }
     }
+    step("started");
     watch_hours(&handle);
     updates::start(&handle);
     // The entry that opens Murmur at login is written again: it follows Murmur if it moved, and older ones didn't say
@@ -1174,7 +1196,9 @@ fn show_window_at(app: &AppHandle, page: Option<&str>) -> tauri::Result<()> {
     if position.is_none() {
         builder = builder.center();
     }
+    step("window: making it");
     let window = builder.build()?;
+    step("window: made");
     if let Some((x, y)) = position {
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
@@ -1762,18 +1786,20 @@ fn forget_memory(app: AppHandle, id: String) {
     }
 }
 
+// The answer card's commands, off the main thread (commands/answer.rs says why).
+
 /// The answer window's text, as it loads.
-#[tauri::command]
+#[tauri::command(async)]
 fn answer_text() -> String {
     commands::answer::latest()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn answer_fit(app: AppHandle, height: f64) {
     commands::answer::fit(&app, height);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn answer_close(app: AppHandle) {
     commands::answer::close(&app);
 }
