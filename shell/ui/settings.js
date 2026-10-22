@@ -88,7 +88,8 @@ function renderSpeechModel() {
     failed: "The download didn't finish",
     missing: dictation.enabled ? "Not downloaded yet" : "Downloaded when dictation is on",
   };
-  $("speech-status").textContent = lines[state.state] || "";
+  const unloaded = state.state === "failed" && /load|stopped/i.test(String(state.message || ""));
+  $("speech-status").textContent = unloaded ? "The model didn't load" : lines[state.state] || "";
   $("speech-bar").hidden = !["downloading", "checking", "loading", "waiting"].includes(state.state);
   $("speech-bar").classList.toggle("busy", state.state !== "downloading" || percent == null);
   $("speech-fill").style.width = state.state === "downloading" && percent != null ? `${percent}%` : "";
