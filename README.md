@@ -204,11 +204,8 @@ build includes espeak-ng, which is GPL-3.0, and `package-windows.sh` refuses to 
 the pre-release `hinglish-apex-v1` (never "latest", so the Mac download link is untouched). The app downloads it from
 there, checking each file against the release's `manifest.json`.
 
-**Updates:** the app checks `updates/windows-x86_64.json` on `main`. Releases must be signed with the update key, whose
-public half is in `shell/src-tauri/tauri.conf.json`. Add the private key as the repository secret
-`TAURI_SIGNING_PRIVATE_KEY`, plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, which is empty for the current key. Then
-`scripts/update-feed.py <folder with the installer and its .sig> updates` writes the feed for a published release.
-</details>
+**Updates:** the app checks `updates/windows-x86_64.json` on `main`, which the release workflow writes (see
+[Releasing](#releasing)). Its signing key's public half is in `shell/src-tauri/tauri.conf.json`.
 
 <details>
 <summary><b>Publishing a release</b></summary>
@@ -221,6 +218,31 @@ The download link above and the website both point at `releases/latest/download/
 version straight away. With a Developer ID certificate and stored notary credentials, `scripts/make-dmg.sh` also
 notarizes the app so it opens without the security prompt. Needs the GitHub CLI: `brew install gh && gh auth login`.
 </details>
+
+## Releasing
+
+One command releases both apps:
+
+1. Write what's new in `scripts/release-notes/<version>.md` and commit it on `main`.
+2. Run `scripts/release.sh <version>` (on a Mac, Windows or Linux). It sets the version in `Resources/Info.plist`,
+   `shell/src-tauri/tauri.conf.json` and `Cargo.toml`, commits, tags `v<version>` and pushes.
+
+The **Release** workflow then builds the Mac DMG (signed and notarized, on a macOS runner) and the Windows installer in
+parallel, publishes them together as the newest release (`Murmur.dmg` and `Murmur-Windows-Setup.exe`, which the website
+and this README link to), and writes the update feeds on `main` that installed copies check: `updates/appcast.xml`
+(Sparkle, Mac) and `updates/windows-x86_64.json` (Windows). If either build fails, nothing is published; fix it and run
+the same command again.
+
+It needs these repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | What |
+|---|---|
+| `MAC_CERTIFICATE_P12`, `MAC_CERTIFICATE_PASSWORD` | the Developer ID Application certificate, exported as a .p12, base64-encoded |
+| `APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | an App Store Connect API key for notarization |
+| `SPARKLE_PRIVATE_KEY` (and the variable `SPARKLE_PUBLIC_KEY`) | Sparkle's EdDSA key pair, for Mac updates |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the Windows updater's key |
+
+Windows betas between releases are published by **Windows release** from `.github/windows-beta/release.json`.
 
 ## Related
 

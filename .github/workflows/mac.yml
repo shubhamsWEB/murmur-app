@@ -1,0 +1,110 @@
+# Builds the Mac app's DMG on GitHub (scripts/make-dmg.sh on an Apple silicon runner with Xcode 26), for the release
+# workflow (release.yml), or by hand. With the repository's secrets it's a release: signed with the Developer ID
+# certificate, notarized with the App Store Connect API key, and given its Sparkle signature for in-app updates; without
+# them (a test run), an ad-hoc signed DMG.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   MAC_CERTIFICATE_P12        the "Developer ID Application" certificate with its private key, exported from Keychain
+#                              Access as a .p12, base64-encoded (base64 -i cert.p12 | pbcopy)
+#   MAC_CERTIFICATE_PASSWORD   the .p12's password
+#   APPLE_API_KEY_P8           an App Store Connect API key (Users and Access → Integrations → Team Keys, role
+#                              Developer): the .p8 file's contents
+#   APPLE_API_KEY_ID, APPLE_API_ISSUER   that key's ID and the issuer ID shown above the keys
+#   SPARKLE_PRIVATE_KEY        Sparkle's EdDSA private key (generate_keys -x), for update signatures
+# Variable: SPARKLE_PUBLIC_KEY (its public half, generate_keys -p): with it the app checks updates/appcast.xml.
+name: Mac
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      release:
+        description: Fail unless the DMG is signed with the Developer ID and notarized
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag to build
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          swift --version
+      # llama.cpp is built once per version of its build script (build-llama.sh does nothing when it's there).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: Vendor/llama
+          key: llama-mac-${{ hashFiles('scripts/build-llama.sh', 'scripts/llama.cpp-no-logits.patch') }}
+      - name: Signing certificate
+        env:
+          P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          API_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [[ -z "$P12" ]]; then echo "No certificate: an ad-hoc signed test build"; exit 0; fi
+          keychain="$RUNNER_TEMP/murmur.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+          if [[ -n "$API_KEY" ]]; then
+            echo "$API_KEY" > "$RUNNER_TEMP/notary.p8"
+            echo "APPLE_API_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+          fi
+      - name: The DMG
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          REQUIRE_NOTARIZATION: ${{ inputs.release && '1' || '' }}
+          # In-app updates, when the Sparkle key is set up: build.sh writes these into the app's Info.plist.
+          SPARKLE_FEED: ${{ vars.SPARKLE_PUBLIC_KEY && 'https://raw.githubusercontent.com/shubhamsWEB/murmur-app/main/updates/appcast.xml' || '' }}
+          SPARKLE_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: scripts/make-dmg.sh
+      - name: Sparkle signature
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          dmg=$(ls dist/Murmur-*.dmg | head -1)
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then echo "No Sparkle key: no update signature"; exit 0; fi
+          echo "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle.key"
+          .build/artifacts/sparkle/Sparkle/bin/sign_update --ed-key-file "$RUNNER_TEMP/sparkle.key" "$dmg" > dist/sparkle.txt
+          rm "$RUNNER_TEMP/sparkle.key"
+          cat dist/sparkle.txt
+      - name: Checks
+        run: |
+          dmg=$(ls dist/Murmur-*.dmg | head -1)
+          ls -la dist
+          hdiutil verify "$dmg"
+          spctl -a -t open --context context:primary-signature -v "$dmg" || echo "(not notarized: a test build)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Murmur-mac
+          path: |
+            dist/Murmur-*.dmg
+            dist/sparkle.txt
+          if-no-files-found: error
+      - name: Forget the certificate
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/murmur.keychain-db" 2> /dev/null || true

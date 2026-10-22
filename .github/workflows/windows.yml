@@ -19,6 +19,12 @@ on:
       ref:
         description: Branch or tag to build
         default: main
+  # The release workflow (release.yml) builds a version's installer with this, its signing key passed down.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 permissions:
   contents: read

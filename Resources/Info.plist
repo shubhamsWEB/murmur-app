@@ -59,6 +59,6 @@
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>Murmur indexes the folders you choose so you can search them by describing what's inside. Everything stays on this Mac.</string>
 	<key>SUEnableAutomaticChecks</key>
-	<false/>
+	<true/>
 </dict>
 </plist>
