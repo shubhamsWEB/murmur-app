@@ -2,12 +2,12 @@
 //! IntentClassifier, with Windows' words).
 //!
 //! Typing is the default; a command needs a clear signal:
-//! 1. Shift held with the dictation key → command.
+//! 1. Alt held with the dictation key → command (Shift → typed, decided before this is asked).
 //! 2. A known command pattern ("open Slack", "open chrome and search facebook", "volume 30") → command.
 //! 3. Starts with "Murmur" ("Murmur, summarise this") → command.
 //! 4. Doesn't open like an instruction → typed.
 //! 5. Opens like an instruction to the computer ("open…", "summarise…", "translate…"); messages and questions ("send…",
-//!    "what's…") don't count, so they're typed unless you say "Murmur" first or hold Shift:
+//!    "what's…") don't count, so they're typed unless you say "Murmur" first or hold Alt:
 //!    - the focus is somewhere you can't type (the desktop, a folder) → command;
 //!    - otherwise the model decides, with a short time limit; no answer → typed.
 //! Whether a text field has the focus is often unknown (Chrome and Electron apps don't always say), so "unknown" never
@@ -38,7 +38,7 @@ pub enum Focus {
 pub struct Decision {
     pub intent: Intent,
     pub reason: String,
-    /// A clear signal (Shift, a known command, "Murmur…", nowhere to type), not the model's guess. A guessed command
+    /// A clear signal (Alt, a known command, "Murmur…", nowhere to type), not the model's guess. A guessed command
     /// that ends up only answering is typed instead.
     pub explicit: bool,
 }
@@ -183,7 +183,7 @@ fn selection_instruction(utterance: &str) -> Option<bool> {
 /// Command or dictation, with why. `router`: the model asked when the words alone don't settle it (none: typed).
 pub async fn decide(utterance: &str, at: &Situation<'_>, apps: &dyn Apps, router: Option<&Router>) -> Decision {
     if at.forced_command {
-        return Decision::command("command key held");
+        return Decision::command("Alt held");
     }
     let cleaned = quick::clean(utterance);
     if cleaned.is_empty() {
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(intent("what's on my screen"), Intent::Command);
         assert_eq!(decide_now("summarise this", Focus::TextField, true).intent, Intent::Command);
         let forced = Situation { forced_command: true, focus: Focus::TextField, front_app: None, has_selection: false, since_last: None };
-        assert_eq!(crate::ai::blocking(decide("see you soon", &forced, &These(&[]), None)).reason, "command key held");
+        assert_eq!(crate::ai::blocking(decide("see you soon", &forced, &These(&[]), None)).reason, "Alt held");
     }
 
     #[test]

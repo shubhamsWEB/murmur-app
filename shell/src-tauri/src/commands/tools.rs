@@ -1,6 +1,6 @@
 //! What the model may do on Windows, and its instructions: the Mac's tool list and system prompt (CommandAgent), cut
-//! to the tools this PC has. Screen reading and clicking, browser automation, sending messages and running commands
-//! come later: the model isn't offered them, and says so when asked.
+//! to the tools this PC has. Screen reading and clicking, browser automation and sending messages come later: the model
+//! isn't offered them, and says so when asked.
 
 use crate::ai::ToolSpec;
 use serde_json::{json, Map, Value};
@@ -68,6 +68,9 @@ pub fn all() -> Vec<ToolSpec> {
         tool("copy_text", "Put text on the clipboard", &[("text", "string", "the text")], None),
         tool("paste_clipboard", "Paste what's on the clipboard into the box the user was typing in", &[], None),
         tool("wait", "Wait for an app or page to load", &[("seconds", "number", "0.5 to 6")], None),
+        tool("run_command", "Run a PowerShell command on this PC (in the user's home folder) and return its output",
+             &[("command", "string", "the command"),
+               ("purpose", "string", "one short line on what it does, shown when the user is asked")], Some(&["command"])),
         tool("reply", "Show a short answer to the user", &[("text", "string", "the answer")], None),
         tool("remember", "Keep a lasting fact or preference the user told you, for every later command",
              &[("subject", "string", "what it's about, in a word or two: a person's name, \"browser\", \"message style\""),
@@ -113,9 +116,14 @@ pub fn system_prompt() -> String {
          place of the selection: replace_selection. In another app: write_in_app. To read: reply.",
         "- To write text where the user is typing (no selection to replace), call insert_text with the finished text \
          only. type_text and press_keys work in the app in front now (after you opened it).",
-        "- You can't see the screen, click, read web pages, send messages or run commands on Windows yet: when a \
-         request needs one of those, reply in a sentence saying so, and what the user can do instead (select the \
-         text and ask again, open the chat and dictate the message).",
+        "- Terminal: run_command runs a PowerShell command on this PC and gives you its output (anything that changes \
+         something is shown to the user first). Use it for what the other tools don't cover: disk space (Get-PSDrive), \
+         battery (Get-CimInstance Win32_Battery), Wi-Fi details (netsh wlan show interfaces), IP address, file \
+         operations (copy, move, rename, Compress-Archive), git, installed tools (winget list). One command at a time; \
+         read the output, then go on or reply with the answer. Never run anything as administrator.",
+        "- You can't see the screen, click, read web pages or send messages on Windows yet: when a request needs one \
+         of those, reply in a sentence saying so, and what the user can do instead (select the text and ask again, \
+         open the chat and dictate the message).",
         "- To answer a question, call reply with a short answer. reply ends the command: use it once, for the final \
          answer, never to describe a step.",
         "- Memory first: before acting, check the memory below. Use the user's name for their own documents, \
@@ -127,8 +135,8 @@ pub fn system_prompt() -> String {
          commands listed below, call recall.",
         "- Follow-ups: a request that continues an earlier command (listed below) uses its app, file or page. \"Open it \
          again\" → the same file; \"do it again\" → repeat it.",
-        "- Don't give up after one try: when a step fails, try another way. Only reply that something can't be done \
-         once the tools truly can't do it.",
+        "- Don't give up after one try: when a step fails, try another way (another tool, or run_command). Only reply \
+         that something can't be done once the tools truly can't do it.",
         "- When nothing more is needed, call done.",
     ].join("\n")
 }
@@ -154,7 +162,7 @@ mod tests {
             }
         }
         let prompt = super::system_prompt();
-        for name in ["open_file", "write_in_app", "insert_text", "remember", "done"] {
+        for name in ["open_file", "write_in_app", "insert_text", "remember", "run_command", "done"] {
             assert!(prompt.contains(name), "the prompt explains {name}");
         }
     }

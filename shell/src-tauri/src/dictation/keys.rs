@@ -28,8 +28,11 @@ pub enum Press {
     Escape,
     /// The hook had stopped hearing keys (Windows dropped it) and was put back: for the log. A Down follows.
     Revived,
-    /// Shift pressed while the dictation key is held: what's said is a command (as ⌃ with Fn on the Mac).
+    /// Alt with the dictation key (held from the start or added while talking): what's said is a command, as ⌃ with Fn
+    /// on the Mac.
     Command,
+    /// Shift with the dictation key: what's said is typed, never taken for a command, as ⇧ with Fn on the Mac.
+    Typing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +50,7 @@ const LWIN: u32 = 0x5B;
 const RWIN: u32 = 0x5C;
 const RMENU: u32 = 0xA5;
 const SHIFTS: [u32; 3] = [0x10, 0xA0, 0xA1];
+const ALTS: [u32; 3] = [0x12, 0xA4, 0xA5];
 #[cfg_attr(not(windows), allow(dead_code))]
 const ESCAPE: u32 = 0x1B;
 
@@ -100,6 +104,20 @@ impl Combo {
         self.groups().iter().any(|group| group.contains(&key))
     }
 
+    /// What a key held with the combination asks for: Alt a command, Shift typing only (keys of the combination
+    /// itself aside: Right Alt's own Alt, AltGr's Left Ctrl).
+    fn mode(self, key: u32) -> Option<Press> {
+        if self.contains(key) || self.tolerates(key) {
+            None
+        } else if ALTS.contains(&key) {
+            Some(Press::Command)
+        } else if SHIFTS.contains(&key) {
+            Some(Press::Typing)
+        } else {
+            None
+        }
+    }
+
     /// Keys that may be down alongside without making it a shortcut: Right Alt is AltGr on many layouts, which
     /// Windows sends as Left Ctrl + Right Alt.
     fn tolerates(self, key: u32) -> bool {
@@ -111,13 +129,15 @@ impl Combo {
 pub struct Tracker {
     down: HashSet<u32>,
     active: bool,
-    /// Shift was pressed during this dictation (Command given).
-    commanded: bool,
+    /// Alt or Shift asked for a command or typing only during this dictation (the first one counts, as on the Mac).
+    moded: bool,
+    /// Said right after a Down: Alt or Shift was already held when the combination went down.
+    pending: Option<Press>,
 }
 
 impl Tracker {
     pub fn new() -> Tracker {
-        Tracker { down: HashSet::new(), active: false, commanded: false }
+        Tracker { down: HashSet::new(), active: false, moded: false, pending: None }
     }
 
     /// A key went down (`pressed`) or up. Returns what that means for dictation, if anything.
@@ -133,13 +153,16 @@ impl Tracker {
         }
         let held = combo.groups().iter().all(|group| group.iter().any(|k| self.down.contains(k)));
         if self.active {
-            // Shift added to the held key: a command. Pressed again, nothing more.
-            if pressed && SHIFTS.contains(&key) && !combo.contains(key) {
-                if self.commanded {
-                    return None;
+            // Alt or Shift added to the held key: a command, or typing only. The first one counts; after it, more of
+            // them change nothing.
+            if pressed {
+                if let Some(mode) = combo.mode(key) {
+                    if self.moded {
+                        return None;
+                    }
+                    self.moded = true;
+                    return Some(mode);
                 }
-                self.commanded = true;
-                return Some(Press::Command);
             }
             if pressed && !combo.contains(key) && !combo.tolerates(key) {
                 self.active = false;
@@ -151,14 +174,23 @@ impl Tracker {
             }
             return None;
         }
-        // Starts only when the combination is all that's down (Ctrl + Windows with Shift held is something else).
-        let extra = self.down.iter().any(|k| !combo.contains(*k) && !combo.tolerates(*k));
-        if pressed && held && !extra {
+        // Starts only when the combination is all that's down, or with Alt or Shift (a command, typing only): any other
+        // key held means a shortcut.
+        let extra: Vec<u32> = self.down.iter().copied().filter(|k| !combo.contains(*k) && !combo.tolerates(*k)).collect();
+        let modes: Vec<Press> = extra.iter().filter_map(|k| combo.mode(*k)).collect();
+        if pressed && held && modes.len() == extra.len() {
             self.active = true;
-            self.commanded = false;
+            // Both held: a command, as on the Mac (its command key is looked at first).
+            self.pending = if modes.contains(&Press::Command) { Some(Press::Command) } else { modes.first().copied() };
+            self.moded = self.pending.is_some();
             return Some(Press::Down);
         }
         None
+    }
+
+    /// What follows the Down just given, if anything (Alt or Shift already held as it went down).
+    pub fn after(&mut self) -> Option<Press> {
+        self.pending.take()
     }
 
     /// Whether a dictation is held (Down given, no Up or Cancel yet).
@@ -234,7 +266,8 @@ impl Watch {
             }
         }
         tracker.active = true;
-        tracker.commanded = false;
+        tracker.moded = false;
+        tracker.pending = None;
         Fix::Revive
     }
 }
@@ -390,9 +423,12 @@ mod hook {
                 if (pressed || released) && info.flags & LLKHF_INJECTED == 0 {
                     // Kept short: Windows drops a hook that takes too long. `on` only hands the press on.
                     let combo = current_combo(hooked);
-                    let press = hooked.tracker.lock().unwrap().key(combo, info.vkCode, pressed, is_down);
-                    if let Some(press) = press {
+                    let mut tracker = hooked.tracker.lock().unwrap();
+                    if let Some(press) = tracker.key(combo, info.vkCode, pressed, is_down) {
                         (hooked.on)(press);
+                        if let Some(then) = tracker.after() {
+                            (hooked.on)(then);
+                        }
                     }
                 }
             }
@@ -429,9 +465,32 @@ mod tests {
     #[test]
     fn not_with_other_keys_already_down() {
         let mut keys = Tracker::new();
-        keys.key(Combo::CtrlWin, 0xA0, true, |_| true); // Left Shift
+        keys.key(Combo::CtrlWin, 0x44, true, |_| true); // D
         keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
         assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), None);
+    }
+
+    #[test]
+    fn alt_or_shift_held_from_the_start() {
+        // Alt, then Ctrl + Windows: a command.
+        let mut keys = Tracker::new();
+        keys.key(Combo::CtrlWin, 0xA4, true, |_| true);
+        keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.after(), Some(Press::Command));
+        assert_eq!(keys.after(), None);
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA0, true, |_| true), None); // Shift after it changes nothing
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false, |_| true), Some(Press::Up));
+        // Shift, then Right Ctrl: typing only.
+        let mut keys = Tracker::new();
+        keys.key(Combo::RightCtrl, 0xA1, true, |_| true);
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.after(), Some(Press::Typing));
+        // Right Alt's own Alt isn't a command; Left Alt with it is.
+        let mut keys = Tracker::new();
+        assert_eq!(keys.key(Combo::RightAlt, RMENU, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.after(), None);
+        assert_eq!(keys.key(Combo::RightAlt, 0xA4, true, |_| true), Some(Press::Command));
     }
 
     #[test]
@@ -458,15 +517,22 @@ mod tests {
     }
 
     #[test]
-    fn shift_while_held_makes_it_a_command() {
+    fn alt_or_shift_added_while_held() {
         let mut keys = Tracker::new();
         keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
         assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), Some(Press::Down));
-        assert_eq!(keys.key(Combo::CtrlWin, 0xA0, true, |_| true), Some(Press::Command));
-        assert_eq!(keys.key(Combo::CtrlWin, 0xA0, false, |_| true), None);
-        assert_eq!(keys.key(Combo::CtrlWin, 0xA1, true, |_| true), None); // once is enough
+        assert_eq!(keys.after(), None);
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA4, true, |_| true), Some(Press::Command));
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA4, false, |_| true), None);
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA0, true, |_| true), None); // the first one counts
         assert!(keys.is_active());
         assert_eq!(keys.key(Combo::CtrlWin, LWIN, false, |_| true), Some(Press::Up));
+        // The next dictation starts afresh: Shift is typing only.
+        keys.key(Combo::CtrlWin, LCONTROL, false, |_| true);
+        keys.key(Combo::CtrlWin, 0xA0, false, |_| true);
+        keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA1, true, |_| true), Some(Press::Typing));
     }
 
     #[test]

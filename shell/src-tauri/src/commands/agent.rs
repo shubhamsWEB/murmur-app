@@ -111,7 +111,7 @@ pub struct Context {
     pub selection: Option<String>,
     /// The selection is in a box you can type in, so an edit of it can replace it.
     pub editable: bool,
-    /// You clearly gave a command (Shift held, a command word); false when it was the model's guess.
+    /// You clearly gave a command (Alt held, a command word); false when it was the model's guess.
     pub explicit: bool,
 }
 
@@ -532,6 +532,26 @@ impl<'a> Agent<'a> {
                     self.show(&words);
                     Outcome::ended("The selected text can't be edited there; showed the result instead.")
                 }
+            }
+            "run_command" => {
+                let command = text("command");
+                if command.is_empty() {
+                    return (Outcome::said("No command given."), None);
+                }
+                if super::shell::uses_admin(&command) {
+                    return (Outcome::said("Murmur doesn't run commands as administrator. Reply with the command, so the user \
+                                           can run it in an administrator PowerShell themselves."), None);
+                }
+                // Reading runs straight away; anything that changes something is shown first.
+                if !super::shell::is_read_only(&command) {
+                    let purpose = text("purpose");
+                    let detail = if purpose.is_empty() { command.clone() } else { format!("{purpose}\n\n{command}") };
+                    if !self.host.confirm("Run this command?", &detail) {
+                        return (Outcome::ended("The user chose not to run it."), None);
+                    }
+                }
+                self.host.progress("Running a command…");
+                self.host.act("run_command", call, None)
             }
             "remember" => {
                 let result = self.memory.remember(&text("subject"), &text("fact"));
@@ -1033,6 +1053,29 @@ mod tests {
         let mut host = Fake { confirms: true, ..Fake::default() };
         Agent::new(&mut host, &memory, &model, &model).run("clear your memory", &explicit());
         assert!(memory.facts().is_empty());
+    }
+
+    #[test]
+    fn commands_that_change_things_are_asked_first() {
+        let memory = Memory::open(None);
+        // Reading: runs without asking.
+        let model = Scripted::new(false, vec![calls(&[("run_command", json!({"command": "Get-PSDrive C"}))]),
+                                              calls(&[("reply", json!({"text": "40 GB free."}))])]);
+        let mut host = Fake::default();
+        Agent::new(&mut host, &memory, &model, &model).run("how much space is left on my c drive", &explicit());
+        assert!(host.did[0].starts_with("run_command"));
+        // Changing something, declined: not run.
+        let model = Scripted::new(false, vec![calls(&[("run_command", json!({"command": "Remove-Item old.zip"}))])]);
+        let mut host = Fake { confirms: false, ..Fake::default() };
+        Agent::new(&mut host, &memory, &model, &model).run("delete old zip from my home folder", &explicit());
+        assert!(host.did.is_empty());
+        // As administrator: never, and the model is told so.
+        let model = Scripted::new(false, vec![calls(&[("run_command", json!({"command": "Start-Process cmd -Verb RunAs"}))]),
+                                              calls(&[("reply", json!({"text": "Run it as administrator yourself."}))])]);
+        let mut host = Fake { confirms: true, ..Fake::default() };
+        Agent::new(&mut host, &memory, &model, &model).run("open an admin command prompt", &explicit());
+        assert!(host.did.is_empty());
+        assert_eq!(host.answers, vec!["Run it as administrator yourself."]);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod intent;
 pub mod memory;
 pub mod places;
 pub mod quick;
+pub mod shell;
 pub mod tools;
 pub mod wake;
 
@@ -33,7 +34,7 @@ pub struct Choices {
     /// AI clean-up of dictation (off by default, as on the Mac), and the style for each kind of app.
     pub cleanup: bool,
     pub styles: BTreeMap<String, String>,
-    /// Commands told apart from dictation without Shift (on by default).
+    /// Commands told apart from dictation without Alt (on by default).
     pub detect: bool,
 }
 
@@ -180,7 +181,7 @@ impl Assistant {
         let choices = self.choices();
         if !choices.detect {
             return if forced {
-                intent::Decision { intent: intent::Intent::Command, reason: "Shift held".into(), explicit: true }
+                intent::Decision { intent: intent::Intent::Command, reason: "Alt held".into(), explicit: true }
             } else {
                 intent::Decision { intent: intent::Intent::Dictation, reason: "detection off".into(), explicit: true }
             };
@@ -495,13 +496,26 @@ fn act(pc: &mut Pc, tool: &str, call: &Call, browser: Option<&str>) -> Outcome {
             pc.answered = true;
             Outcome::ended("Pasted the clipboard where you were.")
         }
+        "run_command" => {
+            let command = call.text("command");
+            let ran = shell::run(&command, Duration::from_secs(60), 8000);
+            (pc.log)(&format!("command: ran `{}` → exit {:?}, {} characters", ai::cut(&command, 200), ran.status,
+                              ran.output.chars().count()));
+            let mut summary = if ran.timed_out {
+                "Stopped after 60 s.".to_string()
+            } else {
+                format!("Exit status {}.", ran.status.map_or("unknown".to_string(), |s| s.to_string()))
+            };
+            summary += &if ran.output.is_empty() { " No output.".to_string() } else { format!("\nOutput:\n{}", ran.output) };
+            said(summary)
+        }
         "wait" => {
             let seconds = call.number("seconds").unwrap_or(1.0).clamp(0.2, 6.0);
             std::thread::sleep(Duration::from_secs_f64(seconds));
             said(format!("Waited {seconds} s."))
         }
         // What the Mac can do and Windows can't yet: said plainly, so the model tells you rather than tries.
-        "read_screen" | "click" | "browser_read" | "browser_click" | "browser_type" | "send_message" | "run_command" =>
+        "read_screen" | "click" | "browser_read" | "browser_click" | "browser_type" | "send_message" =>
             said("That isn't available on Windows yet. Reply saying so, and what the user can do instead.".into()),
         other => said(format!("Unknown tool {other}.")),
     }

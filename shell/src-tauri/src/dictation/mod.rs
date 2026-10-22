@@ -3,7 +3,8 @@
 //! or Whisper through sherpa-onnx (speech.rs), the paste (paste.rs). The key (keys.rs) and the paste work on Windows
 //! for now.
 //!
-//! What's said can also be a command (Shift added to the key, or told apart by what it says) or be tidied by the
+//! What's said can also be a command (Alt with the key, or told apart by what it says; Shift with the key types it
+//! whatever it says, as ⌃ and ⇧ with Fn on the Mac) or be tidied by the
 //! model before it's typed (AI clean-up): both are commands/mod.rs's, with the model chosen in Commands & AI.
 //!
 //! The speech model (about 650 MB) is downloaded by the helper (`murmur-engine download-speech-model`, checked file by
@@ -103,8 +104,9 @@ struct Inner {
     last: Mutex<Option<String>>,
     /// What the dictation thread is doing and since when (for the watchdog).
     busy: Mutex<Option<(Instant, keys::Press)>>,
-    /// Shift was added to the key during this dictation: what's said is a command.
+    /// Alt was held with the key during this dictation: what's said is a command. Shift: it's typed, whatever it says.
     command: AtomicBool,
+    typing: AtomicBool,
     /// Where the words would go, looked at as the key went down (a moment's work, on a thread of its own): the focus
     /// and selection, and the window in front (its handle, program and title). Taken when the words are in.
     spot: Arc<Mutex<Option<Place>>>,
@@ -157,6 +159,7 @@ impl Dictation {
             last: Mutex::new(None),
             busy: Mutex::new(None),
             command: AtomicBool::new(false),
+            typing: AtomicBool::new(false),
             spot: Arc::new(Mutex::new(None)),
             heard: Mutex::new(None),
         });
@@ -179,7 +182,8 @@ impl Dictation {
                         keys::Press::Cancel => worker.shortcut(),
                         keys::Press::Escape => worker.escape(),
                         keys::Press::Revived => worker.note("key watcher: Windows had dropped it, so it was put back (this press still counts)"),
-                        keys::Press::Command => worker.command_key(),
+                        keys::Press::Command => worker.mode_key(true),
+                        keys::Press::Typing => worker.mode_key(false),
                     }
                     *worker.busy.lock().unwrap() = None;
                 }
@@ -481,11 +485,15 @@ impl Inner {
         }
     }
 
-    /// Shift added while the key is held: a command.
-    fn command_key(&self) {
-        if self.recording.lock().unwrap().is_some() && !self.command.swap(true, Ordering::SeqCst) {
-            self.note("Shift held: a command");
-            pill::show(&self.app, "listening", "Listening for a command");
+    /// Alt (`command`) or Shift with the key, held from the start or added while talking: a command, or typing only.
+    fn mode_key(&self, command: bool) {
+        if self.recording.lock().unwrap().is_none() {
+            return;
+        }
+        let flag = if command { &self.command } else { &self.typing };
+        if !flag.swap(true, Ordering::SeqCst) {
+            self.note(if command { "Alt held: a command" } else { "Shift held: typed as said" });
+            pill::show(&self.app, "listening", if command { "Listening for a command" } else { "Listening · typing only" });
         }
     }
 
@@ -530,6 +538,7 @@ impl Inner {
         }
         pill::show(&self.app, "starting", "Starting the microphone…");
         self.command.store(false, Ordering::SeqCst);
+        self.typing.store(false, Ordering::SeqCst);
         self.look_around();
         let app = self.app.clone();
         let started = Instant::now();
@@ -654,9 +663,10 @@ impl Inner {
         if let Some(assistant) = self.app.try_state::<Arc<Assistant>>() {
             let assistant = assistant.inner().clone();
             let forced = self.command.swap(false, Ordering::SeqCst);
+            let typing = self.typing.swap(false, Ordering::SeqCst) && !forced;
             let mut spot = place.spot.clone();
             // "Summarise this" with text selected in an app that doesn't say what's selected: copy it.
-            if spot.selection.is_none() && !spot.terminal && (forced || assistant.choices().detect)
+            if !typing && spot.selection.is_none() && !spot.terminal && (forced || assistant.choices().detect)
                 && crate::commands::intent::is_about_selection(&text) {
                 spot.selection = paste::copy_selection();
                 if let Some(selection) = &spot.selection {
@@ -664,7 +674,13 @@ impl Inner {
                 }
             }
             let front_app = program.map(|p| p.trim_end_matches(".exe").trim_end_matches(".EXE").to_string());
-            let decision = assistant.decide(&text, &spot, front_app.as_deref(), forced);
+            let decision = if typing {
+                crate::commands::intent::Decision {
+                    intent: crate::commands::intent::Intent::Dictation, reason: "Shift held".into(), explicit: true,
+                }
+            } else {
+                assistant.decide(&text, &spot, front_app.as_deref(), forced)
+            };
             self.note(&format!("intent: {} ({})", if decision.intent == crate::commands::intent::Intent::Command { "command" } else { "dictation" },
                                decision.reason));
             if decision.intent == crate::commands::intent::Intent::Command {
