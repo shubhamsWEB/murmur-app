@@ -12,13 +12,36 @@ pub fn insert(_text: &str) -> Result<(), String> {
     Err("typing the words in works on Windows for now".into())
 }
 
+/// Puts text on the clipboard (for when there's nowhere to type it).
+#[cfg(windows)]
+pub fn copy(text: &str) -> bool {
+    windows::copy(text)
+}
+
+#[cfg(not(windows))]
+pub fn copy(_text: &str) -> bool {
+    false
+}
+
+/// The text selected in the app in front, copied with Ctrl+C (for apps that don't say what's selected), the
+/// clipboard put back as it was. None when nothing was copied.
+#[cfg(windows)]
+pub fn copy_selection() -> Option<String> {
+    windows::copy_selection()
+}
+
+#[cfg(not(windows))]
+pub fn copy_selection() -> Option<String> {
+    None
+}
+
 #[cfg(windows)]
 mod windows {
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
     use windows_sys::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, OpenClipboard,
-        RegisterClipboardFormatW, SetClipboardData,
+        CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardSequenceNumber,
+        OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -57,6 +80,53 @@ mod windows {
         Ok(())
     }
 
+    pub fn copy(text: &str) -> bool {
+        with_clipboard(|| unsafe {
+            EmptyClipboard();
+            put(CF_UNICODETEXT, &utf16(text));
+        }).is_some()
+    }
+
+    pub fn copy_selection() -> Option<String> {
+        wait_for_modifiers();
+        let kept = with_clipboard(|| unsafe { snapshot() }).unwrap_or_default();
+        let before = unsafe { GetClipboardSequenceNumber() };
+        press(b'C' as u16);
+        let started = Instant::now();
+        while unsafe { GetClipboardSequenceNumber() } == before && started.elapsed() < Duration::from_millis(500) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if unsafe { GetClipboardSequenceNumber() } == before {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+        let copied = with_clipboard(|| unsafe { text() }).flatten();
+        with_clipboard(|| unsafe {
+            EmptyClipboard();
+            for (format, data) in &kept {
+                put(*format, data);
+            }
+        });
+        copied.filter(|text| !text.trim().is_empty())
+    }
+
+    unsafe fn text() -> Option<String> {
+        let handle = GetClipboardData(CF_UNICODETEXT);
+        if handle.is_null() {
+            return None;
+        }
+        let data = GlobalLock(handle as HGLOBAL) as *const u16;
+        if data.is_null() {
+            return None;
+        }
+        let units = GlobalSize(handle as HGLOBAL) / 2;
+        let slice = std::slice::from_raw_parts(data, units);
+        let end = slice.iter().position(|u| *u == 0).unwrap_or(units);
+        let text = String::from_utf16_lossy(&slice[..end]);
+        GlobalUnlock(handle as HGLOBAL);
+        Some(text)
+    }
+
     /// The paste happens after the dictation key is let go, but a slow finger can still be on Ctrl or Windows: wait
     /// (up to half a second) for every modifier to be up, so Ctrl+V isn't Ctrl+Windows+V.
     fn wait_for_modifiers() {
@@ -71,14 +141,18 @@ mod windows {
     }
 
     fn press_paste() {
+        press(b'V' as u16);
+    }
+
+    /// Ctrl and a letter.
+    fn press(letter: u16) {
         let key = |code: u16, up: bool| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: 0 },
             },
         };
-        let v = b'V' as u16;
-        let inputs = [key(VK_CONTROL, false), key(v, false), key(v, true), key(VK_CONTROL, true)];
+        let inputs = [key(VK_CONTROL, false), key(letter, false), key(letter, true), key(VK_CONTROL, true)];
         unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
     }
 

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The panel's, the window's, setup's, code folders', the dictation pill's and the Murmur button's pages: Tauri's core (events, the asset URLs, paths), and the button dragging itself. Their commands are the shell's.",
+  "description": "The panel's, the window's, setup's, code folders', the dictation pill's, the Murmur button's and a command's answer's pages: Tauri's core (events, the asset URLs, paths), and the button dragging itself. Their commands are the shell's.",
   "windows": [
     "panel",
     "panel-centered",
@@ -9,7 +9,8 @@
     "setup",
     "code-folders",
     "pill",
-    "logo"
+    "logo",
+    "answer"
   ],
   "permissions": [
     "core:default",

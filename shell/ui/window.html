@@ -120,7 +120,7 @@
     <!-- Settings: dictation first, then Murmur itself (settings.js). -->
     <section class="page pane" id="page-settings" hidden>
       <div class="column">
-        <header class="page-head"><h1>Settings</h1><p>How dictation listens and types, and how Murmur runs.</p></header>
+        <header class="page-head"><h1>Settings</h1><p>How dictation listens and types, commands and AI, and how Murmur runs.</p></header>
 
         <span class="section-label">Dictation</span>
         <div class="card rows">
@@ -129,7 +129,8 @@
               into text on this PC: nothing you say leaves it.</span></div>
             <label class="switch"><input type="checkbox" id="dictation-on"><span></span></label></div>
           <div class="srow"><div class="stext"><b>Dictation key</b>
-            <span>Pressing another key while it's held (a shortcut such as Ctrl + Windows + D) cancels the dictation.</span>
+            <span>Add Shift while it's held to give a command. Pressing any other key while it's held (a shortcut such as
+              Ctrl + Windows + D) cancels the dictation.</span>
             <span class="problem" id="dictation-key-problem" hidden></span></div>
             <select class="field" id="dictation-key"></select></div>
           <div class="srow"><div class="stext"><b>Language</b><span id="speech-about"></span></div>
@@ -148,6 +149,49 @@
             <span>A small Murmur pill you can drag anywhere. Click it to open Murmur; the listening pill grows out of it
               while you talk.</span></div>
             <label class="switch"><input type="checkbox" id="floating-button"><span></span></label></div>
+        </div>
+
+        <!-- Commands & AI (assistant.js; src-tauri/src/commands): one key types and gives commands; AI clean-up. -->
+        <span class="section-label">Commands &amp; AI</span>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>Detect commands automatically</b>
+            <span>Say “open Spotify”, “volume 30” or “summarise this” with the dictation key, and Murmur does it instead
+              of typing it. Messages and questions are still typed, unless you start with “Murmur”. Add
+              <b>Shift</b> while you hold the key to make anything you say a command.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-detect"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>AI clean-up</b>
+            <span>Takes out “um”s and false starts, keeps only what you corrected yourself to, sets out lists, and
+              writes in the style of the app you're in. If the model is slow or changes too much, your words go in as
+              you said them. Paste Exactly What I Said (in the tray) types what was heard.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-cleanup"><span></span></label></div>
+          <div id="ai-styles"></div>
+          <div class="srow"><div class="stext"><b>Model</b><span id="ai-model-about"></span>
+            <span class="problem" id="ai-last-error" hidden></span></div>
+            <select class="field" id="ai-provider">
+              <option value="local">On this PC (Ollama)</option>
+              <option value="anthropic">Claude (Anthropic)</option>
+              <option value="openai">OpenAI</option>
+            </select></div>
+          <div class="srow sub" id="ai-local-row"><div class="stext"><b>Local model</b>
+            <span id="ai-local-about"></span></div>
+            <div class="sctl"><select class="field" id="ai-local-model"></select>
+              <button class="secondary" id="ai-local-check">Check</button></div></div>
+          <div class="srow sub" id="ai-key-row" hidden><div class="stext"><b id="ai-key-title">API key</b>
+            <span id="ai-key-about"></span>
+            <span class="note" id="ai-key-result" hidden></span></div>
+            <div class="sctl"><input class="field" id="ai-key" type="password" autocomplete="off" spellcheck="false">
+              <button class="secondary" id="ai-key-save">Save</button>
+              <button class="secondary" id="ai-key-check">Check</button></div></div>
+          <div class="srow sub" id="ai-workspace-row" hidden><div class="stext"><b>Workspace ID</b>
+            <span>Only for an organization's key: the workspace to use (Anthropic Console → Settings → Workspaces).</span></div>
+            <input class="field" id="ai-workspace" placeholder="wrkspc_…" autocomplete="off" spellcheck="false"></div>
+          <div class="srow sub" id="ai-cloud-model-row" hidden><div class="stext"><b>Model name</b>
+            <span id="ai-cloud-model-about"></span></div>
+            <input class="field" id="ai-cloud-model" autocomplete="off" spellcheck="false"></div>
+          <div class="srow"><div class="stext"><b>What Murmur remembers</b>
+            <span id="ai-memory-about"></span></div>
+            <button class="secondary" id="ai-forget-all">Clear Memory</button></div>
+          <div class="list" id="ai-facts"></div>
         </div>
 
         <span class="section-label">Recordings and history</span>
@@ -287,6 +331,7 @@
   <script src="shortcut.js"></script>
   <script src="window.js"></script>
   <script src="settings.js"></script>
+  <script src="assistant.js"></script>
   <script src="home.js"></script>
 </body>
 </html>

@@ -28,6 +28,8 @@ pub enum Press {
     Escape,
     /// The hook had stopped hearing keys (Windows dropped it) and was put back: for the log. A Down follows.
     Revived,
+    /// Shift pressed while the dictation key is held: what's said is a command (as ⌃ with Fn on the Mac).
+    Command,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +46,7 @@ const CONTROL: u32 = 0x11;
 const LWIN: u32 = 0x5B;
 const RWIN: u32 = 0x5C;
 const RMENU: u32 = 0xA5;
+const SHIFTS: [u32; 3] = [0x10, 0xA0, 0xA1];
 #[cfg_attr(not(windows), allow(dead_code))]
 const ESCAPE: u32 = 0x1B;
 
@@ -108,11 +111,13 @@ impl Combo {
 pub struct Tracker {
     down: HashSet<u32>,
     active: bool,
+    /// Shift was pressed during this dictation (Command given).
+    commanded: bool,
 }
 
 impl Tracker {
     pub fn new() -> Tracker {
-        Tracker { down: HashSet::new(), active: false }
+        Tracker { down: HashSet::new(), active: false, commanded: false }
     }
 
     /// A key went down (`pressed`) or up. Returns what that means for dictation, if anything.
@@ -128,6 +133,14 @@ impl Tracker {
         }
         let held = combo.groups().iter().all(|group| group.iter().any(|k| self.down.contains(k)));
         if self.active {
+            // Shift added to the held key: a command. Pressed again, nothing more.
+            if pressed && SHIFTS.contains(&key) && !combo.contains(key) {
+                if self.commanded {
+                    return None;
+                }
+                self.commanded = true;
+                return Some(Press::Command);
+            }
             if pressed && !combo.contains(key) && !combo.tolerates(key) {
                 self.active = false;
                 return Some(Press::Cancel);
@@ -142,6 +155,7 @@ impl Tracker {
         let extra = self.down.iter().any(|k| !combo.contains(*k) && !combo.tolerates(*k));
         if pressed && held && !extra {
             self.active = true;
+            self.commanded = false;
             return Some(Press::Down);
         }
         None
@@ -220,6 +234,7 @@ impl Watch {
             }
         }
         tracker.active = true;
+        tracker.commanded = false;
         Fix::Revive
     }
 }
@@ -440,6 +455,18 @@ mod tests {
         let held = |k: u32| k != 0xA0;
         assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true, held), Some(Press::Down));
         assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, false, held), Some(Press::Up));
+    }
+
+    #[test]
+    fn shift_while_held_makes_it_a_command() {
+        let mut keys = Tracker::new();
+        keys.key(Combo::CtrlWin, LCONTROL, true, |_| true);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, |_| true), Some(Press::Down));
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA0, true, |_| true), Some(Press::Command));
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA0, false, |_| true), None);
+        assert_eq!(keys.key(Combo::CtrlWin, 0xA1, true, |_| true), None); // once is enough
+        assert!(keys.is_active());
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false, |_| true), Some(Press::Up));
     }
 
     #[test]
