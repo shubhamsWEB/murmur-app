@@ -77,19 +77,30 @@ struct App {
 }
 
 static CATALOG: OnceLock<Mutex<Option<(Instant, Vec<App>)>>> = OnceLock::new();
+static READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The Start menu's apps, read once and again after ten minutes (a second or two the first time: `warm` does it
-/// early, in the background).
+/// The Start menu's apps. Read once (a second or two: `warm` does it early, in the background), then read again in
+/// the background when ten minutes old, the list in hand used meanwhile: a dictation never waits for it.
 fn catalog() -> Vec<App> {
+    use std::sync::atomic::Ordering;
     let cell = CATALOG.get_or_init(|| Mutex::new(None));
-    if let Some((at, apps)) = cell.lock().unwrap().as_ref() {
-        if at.elapsed() < Duration::from_secs(600) {
-            return apps.clone();
+    let kept = cell.lock().unwrap().clone();
+    if let Some((at, apps)) = kept {
+        if at.elapsed() > Duration::from_secs(600) && !READING.swap(true, Ordering::SeqCst) {
+            std::thread::spawn(|| {
+                refresh_catalog();
+                READING.store(false, Ordering::SeqCst);
+            });
         }
+        return apps;
     }
+    refresh_catalog()
+}
+
+fn refresh_catalog() -> Vec<App> {
     let apps = read_catalog();
     if !apps.is_empty() {
-        *cell.lock().unwrap() = Some((Instant::now(), apps.clone()));
+        *CATALOG.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some((Instant::now(), apps.clone()));
     }
     apps
 }

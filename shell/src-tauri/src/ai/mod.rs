@@ -408,8 +408,15 @@ async fn post(url: &str, headers: &[(String, String)], body: &Value, timeout: Du
     Err(AiError::Http { provider, code, detail })
 }
 
-/// Runs one of these async calls from a plain thread (dictation's), never from the async runtime's own threads.
+/// Runs one of these async calls from a plain thread (dictation's), and waits for it. On one of the async runtime's
+/// own threads (a Tauri command), waiting there would abort Murmur ("Cannot start a runtime from within a runtime"):
+/// the thread is handed over to blocking work first.
 pub fn blocking<T>(future: impl std::future::Future<Output = T>) -> T {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
     tauri::async_runtime::block_on(future)
 }
 
@@ -851,6 +858,16 @@ mod tests {
         assert!(!is_key_problem(None));
         let error = AiError::Http { provider: "OpenAI", code: 429, detail: "You exceeded your current quota, please check your plan and billing".into() };
         assert!(error.to_string().contains("no API credit left"));
+    }
+
+    #[test]
+    fn waiting_from_inside_the_runtime_doesnt_abort() {
+        // A Tauri command runs on the async runtime's worker threads: waiting there used to abort Murmur.
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).build().unwrap();
+        let answer = runtime.block_on(async { tokio::spawn(async { blocking(async { 6 * 7 }) }).await.unwrap() });
+        assert_eq!(answer, 42);
+        // And from a plain thread, as dictation's.
+        assert_eq!(std::thread::spawn(|| blocking(async { 1 })).join().unwrap(), 1);
     }
 
     #[test]

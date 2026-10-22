@@ -680,6 +680,19 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     let handle = app.handle().clone();
     let logs = app.path().app_log_dir()?;
     std::fs::create_dir_all(&logs)?;
+    // A release build ends at once on a panic, with nothing on screen: what happened, and where, goes to crash.log.
+    let crash_log = logs.join("crash.log");
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&crash_log) {
+            let _ = writeln!(file, "{seconds} Murmur {} stopped on thread {thread}: {info}\n{}\n",
+                             env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+        }
+        before(info);
+    }));
     let settings_path = match &options.settings {
         Some(path) => path.clone(),
         None => app.path().app_config_dir()?.join("settings.json"),
@@ -1702,9 +1715,12 @@ fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), Str
     Ok(())
 }
 
+// These three ask a model over the network: they're `async` and await it. (A plain command waiting on it with
+// `ai::blocking` would be waiting on the async runtime from inside it, which aborts Murmur.)
+
 /// Saves (or, empty, removes) a provider's API key, then checks it: None when it works, else what's wrong.
-#[tauri::command(async)]
-fn save_api_key(app: AppHandle, provider: String, key: String) -> Result<Option<String>, String> {
+#[tauri::command]
+async fn save_api_key(app: AppHandle, provider: String, key: String) -> Result<Option<String>, String> {
     let provider = ai::Provider::from_name(&provider);
     let account = provider.key_account().ok_or("Ollama doesn't need a key")?;
     // Not a key at all (a key for the other provider, half of one): said before it's saved.
@@ -1718,19 +1734,21 @@ fn save_api_key(app: AppHandle, provider: String, key: String) -> Result<Option<
     if key.trim().is_empty() {
         return Ok(None);
     }
-    Ok(app.state::<Arc<commands::Assistant>>().check(provider))
+    let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
+    Ok(assistant.check(provider).await)
 }
 
 /// Checks a provider (its key, or that Ollama answers): None when it works, else what's wrong.
-#[tauri::command(async)]
-fn check_ai(app: AppHandle, provider: String) -> Option<String> {
-    app.state::<Arc<commands::Assistant>>().check(ai::Provider::from_name(&provider))
+#[tauri::command]
+async fn check_ai(app: AppHandle, provider: String) -> Option<String> {
+    let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
+    assistant.check(ai::Provider::from_name(&provider)).await
 }
 
 /// The models Ollama has (null: it isn't running).
-#[tauri::command(async)]
-fn ollama_models(app: AppHandle) -> Option<Vec<String>> {
-    app.state::<Arc<commands::Assistant>>().ollama_models()
+#[tauri::command]
+async fn ollama_models() -> Option<Vec<String>> {
+    ai::ollama_models().await
 }
 
 /// Forgets one thing Murmur remembers ("fact:<n>"), or everything ("all").

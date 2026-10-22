@@ -18,7 +18,7 @@ tauri-plugin-autostart = "2.5.1"
 notify = "8.2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
 tauri-plugin-updater = "2.13.3"
 # Dictation: the microphone, and Parakeet through sherpa-onnx (its static library, ONNX Runtime inside: nothing more to
 # install beside Murmur.exe).

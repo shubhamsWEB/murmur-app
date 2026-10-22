@@ -162,7 +162,7 @@ impl Assistant {
                 log(&format!("AI clean-up ({what}) gave nothing in {took:.1} s ({error}): typed as heard"));
                 None
             }
-            Ok(reply) => match cleanup::accept(text, &reply.text) {
+            Ok(reply) => match cleanup::accept(text, &ai::output::answer(&reply.text)) {
                 None => {
                     log(&format!("AI clean-up ({what}) changed more than tidying in {took:.1} s: typed as heard"));
                     None
@@ -278,22 +278,18 @@ impl Assistant {
         })
     }
 
-    /// The models Ollama has (None: it isn't running).
-    pub fn ollama_models(&self) -> Option<Vec<String>> {
-        ai::blocking(ai::ollama_models())
-    }
-
-    /// Checks a provider's saved key (or that Ollama answers): None when it works, else what's wrong.
-    pub fn check(&self, provider: ai::Provider) -> Option<String> {
+    /// Checks a provider's saved key (or that Ollama answers): None when it works, else what's wrong. Awaited from
+    /// Settings' commands, which run on the async runtime (where waiting with `ai::blocking` isn't allowed).
+    pub async fn check(&self, provider: ai::Provider) -> Option<String> {
         let config = self.choices().ai;
         if provider == ai::Provider::Local {
             let router = ai::local(&config);
-            return match ai::blocking(router.chat("Reply with OK.", &[Turn::User("OK?".into())], &[], Duration::from_secs(60))) {
+            return match router.chat("Reply with OK.", &[Turn::User("OK?".into())], &[], Duration::from_secs(60)).await {
                 Ok(_) => None,
                 Err(error) => Some(error.to_string()),
             };
         }
-        ai::blocking(ai::verify(provider, &config))
+        ai::verify(provider, &config).await
     }
 }
 
