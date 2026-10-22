@@ -8,7 +8,7 @@ files from a description, and does small jobs for you. Speech is recognised on y
 <p align="center">
   <a href="https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur.dmg"><b>Download Murmur for Mac</b></a>
   ·
-  <a href="#windows-beta">Windows (beta)</a>
+  <a href="https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur-Windows-Setup.exe"><b>Download for Windows</b></a>
   ·
   <a href="https://usemurmur.live/">Website</a>
   ·
@@ -18,7 +18,7 @@ files from a description, and does small jobs for you. Speech is recognised on y
 <p align="center">
   <a href="https://github.com/shubhamsWEB/murmur-app/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/shubhamsWEB/murmur-app?label=release"></a>
   <img alt="macOS 14 or later, Apple silicon" src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20silicon-lightgrey">
-  <img alt="Windows 10 or 11, beta" src="https://img.shields.io/badge/Windows-10%20%C2%B7%2011%20beta-lightgrey">
+  <img alt="Windows 10 or 11" src="https://img.shields.io/badge/Windows-10%20%C2%B7%2011-lightgrey">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
@@ -57,12 +57,12 @@ https://github.com/user-attachments/assets/f2899c74-865d-43b0-b801-a354198d21c6
 
 Murmur needs a Mac with Apple silicon on macOS 14 or later. The speech and search models download on first launch.
 
-### Windows (beta)
+### Windows
 
-Murmur for Windows does dictation (English, Hinglish and 25 European languages) and file search, in the same
-sidebar window as the Mac. Commands and the assistant are Mac-only for now.
+Murmur for Windows does what the Mac app does in the same sidebar window: dictation (English, Hinglish and 25
+European languages), AI clean-up, voice commands and file search.
 
-1. [Download **Murmur-Windows-Setup.exe**](https://github.com/shubhamsWEB/murmur-app/releases/download/windows-beta-1/Murmur-Windows-Setup.exe)
+1. [Download **Murmur-Windows-Setup.exe**](https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur-Windows-Setup.exe)
    and run it. It installs for your account only, so it needs no admin rights.
 2. The installer isn't code-signed yet, so Windows warns about it. If Chrome blocks the download, open its downloads
    (Ctrl + J) and choose **Keep**. If SmartScreen says it protected your PC, click **More info → Run anyway**.
@@ -71,17 +71,31 @@ sidebar window as the Mac. Commands and the assistant are Mac-only for now.
 4. Hold **Ctrl + Windows**, speak, and let go: the words are typed where your cursor is. Right Ctrl or Right Alt can
    be the key instead (Settings, where you also pick the microphone and the language).
 
+| Keys | Does |
+|---|---|
+| Hold **Ctrl + Windows** | Talk. Let go, and it's typed or done. |
+| Double-tap **Ctrl + Windows** | Hands-free: talk as long as you like, tap again to finish. **Esc** cancels. |
+| Hold **Ctrl + Windows + Alt** | Always a command, never typed (as **fn + ⌃** on the Mac). |
+| Hold **Ctrl + Windows + Shift** | Always typed as you said it, never a command. |
+| **Ctrl + Shift + Space** | Search your files by describing them. |
+
+Commands open and close apps, open Settings pages, folders and websites (in the browser you name), change the volume
+and brightness, control media, write in an app, open your files by description, work on selected text ("summarise
+this", "make this more formal") and run PowerShell commands, asking you before anything that changes something. They
+need a model: [Ollama](https://ollama.com) on the PC, or a Claude or OpenAI key, in **Settings → Commands & AI**.
+Common ones ("open Spotify", "volume 30") need none. Reading the screen, clicking and sending messages are Mac-only for
+now.
+
 The Murmur button sits above the taskbar (drag it anywhere; click it to open Murmur), and the listening pill grows out
 of it while you talk.
 
 It needs 64-bit Windows 10 or 11. Speech runs on the processor through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx):
 NVIDIA's Parakeet for English and the European languages, and Oriserve's
 [Whisper-Hindi2Hinglish-Apex](https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex) for Hinglish, as on the Mac.
-Hinglish is a 1 GB model and takes a few seconds per dictation on a processor alone. Nothing you say leaves the PC.
+Hinglish is a 1 GB model and takes a few seconds per dictation on a processor alone; on some PCs it doesn't load yet,
+and Murmur says so. Nothing you say leaves the PC.
 
-The beta doesn't update itself yet: download the newest beta from the
-[releases page](https://github.com/shubhamsWEB/murmur-app/releases) and install it over the old one; your settings,
-index and models stay.
+Murmur for Windows updates itself, as the Mac app does.
 
 ## Using it
 
@@ -188,7 +202,7 @@ echo "Apple Development: Your Name (TEAMID)" > .sign-id
 <summary><b>Windows</b></summary>
 
 The Windows app is the Tauri shell in `shell/` (Rust and HTML), with the search engine (`murmur-engine.exe`, from
-`Sources/MurmurEngine`) as its helper. GitHub Actions builds it (`.github/workflows/windows.yml`, on every push to the `windows` branch): the engine with
+`Sources/MurmurEngine`) as its helper. GitHub Actions builds it (`.github/workflows/windows.yml`: on every push to the `windows` branch, by hand from the Actions tab, and in every release): the engine with
 Swift 6.4, llama.cpp with its Vulkan backend, a small LGPL ffmpeg, then the NSIS installer. The run also transcribes a
 recording with the speech model and installs and launches the app to check that search works.
 
