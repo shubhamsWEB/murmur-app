@@ -3,6 +3,10 @@
 //! or Whisper through sherpa-onnx (speech.rs), the paste (paste.rs). The key (keys.rs) and the paste work on Windows
 //! for now.
 //!
+//! What's said can also be a command (Alt with the key, or told apart by what it says; Shift with the key types it
+//! whatever it says, as ⌃ and ⇧ with Fn on the Mac) or be tidied by the
+//! model before it's typed (AI clean-up): both are commands/mod.rs's, with the model chosen in Commands & AI.
+//!
 //! The speech model (about 650 MB) is downloaded by the helper (`murmur-engine download-speech-model`, checked file by
 //! file) the first time dictation is on, then loaded once and kept warm. The pill (pill.rs, ui/pill.html) shows each
 //! step, opening out of the Murmur button (logo.rs) when it's on.
@@ -17,7 +21,22 @@ pub mod logo;
 pub mod paste;
 mod pill;
 pub mod speech;
+pub mod worker;
 
+/// The pill, for commands: what they're doing, a word for a moment, or closed.
+pub fn pill_show(app: &AppHandle, mode: &str, text: &str) {
+    pill::show(app, mode, text);
+}
+
+pub fn pill_flash(app: &AppHandle, text: &str, tone: &str, seconds: f64) {
+    pill::flash(app, text, tone, seconds);
+}
+
+pub fn pill_hide(app: &AppHandle) {
+    pill::hide(app);
+}
+
+use crate::commands::Assistant;
 use crate::helper::{Launch, ModelDownload};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -61,7 +80,9 @@ struct Inner {
     app: AppHandle,
     config: Mutex<Config>,
     combo: Arc<Mutex<keys::Combo>>,
-    recognizer: Mutex<Option<Arc<speech::Recognizer>>>,
+    recognizer: Mutex<Option<Arc<worker::Engine>>>,
+    /// The log folder (the speech worker's output goes there).
+    logs: PathBuf,
     loading: AtomicBool,
     /// The speech model: {"state": "missing|downloading|checking|waiting|loading|ready|failed", …}.
     model: Mutex<Value>,
@@ -84,6 +105,23 @@ struct Inner {
     history: history::History,
     /// The last dictation, as typed (the tray's Paste Last Dictation). Kept in memory only.
     last: Mutex<Option<String>>,
+    /// What the dictation thread is doing and since when (for the watchdog).
+    busy: Mutex<Option<(Instant, keys::Press)>>,
+    /// Alt was held with the key during this dictation: what's said is a command. Shift: it's typed, whatever it says.
+    command: AtomicBool,
+    typing: AtomicBool,
+    /// Where the words would go, looked at as the key went down (a moment's work, on a thread of its own): the focus
+    /// and selection, and the window in front (its handle, program and title). Taken when the words are in.
+    spot: Arc<Mutex<Option<Place>>>,
+    /// The last dictation as heard, before AI clean-up (the tray's Paste Exactly What I Said).
+    heard: Mutex<Option<String>>,
+}
+
+/// Where the words would go.
+#[derive(Clone, Debug, Default)]
+struct Place {
+    spot: cursor::Spot,
+    front: Option<(isize, String, String)>,
 }
 
 enum Work {
@@ -108,6 +146,7 @@ impl Dictation {
             combo: Arc::new(Mutex::new(config.key)),
             config: Mutex::new(config),
             recognizer: Mutex::new(None),
+            logs: logs.clone(),
             loading: AtomicBool::new(false),
             model: Mutex::new(json!({"state": "missing"})),
             download,
@@ -122,6 +161,11 @@ impl Dictation {
             log: Mutex::new(log),
             history: history::History::open(data),
             last: Mutex::new(None),
+            busy: Mutex::new(None),
+            command: AtomicBool::new(false),
+            typing: AtomicBool::new(false),
+            spot: Arc::new(Mutex::new(None)),
+            heard: Mutex::new(None),
         });
         if let Err(error) = pill::make(app) {
             inner.note(&format!("no pill: {error}"));
@@ -134,15 +178,46 @@ impl Dictation {
             .name("murmur-dictation".into())
             .spawn(move || {
                 for job in jobs {
-                    match job {
-                        Work::Key(keys::Press::Down, at) => worker.key_down(at),
-                        Work::Key(keys::Press::Up, at) => worker.key_up(at),
-                        Work::Key(keys::Press::Cancel, _) => worker.shortcut(),
-                        Work::Key(keys::Press::Escape, _) => worker.escape(),
+                    let Work::Key(press, at) = job;
+                    *worker.busy.lock().unwrap() = Some((Instant::now(), press));
+                    match press {
+                        keys::Press::Down => worker.key_down(at),
+                        keys::Press::Up => worker.key_up(at),
+                        keys::Press::Cancel => worker.shortcut(),
+                        keys::Press::Escape => worker.escape(),
+                        keys::Press::Revived => worker.note("key watcher: Windows had dropped it, so it was put back (this press still counts)"),
+                        keys::Press::Command => worker.mode_key(true),
+                        keys::Press::Typing => worker.mode_key(false),
                     }
+                    *worker.busy.lock().unwrap() = None;
                 }
             })
             .expect("the dictation thread");
+        // Says in the log when the dictation thread is stuck (a microphone that won't open or close, say): every key
+        // press waits behind it, so it would look as if the key had stopped working.
+        let watched = inner.clone();
+        std::thread::Builder::new()
+            .name("murmur-dictation-watchdog".into())
+            .spawn(move || {
+                let mut said: Option<Instant> = None;
+                loop {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let busy = *watched.busy.lock().unwrap();
+                    match busy {
+                        Some((since, press)) if since.elapsed() > Duration::from_secs(8) && said != Some(since) => {
+                            watched.note(&format!("the dictation thread has been busy for {:.0} s with {press:?}: key presses wait behind it",
+                                                  since.elapsed().as_secs_f64()));
+                            said = Some(since);
+                        }
+                        None if said.is_some() => {
+                            watched.note("the dictation thread is free again");
+                            said = None;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("the dictation watchdog");
         if let Err(problem) = keys::listen(inner.combo.clone(), move |press| {
             let _ = work.send(Work::Key(press, Instant::now()));
         }) {
@@ -176,8 +251,16 @@ impl Dictation {
         self.inner.changed();
     }
 
-    /// Settings' Download (or Try Again).
+    /// Settings' Download (or Try Again). After a model that was there didn't load, its files are fetched afresh.
     pub fn download(&self) {
+        let failed = self.inner.model.lock().unwrap()["state"] == "failed";
+        if let (true, Some(folder)) = (failed, self.inner.folder()) {
+            let model = self.inner.config().model;
+            if speech::installed(model, &folder) {
+                self.inner.note("Try Again: the model's files are downloaded afresh");
+                speech::remove(model, &folder);
+            }
+        }
         self.inner.start_download();
     }
 
@@ -193,6 +276,22 @@ impl Dictation {
             std::thread::sleep(Duration::from_millis(250));
             if let Err(error) = paste::insert(&text) {
                 inner.note(&format!("paste last: {error}"));
+                pill::flash(&inner.app, &format!("Couldn't type it: {error}"), "problem", 4.0);
+            }
+        });
+    }
+
+    /// The tray's Paste Exactly What I Said: the last dictation as the speech model heard it, before AI clean-up.
+    pub fn paste_heard(&self) {
+        let inner = self.inner.clone();
+        std::thread::spawn(move || {
+            let Some(text) = inner.heard.lock().unwrap().clone() else {
+                pill::flash(&inner.app, "Nothing dictated yet", "info", 2.0);
+                return;
+            };
+            std::thread::sleep(Duration::from_millis(250));
+            if let Err(error) = paste::insert(&text) {
+                inner.note(&format!("paste heard: {error}"));
                 pill::flash(&inner.app, &format!("Couldn't type it: {error}"), "problem", 4.0);
             }
         });
@@ -290,7 +389,7 @@ impl Inner {
             let result = inner.folder().ok_or("no folder for the speech model".to_string())
                 .and_then(|folder| {
                     let started = Instant::now();
-                    let recognizer = speech::Recognizer::load(model, &folder)?;
+                    let recognizer = worker::Engine::load(model, &folder, &inner.logs.join("speech-worker.log"))?;
                     let warm = recognizer.warm_up();
                     inner.note(&format!("{} model loaded in {:.1} s (warm-up {:.2} s)", model.name(),
                                         started.elapsed().as_secs_f64(), warm));
@@ -307,6 +406,7 @@ impl Inner {
                 Err(error) => {
                     inner.note(&format!("can't load the speech model: {error}"));
                     inner.set_model(json!({"state": "failed", "message": error}));
+                    pill::flash(&inner.app, &format!("Dictation couldn't start: {error}"), "problem", 5.0);
                 }
             }
         });
@@ -398,6 +498,18 @@ impl Inner {
         }
     }
 
+    /// Alt (`command`) or Shift with the key, held from the start or added while talking: a command, or typing only.
+    fn mode_key(&self, command: bool) {
+        if self.recording.lock().unwrap().is_none() {
+            return;
+        }
+        let flag = if command { &self.command } else { &self.typing };
+        if !flag.swap(true, Ordering::SeqCst) {
+            self.note(if command { "Alt held: a command" } else { "Shift held: typed as said" });
+            pill::show(&self.app, "listening", if command { "Listening for a command" } else { "Listening · typing only" });
+        }
+    }
+
     /// Another key pressed with the dictation key held: a shortcut, not dictation.
     fn shortcut(&self) {
         if !self.hands_free.load(Ordering::SeqCst) {
@@ -428,6 +540,11 @@ impl Inner {
                     _ => "Getting dictation ready…".to_string(),
                 },
                 "loading" | "checking" => "Getting dictation ready…".to_string(),
+                // Downloaded but it didn't load, or stopped (the Hinglish worker): another try.
+                "failed" if self.folder().is_some_and(|folder| speech::installed(self.config().model, &folder)) => {
+                    self.load();
+                    "Getting dictation ready…".to_string()
+                }
                 "failed" => "The speech model didn't download · see Murmur's Settings".to_string(),
                 _ => {
                     self.start_download();
@@ -438,6 +555,9 @@ impl Inner {
             return;
         }
         pill::show(&self.app, "starting", "Starting the microphone…");
+        self.command.store(false, Ordering::SeqCst);
+        self.typing.store(false, Ordering::SeqCst);
+        self.look_around();
         let app = self.app.clone();
         let started = Instant::now();
         match audio::Recording::start(&config.microphone, move |level| pill::level(&app, level)) {
@@ -459,6 +579,36 @@ impl Inner {
                 self.note(&format!("microphone: {error}"));
                 pill::flash(&self.app, &format!("Can't use the microphone: {error}"), "problem", 4.0);
             }
+        }
+    }
+
+    /// Where the words would go, looked at now (before the pill or anything else changes it), on a thread of its own:
+    /// UI Automation can take a moment in a busy app. The local model is woken meanwhile, if it'll be needed.
+    fn look_around(&self) {
+        *self.spot.lock().unwrap() = None;
+        let spot = self.spot.clone();
+        std::thread::spawn(move || {
+            let front = crate::commands::front_window();
+            let place = Place { spot: cursor::spot(), front };
+            *spot.lock().unwrap() = Some(place);
+        });
+        if let Some(assistant) = self.app.try_state::<Arc<Assistant>>() {
+            assistant.warm_up();
+        }
+    }
+
+    /// What `look_around` found (waiting for it a moment, if it isn't in yet).
+    fn place(&self) -> Place {
+        let started = Instant::now();
+        loop {
+            if let Some(place) = self.spot.lock().unwrap().clone() {
+                return place;
+            }
+            if started.elapsed() > Duration::from_millis(800) {
+                self.note("couldn't tell where the words were going in time");
+                return Place::default();
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -497,7 +647,7 @@ impl Inner {
     }
 
     /// The words in the recording, typed where the person is (or the pill says why not).
-    fn transcribe_and_type(&self, recognizer: &speech::Recognizer, samples: &[f32], rate: u32, device: &str, quiet: bool) {
+    fn transcribe_and_type(&self, recognizer: &worker::Engine, samples: &[f32], rate: u32, device: &str, quiet: bool) {
         let started = Instant::now();
         let seconds = samples.len() as f64 / rate as f64;
         let leveled = level::normalize_with(samples, rate as f32, if quiet { 40.0 } else { 30.0 },
@@ -507,7 +657,17 @@ impl Inner {
             pill::flash(&self.app, &format!("No sound from {device} · choose another in Settings"), "problem", 4.0);
             return;
         }
-        let text = recognizer.words(&leveled.samples, rate);
+        let text = match recognizer.words(&leveled.samples, rate) {
+            Ok(text) => text,
+            Err(error) => {
+                // The worker stopped (Hinglish): Murmur carries on, and the model loads again on the next press.
+                self.note(&format!("{error}: see speech-worker.log"));
+                *self.recognizer.lock().unwrap() = None;
+                self.set_model(json!({"state": "failed", "message": error}));
+                pill::flash(&self.app, &format!("Dictation stopped: {error} · press the key to try again"), "problem", 5.0);
+                return;
+            }
+        };
         let config = self.config();
         if config.keep_recordings {
             match history::keep_recording(samples, rate, &text, config.model.name()) {
@@ -522,8 +682,60 @@ impl Inner {
             pill::flash(&self.app, "Didn't catch that", "info", 2.0);
             return;
         }
+        let place = self.place();
+        let (program, title) = match &place.front {
+            Some((_, program, title)) => (Some(program.as_str()), Some(title.as_str())),
+            None => (None, None),
+        };
+        let mut words = text.clone();
+        if let Some(assistant) = self.app.try_state::<Arc<Assistant>>() {
+            let assistant = assistant.inner().clone();
+            let forced = self.command.swap(false, Ordering::SeqCst);
+            let typing = self.typing.swap(false, Ordering::SeqCst) && !forced;
+            let mut spot = place.spot.clone();
+            // "Summarise this" with text selected in an app that doesn't say what's selected: copy it.
+            if !typing && spot.selection.is_none() && !spot.terminal && (forced || assistant.choices().detect)
+                && crate::commands::intent::is_about_selection(&text) {
+                spot.selection = paste::copy_selection();
+                if let Some(selection) = &spot.selection {
+                    self.note(&format!("selection: {} characters, copied with Ctrl+C", selection.chars().count()));
+                }
+            }
+            let front_app = program.map(|p| p.trim_end_matches(".exe").trim_end_matches(".EXE").to_string());
+            let decision = if typing {
+                crate::commands::intent::Decision {
+                    intent: crate::commands::intent::Intent::Dictation, reason: "Shift held".into(), explicit: true,
+                }
+            } else {
+                assistant.decide(&text, &spot, front_app.as_deref(), forced)
+            };
+            self.note(&format!("intent: {} ({})", if decision.intent == crate::commands::intent::Intent::Command { "command" } else { "dictation" },
+                               decision.reason));
+            if decision.intent == crate::commands::intent::Intent::Command {
+                if config.keep_history {
+                    self.history.add(&text, None, "command");
+                    self.changed();
+                }
+                let log = |line: &str| self.note(line);
+                assistant.run(&text, &spot, place.front.clone(), decision.explicit, &log);
+                return;
+            }
+            *self.heard.lock().unwrap() = Some(text.clone());
+            if let Some(cleaned) = assistant.clean_up(&text, program, title, &|line: &str| self.note(line)) {
+                words = cleaned;
+            }
+        }
+        if place.spot.text_field == Some(false) {
+            // Nowhere to type (the desktop, a folder's files): pasting there does nothing, or something unexpected.
+            if paste::copy(&words) {
+                self.note("dictation: nowhere to type, copied instead");
+                pill::flash(&self.app, "Nowhere to type here · copied to the clipboard", "info", 3.0);
+                *self.last.lock().unwrap() = Some(words.trim().to_string());
+                return;
+            }
+        }
         // Spacing, the first letter and the last full stop fitted to the sentence it lands in; never the words.
-        let text = cursor::fit(&text);
+        let text = cursor::fit(&words);
         *self.last.lock().unwrap() = Some(text.trim().to_string());
         match paste::insert(&text) {
             Ok(()) => {

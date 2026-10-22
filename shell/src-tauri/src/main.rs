@@ -5,8 +5,10 @@
 // behavior.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod clipboard;
 mod code;
+mod commands;
 mod dictation;
 mod editors;
 mod helper;
@@ -47,6 +49,19 @@ const CENTERED_PANEL: &str = "panel-centered";
 const FIELD_HEIGHT: f64 = 56.0;
 /// The window's label.
 const WINDOW: &str = "main";
+
+/// startup.log in the log folder: each step of starting, and of opening the window, with the time (kept to the last
+/// launch). A launch that stops or hangs shows where.
+static STARTUP_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn step(what: &str) {
+    use std::io::Write;
+    let Some(path) = STARTUP_LOG.get() else { return };
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{millis} {what}");
+    }
+}
 
 /// What the commands and events share.
 struct Shell {
@@ -607,6 +622,11 @@ fn show_window_or_setup(app: &AppHandle) {
 }
 
 fn main() {
+    // Murmur.exe started again as the speech worker (dictation/worker.rs): only that, no app.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(dictation::worker::ARGUMENT) {
+        std::process::exit(dictation::worker::serve(&args[2..]));
+    }
     let options = match Options::from_args() {
         Ok(options) => options,
         Err(error) => {
@@ -652,7 +672,8 @@ fn main() {
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, dictation_info,
-            set_dictation, download_speech_model, logo_clicked, logo_menu, dictation_action
+            set_dictation, download_speech_model, logo_clicked, logo_menu, dictation_action, assistant_info,
+            set_assistant, save_api_key, check_ai, ollama_models, forget_memory, answer_text, answer_fit, answer_close
         ])
         .build(tauri::generate_context!())
         .expect("Murmur couldn't start");
@@ -677,6 +698,22 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     let handle = app.handle().clone();
     let logs = app.path().app_log_dir()?;
     std::fs::create_dir_all(&logs)?;
+    let _ = std::fs::write(logs.join("startup.log"), "");
+    let _ = STARTUP_LOG.set(logs.join("startup.log"));
+    step(&format!("starting Murmur {}", env!("CARGO_PKG_VERSION")));
+    // A release build ends at once on a panic, with nothing on screen: what happened, and where, goes to crash.log.
+    let crash_log = logs.join("crash.log");
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&crash_log) {
+            let _ = writeln!(file, "{seconds} Murmur {} stopped on thread {thread}: {info}\n{}\n",
+                             env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+        }
+        before(info);
+    }));
     let settings_path = match &options.settings {
         Some(path) => path.clone(),
         None => app.path().app_config_dir()?.join("settings.json"),
@@ -758,6 +795,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         logs,
     });
     app.manage(shell.clone());
+    step("settings read; the Murmur button next");
     // Dictation: the key, the pill, the speech model (downloaded by the helper the first time).
     // The Murmur button on screen, where it was left (dictation turns it on or off).
     let at = shell.settings.lock().unwrap().floating_button_at;
@@ -778,15 +816,52 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         dictation::Dictation::start(&handle, config, shell.logs.clone(), &data, move |args, log| helper.launch(args, log))
     };
     app.manage(dictation);
+    step("dictation started");
+    // Commands & AI: what's said as a command is carried out; dictation can be tidied by the model first.
+    let assistant = {
+        let choices = shell.settings.lock().unwrap().assistant();
+        let memory = shell.settings_path.parent().map(|folder| folder.join("memory.json"));
+        let finder = shell.clone();
+        let searcher = handle.clone();
+        let opener = handle.clone();
+        Arc::new(commands::Assistant::new(&handle, memory, choices, commands::Hooks {
+            find: Box::new(move |query| {
+                let request = json!({"op": "search", "q": query, "meaning": true, "limit": 20});
+                match ai::blocking(finder.search.ask(request)) {
+                    Ok(answer) => commands::hits(&answer),
+                    Err(error) => {
+                        eprintln!("murmur-shell: a command's file search failed: {error}");
+                        Vec::new()
+                    }
+                }
+            }),
+            search: Box::new(move |query| {
+                let shell = searcher.state::<Arc<Shell>>();
+                *shell.window_search.lock().unwrap() = Some((query.to_string(), None));
+                later(&searcher, |app| {
+                    let _ = show_window(app);
+                });
+            }),
+            settings: Box::new(move || {
+                later(&opener, |app| {
+                    let _ = show_settings(app);
+                });
+            }),
+        }))
+    };
+    app.manage(assistant);
+    step("commands ready");
     if shell.settings.lock().unwrap().delete_code_index {
         delete_code_index(&shell);
     }
 
     make_panel(&handle, shell.centers_panel())?;
+    step("panel made");
     // No tray (a session without a taskbar, a Linux desktop without one): the hotkey and the panel still work.
     if let Err(error) = make_tray(&handle, &shell) {
         eprintln!("murmur-shell: no tray icon: {error}");
     }
+    step("tray made");
     match shell.shortcut {
         Method::Grab => {
             let hotkey = shell.hotkey();
@@ -852,6 +927,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
             eprintln!("murmur-shell: can't open the window: {error}");
         }
     }
+    step("started");
     watch_hours(&handle);
     updates::start(&handle);
     // The entry that opens Murmur at login is written again: it follows Murmur if it moved, and older ones didn't say
@@ -1125,7 +1201,9 @@ fn show_window_at(app: &AppHandle, page: Option<&str>) -> tauri::Result<()> {
     if position.is_none() {
         builder = builder.center();
     }
+    step("window: making it");
     let window = builder.build()?;
+    step("window: made");
     if let Some((x, y)) = position {
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
@@ -1624,6 +1702,113 @@ fn set_dictation(app: AppHandle, choice: String, value: Value) -> Result<(), Str
     Ok(())
 }
 
+// MARK: Commands & AI (commands/mod.rs)
+
+/// Settings → Commands & AI: the model and keys, AI clean-up, command detection, and what Murmur remembers.
+#[tauri::command(async)]
+fn assistant_info(app: AppHandle) -> Value {
+    app.state::<Arc<commands::Assistant>>().info()
+}
+
+/// One of its choices: "provider" ("local", "anthropic", "openai"), "localModel", "anthropicModel", "openaiModel",
+/// "workspace" (text), "cleanup" and "detect" (true or false), "style" ({category, style}).
+#[tauri::command(async)]
+fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), String> {
+    let shell = app.state::<Arc<Shell>>();
+    let choices = {
+        let mut settings = shell.settings.lock().unwrap();
+        let text = value.as_str().unwrap_or_default().trim().to_string();
+        match choice.as_str() {
+            "provider" => settings.ai_provider = text,
+            "localModel" => settings.local_model = text,
+            "anthropicModel" => settings.anthropic_model = text,
+            "openaiModel" => settings.openai_model = text,
+            "workspace" => settings.anthropic_workspace = text,
+            "cleanup" => settings.ai_cleanup = value.as_bool().unwrap_or(false),
+            "detect" => settings.detect_commands_off = !value.as_bool().unwrap_or(true),
+            "style" => {
+                let category = value["category"].as_str().unwrap_or_default().to_string();
+                let style = value["style"].as_str().unwrap_or_default().to_string();
+                settings.cleanup_styles.insert(category, style);
+            }
+            _ => return Err(format!("no Commands & AI setting called {choice}")),
+        }
+        settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        settings.assistant()
+    };
+    // A new model or key setting: what went wrong before may not any more.
+    if matches!(choice.as_str(), "provider" | "anthropicModel" | "openaiModel" | "workspace") {
+        ai::set_last_error(None);
+    }
+    app.state::<Arc<commands::Assistant>>().set_choices(choices);
+    Ok(())
+}
+
+// These three ask a model over the network: they're `async` and await it. (A plain command waiting on it with
+// `ai::blocking` would be waiting on the async runtime from inside it, which aborts Murmur.)
+
+/// Saves (or, empty, removes) a provider's API key, then checks it: None when it works, else what's wrong.
+#[tauri::command]
+async fn save_api_key(app: AppHandle, provider: String, key: String) -> Result<Option<String>, String> {
+    let provider = ai::Provider::from_name(&provider);
+    let account = provider.key_account().ok_or("Ollama doesn't need a key")?;
+    // Not a key at all (a key for the other provider, half of one): said before it's saved.
+    if !key.trim().is_empty() {
+        if let Some(problem) = ai::check::shape_problem(provider, key.trim()) {
+            return Ok(Some(problem));
+        }
+    }
+    ai::keys::set(account, key.trim())?;
+    ai::set_last_error(None);
+    if key.trim().is_empty() {
+        return Ok(None);
+    }
+    let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
+    Ok(assistant.check(provider).await)
+}
+
+/// Checks a provider (its key, or that Ollama answers): None when it works, else what's wrong.
+#[tauri::command]
+async fn check_ai(app: AppHandle, provider: String) -> Option<String> {
+    let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
+    assistant.check(ai::Provider::from_name(&provider)).await
+}
+
+/// The models Ollama has (null: it isn't running).
+#[tauri::command]
+async fn ollama_models() -> Option<Vec<String>> {
+    ai::ollama_models().await
+}
+
+/// Forgets one thing Murmur remembers ("fact:<n>"), or everything ("all").
+#[tauri::command(async)]
+fn forget_memory(app: AppHandle, id: String) {
+    let assistant = app.state::<Arc<commands::Assistant>>();
+    if id == "all" {
+        assistant.memory.forget(true);
+    } else {
+        assistant.memory.remove(&id);
+    }
+}
+
+// The answer card's commands, off the main thread (commands/answer.rs says why).
+
+/// The answer window's text, as it loads.
+#[tauri::command(async)]
+fn answer_text() -> String {
+    commands::answer::latest()
+}
+
+#[tauri::command(async)]
+fn answer_fit(app: AppHandle, height: f64) {
+    commands::answer::fit(&app, height);
+}
+
+#[tauri::command(async)]
+fn answer_close(app: AppHandle) {
+    commands::answer::close(&app);
+}
+
 /// The Murmur button was clicked: Murmur's window (or setup, the first time).
 #[tauri::command]
 fn logo_clicked(app: AppHandle) {
@@ -1733,6 +1918,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let search = MenuItem::with_id(app, "search", "Search…", true, accelerator.as_deref())?;
     let open = MenuItem::with_id(app, "open", "Open Murmur", true, None::<&str>)?;
     let paste_last = MenuItem::with_id(app, "paste-last", "Paste Last Dictation", true, None::<&str>)?;
+    let paste_heard = MenuItem::with_id(app, "paste-heard", "Paste Exactly What I Said", true, None::<&str>)?;
     let folders = MenuItem::with_id(app, "folders", "Folders…", true, None::<&str>)?;
     let index = MenuItem::with_id(app, "index", "Index Now", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause Indexing", true, None::<&str>)?;
@@ -1742,7 +1928,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &separator, &search, &paste_last, &open, &folders, &index, &pause, &settings, &check,
+        &[&status, &separator, &search, &paste_last, &paste_heard, &open, &folders, &index, &pause, &settings, &check,
           &PredefinedMenuItem::separator(app)?, &quit_item],
     )?;
     // Murmur's logo, in its colors (tray_icon.rs).
@@ -1757,6 +1943,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
             "search" => show_panel(app),
             "open" => show_window_or_setup(app),
             "paste-last" => app.state::<dictation::Dictation>().paste_last(),
+            "paste-heard" => app.state::<dictation::Dictation>().paste_heard(),
             "folders" => later(app, |app| {
                 let set_up = app.state::<Arc<Shell>>().is_set_up();
                 let _ = if set_up { show_window_at(app, Some("folders")) } else { show_setup(app) };

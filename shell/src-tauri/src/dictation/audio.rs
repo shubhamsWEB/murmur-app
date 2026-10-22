@@ -84,11 +84,20 @@ impl Recording {
         })
     }
 
-    /// Stops the microphone; what it heard, mono, at `sample_rate`.
+    /// Stops the microphone; what it heard, mono, at `sample_rate`. Waits at most two seconds for the microphone to
+    /// close: a driver that hangs on closing (a Bluetooth headset gone, the PC just woken) must not hold up the next
+    /// dictation, which would look as if the key had stopped working. A stream that won't close is left to its thread.
     pub fn finish(mut self) -> Vec<f32> {
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let (closed, waited) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = thread.join();
+                let _ = closed.send(());
+            });
+            if waited.recv_timeout(Duration::from_secs(2)).is_err() {
+                eprintln!("murmur-shell: the microphone didn't close within 2 s; going on without waiting");
+            }
         }
         std::mem::take(&mut *self.samples.lock().unwrap())
     }

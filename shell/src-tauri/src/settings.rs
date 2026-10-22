@@ -4,6 +4,7 @@
 
 use crate::hours::Hours;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -56,6 +57,19 @@ pub struct Settings {
     pub history_off: bool,
     pub keep_recordings: bool,
     pub floating_button_at: Option<(i32, i32)>,
+    /// Commands & AI (commands/mod.rs): the model ("" or "local" for Ollama on this PC, "anthropic", "openai"), each
+    /// one's model name ("" for the default), the Anthropic workspace for an organization's key, AI clean-up of
+    /// dictation (off by default, as on the Mac) and its style for each kind of app ("personal": "casual"…), and
+    /// commands told apart from dictation without Shift (on unless turned off). The keys themselves are in Windows'
+    /// Credential Manager, not here.
+    pub ai_provider: String,
+    pub local_model: String,
+    pub anthropic_model: String,
+    pub openai_model: String,
+    pub anthropic_workspace: String,
+    pub ai_cleanup: bool,
+    pub cleanup_styles: BTreeMap<String, String>,
+    pub detect_commands_off: bool,
 }
 
 impl Settings {
@@ -70,6 +84,24 @@ impl Settings {
             floating_button: !self.floating_button_off,
             keep_history: !self.history_off,
             keep_recordings: self.keep_recordings,
+        }
+    }
+}
+
+impl Settings {
+    /// Commands & AI as chosen here.
+    pub fn assistant(&self) -> crate::commands::Choices {
+        crate::commands::Choices {
+            ai: crate::ai::Config {
+                provider: crate::ai::Provider::from_name(&self.ai_provider),
+                local_model: self.local_model.clone(),
+                anthropic_model: self.anthropic_model.clone(),
+                openai_model: self.openai_model.clone(),
+                anthropic_workspace: self.anthropic_workspace.clone(),
+            },
+            cleanup: self.ai_cleanup,
+            styles: self.cleanup_styles.clone(),
+            detect: !self.detect_commands_off,
         }
     }
 }

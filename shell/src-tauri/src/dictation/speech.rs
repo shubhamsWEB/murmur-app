@@ -81,6 +81,15 @@ pub fn installed(model: Model, folder: &Path) -> bool {
     model.files().iter().all(|name| folder.join(name).is_file())
 }
 
+/// Deletes the model's files from `folder`, so the next download fetches (and checks) them all again. The engine
+/// trusts a file it once checked, so a file left from an earlier build of a model stays until it's taken away.
+pub fn remove(model: Model, folder: &Path) {
+    for name in model.files() {
+        let _ = std::fs::remove_file(folder.join(name));
+    }
+}
+
+
 pub struct Recognizer {
     inner: OfflineRecognizer,
     model: Model,

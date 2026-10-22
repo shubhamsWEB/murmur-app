@@ -18,12 +18,18 @@ tauri-plugin-autostart = "2.5.1"
 notify = "8.2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
 tauri-plugin-updater = "2.13.3"
 # Dictation: the microphone, and Parakeet through sherpa-onnx (its static library, ONNX Runtime inside: nothing more to
 # install beside Murmur.exe).
 cpal = "0.18.2"
 sherpa-onnx = "=1.13.8"
+# Commands & AI: Ollama, Claude and OpenAI over HTTPS (the updater's reqwest and rustls, with Windows' own certificate
+# store and proxy settings), and the quick commands' patterns (some look ahead, which `regex` can't).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+regex = "1"
+fancy-regex = "0.14"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -36,10 +42,17 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
                                               "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Memory",
                                               # dictation: the key, the paste, the pill that never takes the focus
                                               "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
-                                              "Win32_System_LibraryLoader", "Win32_Graphics_Dwm"] }
-# dictation: the text around the cursor (UI Automation) and Windows' spell checker, which are COM (dictation/cursor.rs)
+                                              "Win32_System_LibraryLoader", "Win32_Graphics_Dwm",
+                                              # dictation: the key watcher's thread priority
+                                              "Win32_System_Threading",
+                                              # Commands & AI: the API keys in the Credential Manager, locking the PC
+                                              "Win32_Security_Credentials", "Win32_System_Shutdown"] }
+# dictation: the text around the cursor (UI Automation) and Windows' spell checker, which are COM (dictation/cursor.rs);
+# commands: the speakers' volume (commands/actions.rs)
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility",
-                                          "Win32_Globalization", "Win32_UI_WindowsAndMessaging"] }
+                                          "Win32_Globalization", "Win32_UI_WindowsAndMessaging",
+                                          "Win32_Media_Audio", "Win32_Media_Audio_Endpoints",
+                                          "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
 
 # GNOME's shortcut settings, `--toggle` handed to the running Murmur, and the panel's window on Wayland (all already in
 # Tauri's build on Linux).

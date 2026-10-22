@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Murmur</title>
+  <style>
+    /* A command's answer (src-tauri/src/commands/answer.rs): the pill's charcoal and cream, as a card. */
+    :root { --ink: rgba(34, 30, 28, 0.96); --cream: #fbf7f2; --muted: rgba(251, 247, 242, 0.62); --coral: #ff6f61; }
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+    body { font: 400 14px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--cream); }
+    .card {
+      position: absolute; inset: 6px; display: flex; flex-direction: column; border-radius: 14px; background: var(--ink);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset, 0 6px 18px rgba(0, 0, 0, 0.3);
+      opacity: 0; transform: translateY(6px); transition: opacity 0.18s ease-out, transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .card.shown { opacity: 1; transform: none; }
+    header { display: flex; align-items: center; gap: 8px; padding: 10px 12px 0 14px; color: var(--muted); font-size: 12px; }
+    header svg { width: 18px; height: 14px; flex: none; }
+    header .title { flex: 1; font-weight: 600; letter-spacing: 0.02em; }
+    button {
+      font: inherit; font-size: 12px; color: var(--cream); background: rgba(255, 255, 255, 0.08); border: 0;
+      border-radius: 7px; padding: 3px 10px; cursor: pointer;
+    }
+    button:hover { background: rgba(255, 255, 255, 0.16); }
+    button:focus-visible { outline: 2px solid var(--coral); outline-offset: 1px; }
+    #text {
+      flex: 1; margin: 6px 0 12px; padding: 0 16px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;
+      user-select: text; cursor: text;
+    }
+    #text::-webkit-scrollbar { width: 8px; }
+    #text::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 4px; }
+    @media (prefers-reduced-motion: reduce) { .card { transition-duration: 0.01s; } }
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <header>
+      <svg viewBox="10 26 82 62" aria-hidden="true">
+        <path d="M30 58 L12 47 L16 67 Z" fill="#E2554A"/>
+        <ellipse cx="48" cy="60" rx="24" ry="19" fill="#FF6F61"/>
+        <circle cx="66" cy="42" r="13" fill="#FF6F61"/>
+        <path d="M78 40.5 L89 44 L78 47.5 Z" fill="#FBF7F2"/>
+        <circle cx="69" cy="39" r="2.6" fill="#221E1C"/>
+      </svg>
+      <span class="title">Murmur</span>
+      <button id="copy">Copy</button>
+      <button id="close" aria-label="Close">Close</button>
+    </header>
+    <div id="text" tabindex="0"></div>
+  </div>
+  <script>
+    "use strict";
+    const tauri = window.__TAURI__;
+    const invoke = (command, args) => tauri.core.invoke(command, args);
+    const card = document.getElementById("card"), text = document.getElementById("text");
+
+    function show(answer) {
+      text.textContent = answer || "";
+      card.classList.remove("shown");
+      // The window fits the words: header, text and margins, measured once laid out.
+      requestAnimationFrame(() => {
+        const height = 6 + 34 + 6 + text.scrollHeight + 12 + 6 + 2;
+        invoke("answer_fit", { height }).catch(() => {});
+        requestAnimationFrame(() => card.classList.add("shown"));
+        text.scrollTop = 0;
+        document.getElementById("close").focus();
+      });
+    }
+
+    function close() {
+      card.classList.remove("shown");
+      setTimeout(() => invoke("answer_close").catch(() => {}), 120);
+    }
+
+    document.getElementById("copy").onclick = async () => {
+      const button = document.getElementById("copy");
+      try {
+        await navigator.clipboard.writeText(text.textContent);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Couldn't copy";
+      }
+      setTimeout(() => { button.textContent = "Copy"; }, 1400);
+    };
+    document.getElementById("close").onclick = close;
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+    tauri.event.listen("answer", ({ payload }) => show(payload));
+    invoke("answer_text").then((answer) => { if (answer) show(answer); }).catch(() => {});
+  </script>
+</body>
+</html>
