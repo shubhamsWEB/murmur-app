@@ -26,7 +26,32 @@ mkdir -p "$helper"
 cp .build/release/murmur-engine.exe Vendor/llama/lib/*.dll Vendor/pdfium/bin/pdfium.dll "$helper/"
 cp "$swift_runtime"/*.dll "$helper/"
 cp "$crt"/*.dll "$helper/"   # over the Swift runtime's copies of the same: the newer C++ runtime
+# OpenMP's runtime (vcomp140.dll), which llama.cpp's ggml-base and CPU backends are linked with. It's apart from the C++
+# runtime's folder: without it, murmur-engine.exe doesn't start on a PC without Visual Studio's redistributable
+# ("VCOMP140.DLL was not found"), and the speech and search models never download.
+openmp=$(ls -d "$(cygpath "$VCToolsRedistDir")"x64/Microsoft.VC*.OpenMP | tail -1)
+cp "$openmp"/*.dll "$helper/"
 cp Vendor/ffmpeg/bin/ffmpeg.exe Vendor/ffmpeg/bin/ffprobe.exe "$helper/"   # the small static build, no DLLs
+
+# Every DLL the helper's programs and libraries load is in helper\ or comes with Windows itself. The build machine has
+# Visual Studio's runtimes installed, so a missing one would pass every check here and fail on the person's PC: those
+# are refused unless they're in helper\. vulkan-1.dll comes with the graphics driver, and ggml-vulkan.dll is loaded only
+# where it's there.
+missing=
+for file in "$helper"/*.exe "$helper"/*.dll; do
+  for dll in $(dumpbin //nologo //dependents "$(cygpath -w "$file")" | tr -d '\r' | grep -iE '^ +[^ ]+\.dll$' | tr -d ' '); do
+    lower=$(echo "$dll" | tr '[:upper:]' '[:lower:]')
+    [[ -e "$helper/$dll" ]] && continue
+    case "$lower" in api-ms-*|ext-ms-*|vulkan-1.dll) continue ;; esac
+    if [[ $lower =~ ^(vcomp|vcruntime|msvcp|concrt|vccorlib|ucrtbased|msvcr) || ! -e "/c/Windows/System32/$dll" ]]; then
+      missing+=" $(basename "$file")→$dll"
+    fi
+  done
+done
+if [[ -n $missing ]]; then
+  echo "the installer would be missing DLLs these need:$missing" >&2
+  exit 1
+fi
 
 # With the release's signing key (TAURI_SIGNING_PRIVATE_KEY, and its password) the packages that update themselves are
 # signed for in-app updates (a .sig beside each). Installed copies check those signatures with the public key in
