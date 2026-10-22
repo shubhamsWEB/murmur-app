@@ -83,8 +83,6 @@ struct Inner {
     recognizer: Mutex<Option<Arc<worker::Engine>>>,
     /// The log folder (the speech worker's output goes there).
     logs: PathBuf,
-    /// The model's files were found wrong and downloaded again this launch (once: a second failure is shown).
-    repaired: AtomicBool,
     loading: AtomicBool,
     /// The speech model: {"state": "missing|downloading|checking|waiting|loading|ready|failed", …}.
     model: Mutex<Value>,
@@ -149,7 +147,6 @@ impl Dictation {
             config: Mutex::new(config),
             recognizer: Mutex::new(None),
             logs: logs.clone(),
-            repaired: AtomicBool::new(false),
             loading: AtomicBool::new(false),
             model: Mutex::new(json!({"state": "missing"})),
             download,
@@ -406,15 +403,6 @@ impl Inner {
                     inner.set_model(json!({"state": "ready"}));
                 }
                 Ok(_) => inner.prepare(),
-                // Files from another build of the model, or damaged: fetched again, and checked, once.
-                Err(error) if speech::files_wrong(&error) && !inner.repaired.swap(true, Ordering::SeqCst) => {
-                    inner.note(&format!("can't load the speech model ({error}): its files are wrong, so they're downloaded again"));
-                    if let Some(folder) = inner.folder() {
-                        speech::remove(model, &folder);
-                    }
-                    inner.set_model(json!({"state": "missing"}));
-                    inner.start_download();
-                }
                 Err(error) => {
                     inner.note(&format!("can't load the speech model: {error}"));
                     inner.set_model(json!({"state": "failed", "message": error}));

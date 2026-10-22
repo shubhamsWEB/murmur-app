@@ -89,13 +89,6 @@ pub fn remove(model: Model, folder: &Path) {
     }
 }
 
-/// Whether a load failure says the files themselves are wrong (from another build of the model, or damaged): sherpa-onnx
-/// missing a value in a model's metadata, or ONNX Runtime unable to read it. Then a fresh download fixes it.
-pub fn files_wrong(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    ["does not exist in the metadata", "protobuf parsing failed", "load model from", "invalid model", "no graph",
-     "couldn't load the speech model"].iter().any(|sign| lower.contains(sign))
-}
 
 pub struct Recognizer {
     inner: OfflineRecognizer,
@@ -249,13 +242,6 @@ mod tests {
     fn tidies_spaces() {
         assert_eq!(tidy("  Hello   there.\n "), "Hello there.");
         assert_eq!(tidy(""), "");
-    }
-
-    #[test]
-    fn wrong_files_are_told_apart() {
-        assert!(files_wrong("the speech model stopped while loading (exception 0xFFFFFFFF: D:\\a\\sherpa-onnx\\csrc\\\
-                             offline-whisper-model.cc:InitEncoder:355 'n_mels' does not exist in the metadata)"));
-        assert!(!files_wrong("the speech model stopped (exception 0xC0000005)"));
     }
 
     #[test]
