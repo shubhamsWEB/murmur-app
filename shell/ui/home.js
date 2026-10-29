@@ -74,6 +74,7 @@ function dotClass(element, ready, big) {
 }
 
 function render() {
+  renderVersion();
   const ready = readiness();
   dotClass($("ready-dot"), ready, false);
   $("ready-title").textContent = ready.title;
@@ -144,6 +145,21 @@ function setPill(element, [text, tone]) {
 
 // This week (from Monday, on this PC's calendar): words dictated, minutes saved against typing (about 40 words a
 // minute typed, 150 spoken, as on the Mac), and words today. The history has when and how many words, never the text.
+/// This version under the brand, and the card that offers a newer one (updates.rs: available, downloading, installing).
+function renderVersion() {
+  $("side-version").textContent = settings.version ? ` · ${settings.version}` : "";
+  const update = settings.state && settings.state.update;
+  $("update-card").hidden = !update;
+  if (!update) return;
+  const busy = update.state === "downloading" || update.state === "installing";
+  $("update-card-title").textContent = update.state === "downloading"
+    ? `Downloading Murmur ${update.version}…` + (update.percent != null ? ` ${update.percent}%` : "")
+    : update.state === "installing" ? `Installing Murmur ${update.version}…` : `Murmur ${update.version} is ready`;
+  $("update-card-detail").textContent = settings.version ? `You have ${settings.version}` : "";
+  $("update-now").hidden = busy;
+}
+$("update-now").addEventListener("click", () => invoke("offer_update").catch(() => {}));
+
 function renderWeek() {
   const on = dictation?.keepHistory !== false;
   $("week-off").hidden = on;

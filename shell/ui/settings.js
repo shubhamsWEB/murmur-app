@@ -178,6 +178,11 @@ function renderUpdates() {
   version.textContent = !update ? `Murmur ${info.version}`
     : update.state === "downloading" ? `Downloading Murmur ${update.version}…` + (update.percent != null ? ` ${update.percent}%` : "")
     : update.state === "installing" ? `Installing Murmur ${update.version}…` : `Murmur ${update.version} is available`;
+  const button = $("check-now");
+  button.textContent = update ? "Update Now" : "Check Now";
+  button.classList.toggle("primary", Boolean(update));
+  button.classList.toggle("secondary", !update);
+  button.disabled = Boolean(update) && update.state !== "available";
 }
 
 $("licenses").onclick = () => invoke("open_licenses").catch(fail);
@@ -186,6 +191,7 @@ $("update-version").onclick = () => {
   if (info.state && info.state.update) invoke("offer_update").catch(fail);
 };
 $("check-now").onclick = async () => {
+  if (info.state && info.state.update) return invoke("offer_update").catch(fail);
   $("problem").hidden = true;
   $("check-now").disabled = true;
   try {
@@ -194,6 +200,7 @@ $("check-now").onclick = async () => {
     fail(error);
   }
   $("check-now").disabled = false;
+  renderUpdates();
 };
 
 /// A switch: the shell does it, or the box goes back and says why.

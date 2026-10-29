@@ -101,6 +101,17 @@ body { flex-direction: row; background: var(--page); color: var(--ink); }
 .dot.dot-lg { width: 10px; height: 10px; box-shadow: 0 0 0 4px color-mix(in srgb, var(--good-dot) 16%, transparent); }
 .dot.dot-lg.busy, .dot.dot-lg.problem { box-shadow: 0 0 0 4px color-mix(in srgb, var(--coral) 16%, transparent); }
 @keyframes breathe { 50% { opacity: 0.45; } }
+/* A newer Murmur is waiting (updates.rs): which, and the button that installs it. */
+.update-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 0 12px 8px; padding: 10px 12px;
+  border-radius: 10px; background: var(--accent-tint); border: 1px solid var(--accent-ring); color: var(--ink);
+}
+.update-card[hidden] { display: none; }
+.update-now {
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; background: var(--accent); color: white;
+  border: 0; cursor: pointer;
+}
+.update-now:disabled { opacity: 0.55; cursor: default; }
 .about-link { margin: 10px 10px 14px; font-size: 12px; color: var(--ink2); font-weight: 400; }
 .about-link[aria-current="page"] { color: var(--ink); font-weight: 600; }
 

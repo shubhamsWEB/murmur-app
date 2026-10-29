@@ -229,7 +229,7 @@ private struct Sidebar: View {
                 BrandTile(size: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Murmur").font(.system(size: 15, weight: .semibold)).tracking(-0.2)
-                    Text("Voice for your Mac").font(.system(size: 11)).foregroundStyle(Theme.ink2)
+                    Text("Voice for your Mac · \(AppVersion.current)").font(.system(size: 11)).foregroundStyle(Theme.ink2)
                 }
             }
             .padding(.horizontal, 18)
@@ -254,6 +254,9 @@ private struct Sidebar: View {
             }
             .padding(.horizontal, 10)
             Spacer(minLength: 16)
+            if let version = app.model.updateAvailable {
+                updateCard(version).padding(.horizontal, 12).padding(.bottom, 8)
+            }
             statusCard.padding(.horizontal, 12)
             Button {
                 state.section = .about
@@ -316,6 +319,23 @@ private struct Sidebar: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// A newer Murmur is waiting: say which, and install it from here (Sparkle's window, with Install).
+    private func updateCard(_ version: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Murmur \(version) is ready").font(.system(size: 12, weight: .semibold))
+                Text("You have \(AppVersion.current)").font(.system(size: 11)).foregroundStyle(Theme.ink2).lineLimit(1)
+            }
+            Button("Update Now") { app.updates.checkNow() }
+                .buttonStyle(.murmurPrimaryCompact)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentTint))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.accentRing))
     }
 
     private var statusCard: some View {
@@ -1614,8 +1634,31 @@ private struct FoldersPage: View {
 
 // MARK: - About
 
+/// The version people see ("1.4.1"), from the app's Info.plist.
+enum AppVersion {
+    static var current: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
+    }
+}
+
 private struct AboutPage: View {
     let app: AppController
+
+    /// This version, whether a newer one is waiting, and the button that gets it.
+    @ViewBuilder private var updatesRow: some View {
+        if !Updates.hasFeed {
+            SettingRow(title: "Version \(AppVersion.current)", detail: "This build doesn't check for updates.") { EmptyView() }
+        } else if let version = app.model.updateAvailable {
+            SettingRow(title: "Murmur \(version) is available", detail: "You have \(AppVersion.current). It installs and restarts Murmur.") {
+                Button("Update Now") { app.updates.checkNow() }.buttonStyle(.murmurPrimary)
+            }
+        } else {
+            SettingRow(title: "Version \(AppVersion.current)", detail: app.updates.automaticallyChecks
+                       ? "Murmur looks for a newer version every day." : "Automatic checks are off.") {
+                Button("Check for Updates") { app.updates.checkNow() }.buttonStyle(.murmurSecondary)
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -1625,12 +1668,15 @@ private struct AboutPage: View {
                     .frame(width: 72, height: 72)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Murmur").font(.system(size: 26, weight: .semibold)).tracking(-0.4)
-                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                    Text("Version \(AppVersion.current)")
                         .font(.system(size: 13)).foregroundStyle(Theme.ink2)
                 }
             }
             Text("Talk anywhere. Find anything. Get it done.")
                 .font(.system(size: 18, weight: .medium))
+            SettingsSection("Updates") {
+                updatesRow
+            }
             SettingsSection("Help") {
                 SettingRow(title: "Run setup again", detail: "Permissions, the talk key, the speech model and the folders to search.") {
                     Button("Start…") { app.showOnboarding() }.buttonStyle(.murmurSecondary)
