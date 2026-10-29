@@ -354,6 +354,7 @@ public final class DictationController: ObservableObject {
             DispatchQueue.main.async { self?.log("dictation: microphone \(granted ? "allowed" : "denied")") }
         }
         startMonitor(prompt: true)
+        watchTrust()
         hud.prewarm()
         logo.setEnabled(showLogo)
         Task.detached(priority: .background) { WhisperTranscriber.removeDroppedModels() }
@@ -1016,6 +1017,48 @@ public final class DictationController: ObservableObject {
         retryTimer?.invalidate()
         retryTimer = nil
         log("dictation: Accessibility granted, watching \(monitor.key.display)")
+        recheckTrust()
+    }
+
+    /// Accessibility and the key, as the windows show them, published so they redraw when either changes:
+    /// `canPaste` and `isListeningForKey` are read straight from macOS, and a grant in System Settings changed nothing
+    /// on screen (Home kept saying "Murmur can't type into other apps yet" while dictation worked). Checked every two
+    /// seconds, when macOS says the setting changed, and when Murmur comes to the front; each change is logged, the
+    /// state at launch too.
+    @Published public private(set) var accessibilityAllowed = false
+    @Published public private(set) var keyWatched = false
+    private var trustChecked = false
+    private var trustObservers: [NSObjectProtocol] = []
+    private var trustTimer: Timer?
+
+    private func recheckTrust() {
+        let trusted = AXIsProcessTrusted(), listening = monitor.isRunning
+        guard !trustChecked || trusted != accessibilityAllowed || listening != keyWatched else { return }
+        log("dictation: Accessibility \(trusted ? "allowed" : "not allowed"), key \(listening ? "watched" : "not watched")"
+            + (trustChecked ? "" : " (at launch)"))
+        trustChecked = true
+        accessibilityAllowed = trusted
+        keyWatched = listening
+        // Allowed while the key wasn't being watched (the retry timer stops once it starts): start now.
+        if trusted, !listening { retryMonitor() }
+    }
+
+    private func watchTrust() {
+        guard trustObservers.isEmpty else { return }
+        recheckTrust()
+        let recheck: (Notification) -> Void = { [weak self] _ in
+            // The setting applies a moment after its notification.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.recheckTrust() }
+        }
+        trustObservers = [
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.apple.accessibility.api"), object: nil, queue: .main, using: recheck),
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main, using: recheck),
+        ]
+        trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async { self?.recheckTrust() }
+        }
     }
 
     static func openPrivacyPane(_ anchor: String) {

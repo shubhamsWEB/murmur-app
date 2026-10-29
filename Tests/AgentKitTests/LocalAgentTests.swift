@@ -354,6 +354,29 @@ struct PDFTextTests {
         #expect(PDFText.pagesMentioned("explain pages 5 to 7") == "5 to 7")
         #expect(PDFText.pagesMentioned("Did you read all the 21 pages?") == "")
         #expect(PDFText.pagesMentioned("Understand and summarize this PDF.") == "")
+        // Said rather than typed.
+        #expect(PDFText.pagesMentioned("Summarize page one to page twenty two.") == "1 to 22")
+        #expect(PDFText.pages(PDFText.pagesMentioned("Summarize page one to page twenty two."), of: 470) == Array(1...22))
+        #expect(PDFText.pagesMentioned("pages 5 through 7 please") == "5 to 7")
+        #expect(PDFText.pagesMentioned("explain page one hundred and five") == "105")
+        #expect(PDFText.digits("summarise forty-one of them") == "summarise 41 of them")
+        #expect(PDFText.span(Array(1...22)) == "1–22")
+        #expect(PDFText.span([3, 8, 9, 10]) == "3, 8–10")
+    }
+    /// The file a document window shows, from its title, when Accessibility doesn't give its address.
+    @MainActor @Test func aDocumentWindowsFile() {
+        #expect(FrontDocument.fileName(fromTitle: "UPANISHADIC_PHILOSOPHY.pdf – Page 17 of 470") == "UPANISHADIC_PHILOSOPHY.pdf")
+        #expect(FrontDocument.fileName(fromTitle: "Q3 - Report.pdf") == "Q3 - Report.pdf")
+        #expect(FrontDocument.fileName(fromTitle: "Notes.docx — Edited") == "Notes.docx")
+        #expect(FrontDocument.fileName(fromTitle: "Inbox – Gmail") == nil)
+    }
+    /// "The PDF is open, you can scroll and read it" is about the one on screen, not a search for files.
+    @Test func sentencesAboutTheOpenPDFAreNotSearches() {
+        #expect(QuickCommands.parse("The PDF is open itself, you can scroll up and down and read it.")?.tool != "search_files")
+        #expect(QuickCommands.parse("the pdf is open only, you can scroll and read the complete preface")?.tool != "search_files")
+        #expect(QuickCommands.parse("photos of the dog")?.tool == "search_files")
+        #expect(QuickCommands.parse("the pdf about my lease")?.tool == "search_files")
+        #expect(ToolGroup.offers("read_document", in: []))
     }
     @Test func whatIsAPDF() {
         #expect(PDFText.isPDF(url: "https://arxiv.org/pdf/2610.12345", title: "Cache Engineering for Agents"))
