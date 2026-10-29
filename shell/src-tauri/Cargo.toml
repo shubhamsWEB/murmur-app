@@ -48,11 +48,14 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
                                               # Commands & AI: the API keys in the Credential Manager, locking the PC
                                               "Win32_Security_Credentials", "Win32_System_Shutdown"] }
 # dictation: the text around the cursor (UI Automation) and Windows' spell checker, which are COM (dictation/cursor.rs);
-# commands: the speakers' volume (commands/actions.rs)
+# commands: the speakers' volume (commands/actions.rs); search: Windows' OCR for pictures' text (ocr.rs)
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility",
                                           "Win32_Globalization", "Win32_UI_WindowsAndMessaging",
                                           "Win32_Media_Audio", "Win32_Media_Audio_Endpoints",
-                                          "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
+                                          "Win32_System_Com_StructuredStorage", "Win32_System_Variant",
+                                          # search: text in screenshots and photos, with Windows' own OCR (ocr.rs)
+                                          "Win32_System_WinRT", "Foundation", "Foundation_Collections",
+                                          "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams"] }
 
 # GNOME's shortcut settings, `--toggle` handed to the running Murmur, and the panel's window on Wayland (all already in
 # Tauri's build on Linux).

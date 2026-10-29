@@ -16,6 +16,53 @@ public enum PageDigest {
                 && cleaned.range(of: page, options: .regularExpression) != nil)
     }
 
+    /// "how many unread emails", "list all my pending invoices", "which is the cheapest", "reply to every comment",
+    /// "the latest message", "saare messages padho": the answer (or the thing to act on) can be anywhere in a list,
+    /// chat, feed or table, not only in its first screenful. `cleaned`: QuickCommands.clean of the request.
+    public static func wantsEverything(_ cleaned: String) -> Bool {
+        if wantsWholePage(cleaned) { return true }
+        let pattern = #"\b(all|every|each|everything|entire|whole|how many|count|total|list|compare|cheapest|lowest|highest|most|least|latest|newest|oldest|unread|pending|missed|sab|sabhi|saare|sare|saari|sari|kitne|kitni|har ek)\b"#
+        return cleaned.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    /// What was read so far, with one more screenful after scrolling: the lines the two share (the end of what was
+    /// read, the top of the new screen) are kept once. A header that stays put at the top of every screen (a table's
+    /// column names, a chat's title) is allowed for. With nothing shared, the screen jumped further than a screenful:
+    /// it's added after. Lines that legitimately repeat ("Reply", "10:30") are kept wherever they aren't the overlap.
+    public static func merge(_ read: [String], _ screen: [String]) -> [String] {
+        guard !read.isEmpty else { return screen }
+        guard !screen.isEmpty else { return read }
+        for skip in 0...min(3, screen.count - 1) {
+            let rest = screen[(screen.startIndex + skip)...]
+            let most = min(read.count, rest.count)
+            let fewest = skip == 0 ? 1 : 2
+            guard most >= fewest else { continue }
+            for size in stride(from: most, through: fewest, by: -1)
+            where read[(read.count - size)...].elementsEqual(rest.prefix(size)) {
+                return read + rest.dropFirst(size)
+            }
+        }
+        // Nothing new at all (the screen didn't move): every line of it is already in what was read, in order.
+        if screen.count <= read.count, contains(Array(read.suffix(screen.count + 3)), inOrder: screen) {
+            return read
+        }
+        return read + screen
+    }
+
+    private static func contains(_ lines: [String], inOrder wanted: [String]) -> Bool {
+        var index = lines.startIndex
+        for line in wanted {
+            guard let found = lines[index...].firstIndex(of: line) else { return false }
+            index = found + 1
+        }
+        return true
+    }
+
+    /// Text in lines for `merge`: trimmed, empty ones left out.
+    public static func lines(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
     /// The page in parts of about `size` characters, broken at a paragraph (else a line, else a sentence) so no
     /// part starts mid-thought.
     public static func parts(_ text: String, size: Int) -> [String] {
@@ -49,6 +96,7 @@ public enum PageDigest {
         "The user's request: \"\(request)\"\nThe page: \(title) (\(url))\nPart \(part) of \(count):\n\"\"\"\n\(text)\n\"\"\"\n\n"
             + "Notes on this part for the request: every point, fact, name, number, step and opinion in it that "
             + "matters, as short lines starting with \"- \", in the page's order. Leave out menus, ads and links. "
+            + "Where the text marks pages (\"--- Page 10 of 21 ---\"), start each note with its page (\"p. 10: \"). "
             + "If nothing in this part matters, write \"- (nothing here for the request)\"."
     }
 

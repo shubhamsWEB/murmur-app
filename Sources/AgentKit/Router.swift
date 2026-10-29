@@ -192,6 +192,15 @@ enum HTTP {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// The screenshots still sent as images in a conversation: the latest two.
+    static func keptScreenshots(_ turns: [RouterTurn]) -> Set<String> {
+        var all: [String] = []
+        for turn in turns {
+            if case .toolResult(_, _, let content) = turn { all += VisionText.split(content).ids }
+        }
+        return VisionText.kept(all)
+    }
+
     static func plain(_ arguments: [String: JSONValue]) -> [String: Any] {
         (try? JSONSerialization.jsonObject(with: Data(jsonString(arguments).utf8))) as? [String: Any] ?? [:]
     }
@@ -216,6 +225,7 @@ public struct AnthropicRouter: Router {
 
     private func messages(_ turns: [RouterTurn]) -> [[String: Any]] {
         var out: [[String: Any]] = []
+        let kept = HTTP.keptScreenshots(turns)
         for turn in turns {
             switch turn {
             case .user(let text):
@@ -229,7 +239,19 @@ public struct AnthropicRouter: Router {
                 }
                 out.append(["role": "assistant", "content": blocks])
             case .toolResult(let id, _, let content):
-                let block: [String: Any] = ["type": "tool_result", "tool_use_id": id, "content": content]
+                // A screenshot in the result goes in as an image (the latest two; older ones are only mentioned).
+                let (text, shots) = VisionText.split(content)
+                var parts: [[String: Any]] = [["type": "text", "text": text.isEmpty ? "(screenshot)" : text]]
+                for shot in shots {
+                    if kept.contains(shot), let jpeg = ScreenshotStore.shared.get(shot) {
+                        parts.append(["type": "image", "source": ["type": "base64", "media_type": "image/jpeg",
+                                                                  "data": jpeg.base64EncodedString()]])
+                    } else {
+                        parts.append(["type": "text", "text": "(an older screenshot, left out)"])
+                    }
+                }
+                let block: [String: Any] = ["type": "tool_result", "tool_use_id": id,
+                                            "content": shots.isEmpty ? content as Any : parts as Any]
                 // Consecutive results belong in one user message.
                 if var last = out.last, last["role"] as? String == "user", var blocks = last["content"] as? [[String: Any]],
                    blocks.first?["type"] as? String == "tool_result" {
@@ -317,7 +339,22 @@ public struct OpenAIRouter: Router {
 
     private func messages(system: String, _ turns: [RouterTurn]) -> [[String: Any]] {
         var out: [[String: Any]] = [["role": "system", "content": system]]
+        let kept = HTTP.keptScreenshots(turns)
+        // Tool messages can't carry images: a screenshot goes in a user message right after the step's results.
+        var pending: [String] = []
+        func flush() {
+            let images = pending.compactMap { ScreenshotStore.shared.get($0) }
+            pending = []
+            guard !images.isEmpty else { return }
+            var parts: [[String: Any]] = [["type": "text", "text": "The screenshot from the step above:"]]
+            for jpeg in images {
+                parts.append(["type": "image_url",
+                              "image_url": ["url": "data:image/jpeg;base64," + jpeg.base64EncodedString()]])
+            }
+            out.append(["role": "user", "content": parts])
+        }
         for turn in turns {
+            if case .toolResult = turn {} else { flush() }
             switch turn {
             case .user(let text):
                 out.append(["role": "user", "content": text])
@@ -331,9 +368,13 @@ public struct OpenAIRouter: Router {
                 }
                 out.append(message)
             case .toolResult(let id, _, let content):
-                out.append(["role": "tool", "tool_call_id": id, "content": content])
+                let (text, shots) = VisionText.split(content)
+                out.append(["role": "tool", "tool_call_id": id, "content": shots.isEmpty ? content
+                            : text + (shots.contains(where: kept.contains) ? "\n(Screenshot below.)" : "\n(An older screenshot, left out.)")])
+                pending += shots.filter(kept.contains)
             }
         }
+        flush()
         return out
     }
 
@@ -434,7 +475,8 @@ public struct OllamaRouter: Router {
                 }
                 out.append(["role": "assistant", "content": text, "tool_calls": list])
             case .toolResult(_, let name, let content):
-                out.append(["role": "tool", "tool_name": name, "content": content])
+                // This model doesn't see images: the screenshot's description is already in the text.
+                out.append(["role": "tool", "tool_name": name, "content": VisionText.split(content).text])
             }
         }
         return out

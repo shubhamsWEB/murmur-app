@@ -339,27 +339,78 @@ public enum BrowserControl {
             if height == last { break }
             last = height
         }
-        let take = #"""
+        // What the page holds now, without moving it.
+        let snapshot = #"""
         (() => {
           const box = (window.__murmurBox && window.__murmurBox.isConnected) ? window.__murmurBox : null;
           const root = box || document.body || document.documentElement;
           const text = (root.innerText || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-          const start = window.__murmurStart || 0;
-          delete window.__murmurStart;
-          if (box) box.scrollTop = start; else scrollTo(0, start);
           return JSON.stringify({ title: document.title, url: location.href, text: text.slice(0, LIMIT) });
         })()
         """#.replacingOccurrences(of: "LIMIT", with: String(limit))
-        switch await evaluate(take, in: browser) {
-        case .failure(let failure): return .failure(failure)
-        case .success(let json):
+        // Moves the part that scrolls: to the top, or down a screenful ("end" when it's there).
+        let move = #"""
+        ((how) => {
+          const box = (window.__murmurBox && window.__murmurBox.isConnected) ? window.__murmurBox : null;
+          const page = document.scrollingElement || document.documentElement;
+          const el = box || page;
+          const view = box ? box.clientHeight : innerHeight;
+          if (how === 'top') { if (box) box.scrollTop = 0; else scrollTo(0, 0); return 'ok'; }
+          if (how === 'back') {
+            const start = window.__murmurStart || 0;
+            delete window.__murmurStart;
+            if (box) box.scrollTop = start; else scrollTo(0, start);
+            return 'ok';
+          }
+          const before = box ? box.scrollTop : scrollY;
+          if (box) box.scrollTop = before + view * 0.85; else scrollTo(0, before + view * 0.85);
+          const after = box ? box.scrollTop : scrollY;
+          return after === before || after + view >= el.scrollHeight - 4 ? 'end' : 'ok';
+        })(HOW)
+        """#
+        func parse(_ json: String) -> (title: String, url: String, text: String) {
             guard let data = json.data(using: .utf8),
                   let page = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return .success((title: "", url: "", text: json))
+                return (title: "", url: "", text: json)
             }
-            return .success((title: page["title"] as? String ?? "", url: page["url"] as? String ?? "",
-                             text: page["text"] as? String ?? ""))
+            return (title: page["title"] as? String ?? "", url: page["url"] as? String ?? "",
+                    text: page["text"] as? String ?? "")
         }
+        func moved(_ how: String) async -> String {
+            (try? await evaluate(move.replacingOccurrences(of: "HOW", with: literal(how)), in: browser).get()) ?? "end"
+        }
+        let atEnd: (title: String, url: String, text: String)
+        switch await evaluate(snapshot, in: browser) {
+        case .failure(let failure):
+            _ = await moved("back")
+            return .failure(failure)
+        case .success(let json): atEnd = parse(json)
+        }
+        // Most pages hold all their text however they're scrolled. Lists that keep only what's near the screen
+        // (Gmail, X, Slack, LinkedIn's feed) don't: at the end, the top is gone. Those are read a screenful at a time
+        // from the top, each joined to the last.
+        _ = await moved("top")
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        guard case .success(let json) = await evaluate(snapshot, in: browser) else {
+            _ = await moved("back")
+            return .success(atEnd)
+        }
+        let atTop = parse(json)
+        let opening = PageDigest.lines(atTop.text).prefix(6)
+        if opening.allSatisfy({ atEnd.text.contains($0) }) {
+            _ = await moved("back")
+            return .success(atEnd)
+        }
+        var lines = PageDigest.lines(atTop.text)
+        for _ in 0..<60 {
+            let place = await moved("down")
+            try? await Task.sleep(nanoseconds: 700_000_000)   // what loads as it comes into view
+            guard case .success(let json) = await evaluate(snapshot, in: browser) else { break }
+            lines = PageDigest.merge(lines, PageDigest.lines(parse(json).text))
+            if place == "end" || lines.reduce(0, { $0 + $1.count + 1 }) >= limit { break }
+        }
+        _ = await moved("back")
+        return .success((title: atTop.title, url: atTop.url, text: String(lines.joined(separator: "\n").prefix(limit))))
     }
 
     /// Clicks the link or button whose words best match `target` (exact, then starts with, then contains).

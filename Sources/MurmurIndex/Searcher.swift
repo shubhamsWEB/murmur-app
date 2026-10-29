@@ -112,6 +112,18 @@ public final class Searcher {
     public static let wordWeight = 2.0
     public static let codeWordWeight = 1.0
 
+    /// What a picture shows (`SegmentKind.labels`) counts for keyword search. False: left out (for evals).
+    nonisolated(unsafe) public static var useLabels = true
+    /// A query that asks for a kind of file ("cat photo", "video of the beach") and finds nothing that clears the gate
+    /// gets the few of that kind that come closest (`nearMiss`), instead of nothing. False: nothing (for evals).
+    nonisolated(unsafe) public static var nearMisses = true
+    /// How far a near miss must stand out among the files of its kind (not among everything: photos score lower than
+    /// text for the same topic, so one that clearly stands out among your photos can still sit low overall), how many
+    /// files of that kind there must be to tell, and how many near misses are shown.
+    public static let nearMissGate = 2.0
+    public static let nearMissMinimum = 5
+    public static let nearMissCount = 3
+
     public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
                        zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
@@ -149,10 +161,11 @@ public final class Searcher {
         }
         if !patterns.isEmpty {
             var seen = Set<Int64>()
+            let labels = Self.useLabels ? "" : " AND s.kind != 'labels'"
             try store.db.query("""
                 SELECT s.file, s.id, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts
                 JOIN segments s ON s.id = fts.rowid
-                WHERE fts MATCH ? ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
+                WHERE fts MATCH ?\(labels) ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
                 """, [.text(patterns.joined(separator: " OR "))]) { row in
                 let file = row.int(0)
                 guard words.count < 100, allowed(file), seen.insert(file).inserted else { return }
@@ -165,7 +178,7 @@ public final class Searcher {
                 for pattern in patterns {
                     try store.db.query("""
                         SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id = fts.rowid
-                        WHERE fts MATCH ? AND s.file IN (\(files))
+                        WHERE fts MATCH ? AND s.file IN (\(files))\(labels)
                         """, [.text(pattern)]) { coverage[$0.int(0), default: 0] += 1 / Double(patterns.count) }
                 }
             }
@@ -185,6 +198,19 @@ public final class Searcher {
             var score = meaningWeight * max(best[file]?.z ?? 0, 0) + wordsWeight * pow(coverage[file] ?? 0, 1.5)
             if let kind = fileKind[file], hinted.contains(kind) { score += 1 }
             scored[file] = score
+        }
+        // The query asked for a kind of file ("cat photo"; or the search is limited to some) and nothing of that kind
+        // cleared the gate: the few of that kind that stand out among their own kind (`nearMiss`). Photos score lower
+        // than documents, and a few documents always clear the gate by chance: without this, "cat photo" listed five
+        // unrelated notes and not the one photo of a cat. Scored as a file of the asked-for kind is (its meaning, + 1),
+        // and by how far it stands out past the bar among its kind.
+        let wanted = kinds ?? hinted
+        if Self.nearMisses, !wanted.isEmpty, queryVector != nil,
+           !scored.keys.contains(where: { fileKind[$0].map(wanted.contains) == true }) {
+            for (file, past) in Self.nearMiss(best.mapValues { $0.cosine }, kinds: fileKind, wanted: wanted)
+            where scored[file] == nil {
+                scored[file] = meaningWeight * max(best[file]?.z ?? 0, 0) + 1 + 0.5 * past
+            }
         }
 
         let wordRank = Dictionary(words.enumerated().map { ($0.element.file, ($0.offset + 1, $0.element)) },
@@ -271,6 +297,64 @@ public final class Searcher {
         return (segment, CodeLookup.firstLine(with: words, in: text, first: first).map(Double.init))
     }
 
+    /// The files of the `wanted` kinds that stand out among the other files of those kinds (each file's best cosine,
+    /// against the average and spread of the rest: a strong match mustn't widen its own yardstick), best first, with how
+    /// far past the bar (`nearMissBar`) each is: at most `nearMissCount`, and none when there are fewer than
+    /// `nearMissMinimum` such files to compare.
+    static func nearMiss(_ cosine: [Int64: Double], kinds: [Int64: FileKind], wanted: Set<FileKind>) -> [(Int64, Double)] {
+        let pool = cosine.filter { file, _ in kinds[file].map(wanted.contains) == true }
+        guard pool.count >= nearMissMinimum else { return [] }
+        let count = Double(pool.count)
+        let sum = pool.values.reduce(0, +), squares = pool.values.reduce(0) { $0 + $1 * $1 }
+        let gate = nearMissBar(pool.count)
+        var standing: [(file: Int64, z: Double)] = []
+        for (file, value) in pool {
+            let others = count - 1
+            let mean = (sum - value) / others
+            let variance = max((squares - value * value - others * mean * mean) / (others - 1), 0)
+            let z = (value - mean) / max(variance.squareRoot(), 0.005)
+            if z >= gate { standing.append((file, z)) }
+        }
+        standing.sort { $0.z > $1.z || ($0.z == $1.z && $0.file < $1.file) }
+        return standing.prefix(nearMissCount).map { ($0.file, $0.z - gate) }
+    }
+
+    /// How far a near miss must stand out among `count` files: at least `nearMissGate`, and more where that many files
+    /// would put one past it by chance (a tenth of a file expected, for scores spread normally, with the spread itself
+    /// estimated from the rest: Student's t). 2.9 among 9 photos, 3.1 among 60, 3.5 among 400, 3.9 among 2,000. A
+    /// looser bar showed a photo for a cat that wasn't there in 30% of searches; this one in about 10%
+    /// (PhotoSearchTests, and the simulation behind it: a photo standing 4 deviations clear is found 92–100% of the
+    /// time, at any library size).
+    static func nearMissBar(_ count: Int) -> Double {
+        let p = 1 - 0.1 / Double(max(count, 1))
+        let z = normalQuantile(p), df = Double(max(count - 2, 1))
+        // Cornish–Fisher: Student's t quantile from the normal one.
+        let t = z + (pow(z, 3) + z) / (4 * df) + (5 * pow(z, 5) + 16 * pow(z, 3) + 3 * z) / (96 * df * df)
+        return max(nearMissGate, t)
+    }
+
+    /// The standard normal's quantile (Acklam's approximation, good to 1e-9 here).
+    static func normalQuantile(_ p: Double) -> Double {
+        guard p > 0, p < 1 else { return p <= 0 ? -.infinity : .infinity }
+        let a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02,
+                 -3.066479806614716e+01, 2.506628277459239e+00]
+        let b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01,
+                 -1.328068155288572e+01]
+        let c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00,
+                 4.374664141464968e+00, 2.938163982698783e+00]
+        let d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00]
+        let low = 0.02425
+        if p < low {
+            let q = (-2 * log(p)).squareRoot()
+            return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+                / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+        }
+        if p > 1 - low { return -normalQuantile(1 - p) }
+        let q = p - 0.5, r = q * q
+        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
+            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+    }
+
     /// Codes and IDs ("K7Q2LM", "TRX50") and long numbers ("4815162342": an order, a phone number) mean nothing to an
     /// embedding but everything to keyword search: a query made of them weighs words double and meaning half. Numbers
     /// count since 2026-10-09, when text of digits lost its vectors (`SearchText.hasWords`): a number in a data dump fell
@@ -322,9 +406,13 @@ public final class Searcher {
     /// out the later pages of long files, which are scored on it but don't move it. A book's hundreds of pages pulled the
     /// text average down for every query, and documents rose over screenshots everywhere (2026-10-09, the testbed's long
     /// files finished: real eval 24 → 22 of 26 first; 24 with the scale kept).
+    ///
+    /// A small group's own level (`smallGroupsBlend`) only moves that group: the deviation, and so every other vector's
+    /// standing, is worked out as before. Moving the scale too reordered documents in libraries with a few photos.
     static func meaning(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Double] {
-        let means = modalityMeans(scores, modality, setsScale: setsScale)
-        let centered = zip(scores, modality).map { Double($0) - means[$1, default: 0] }
+        let scale = modalityMeans(scores, modality, setsScale: setsScale, blend: false)
+        let means = smallGroupsBlend ? modalityMeans(scores, modality, setsScale: setsScale, blend: true) : scale
+        let centered = zip(scores, modality).map { Double($0) - scale[$1, default: 0] }
         var count = 0.0, sum = 0.0
         for row in centered.indices where setsScale?[row] ?? true {
             count += 1
@@ -336,11 +424,18 @@ public final class Searcher {
             squares += (centered[row] - mean) * (centered[row] - mean)
         }
         let deviation = max((squares / max(count, 1)).squareRoot(), 0.02)
-        return centered.map { ($0 - mean) / deviation }
+        return zip(scores, modality).map { (Double($0) - means[$1, default: 0] - mean) / deviation }
     }
 
-    /// The average score of each modality for this query. Small groups (< 20 vectors) take the average of all.
-    static func modalityMeans(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Modality: Double] {
+    /// The average score of each modality for this query. A small group (under 20 vectors) leans on the average of all
+    /// as far as it's small: its own average weighs n/20. Before, a group under 20 took the average of all outright, and
+    /// image and audio vectors score lower than text for the same topic (`Modality`): with a dozen photos in a library
+    /// of documents, every photo sat about two deviations down and none could pass the gate ("cat photo" found nothing).
+    /// `smallGroupsBlend` false: the old way (for evals).
+    nonisolated(unsafe) public static var smallGroupsBlend = true
+
+    static func modalityMeans(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil,
+                              blend: Bool = smallGroupsBlend) -> [Modality: Double] {
         var sum: [Modality: Double] = [:], count: [Modality: Int] = [:]
         for row in scores.indices where setsScale?[row] ?? true {
             sum[modality[row], default: 0] += Double(scores[row])
@@ -351,6 +446,9 @@ public final class Searcher {
         for modality in Modality.allCases {
             if let n = count[modality], n >= 20 {
                 out[modality] = sum[modality]! / Double(n)
+            } else if blend, let n = count[modality], n >= 3 {
+                let own = Double(n) / 20
+                out[modality] = own * sum[modality]! / Double(n) + (1 - own) * all
             } else {
                 out[modality] = all
             }

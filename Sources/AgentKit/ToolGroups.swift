@@ -22,6 +22,7 @@ public enum ToolGroup: String, CaseIterable, Sendable, Comparable {
     /// Always offered.
     public static let core: Set<String> = [
         "open_app", "open_file", "search_files", "open_url", "web_search", "read_screen", "click", "type_text",
+        "scroll", "read_everything", "look", "click_on", "click_at", "scroll_at",
         "press_keys", "wait", "run_command", "reply", "plan", "note", "done", "more_tools",
         // The helpers for hard reasoning, when the user turned them on: a small model's way out of its depth.
         "ask_claude", "ask_codex",

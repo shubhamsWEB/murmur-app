@@ -151,6 +151,7 @@ public enum ScreenControl {
         var index = 0
         var seen = Set<String>()
         var seenText = Set<String>()
+        var scroller: (element: AXUIElement, size: CGFloat)?
         while index < queue.count, index < 8000, elements.count < limit || textLength < textLimit {
             let current = queue[index]
             index += 1
@@ -158,6 +159,11 @@ public enum ScreenControl {
             let subrole = string(current, kAXSubroleAttribute) ?? ""
             let kind: String? = subrole == "AXSearchField" ? "search field" : roles[role]
             let visible = isOnScreen(current)
+            // The biggest part that scrolls up and down: whether there's more of it than is in view.
+            if role == "AXScrollArea", visible, let box = frame(of: current), box.width > 80, box.height > 80,
+               element(current, kAXVerticalScrollBarAttribute) != nil, box.width * box.height > (scroller?.size ?? 0) {
+                scroller = (current, box.width * box.height)
+            }
             if role == "AXStaticText", visible, textLength < textLimit,
                let text = longString(current, kAXValueAttribute) ?? longString(current, kAXDescriptionAttribute),
                seenText.insert(text).inserted {
@@ -206,7 +212,467 @@ public enum ScreenControl {
         lines.append("Things to press or type into:")
         lines.append(contentsOf: controls)
         if controls.isEmpty { lines.append("(Nothing to press or type into is visible.)") }
+        // Only what's in view was read: say when the window's list or document goes on past it, so the model scrolls
+        // or reads it all instead of answering from the first screenful.
+        if let area = scroller?.element, let at = position(of: area) {
+            if at < 0.97 {
+                lines.append("More below: this is only the part in view (\(Int((at * 100).rounded()))% of the way down). "
+                    + "scroll down, or read_everything to get all of it.")
+            } else if at > 0.03 {
+                lines.append("This is the end of it; there's more above (scroll up, or read_everything).")
+            }
+        }
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: Seeing (screenshots)
+
+    /// A screenshot of the window you're looking at, small enough to send to a vision model, with what's needed to
+    /// turn a point on it back into a point on the screen.
+    public struct Shot: @unchecked Sendable {
+        public let image: CGImage
+        public let jpeg: Data
+        /// The image's size in pixels (what positions on it are measured in).
+        public let width: Int
+        public let height: Int
+        /// The window on the screen (global, top-left origin, in points).
+        public let frame: CGRect
+        public let app: String
+        public let window: String
+
+        /// The screen point for a pixel of the screenshot.
+        public func screenPoint(x: Double, y: Double) -> CGPoint {
+            CGPoint(x: frame.minX + x * frame.width / Double(width), y: frame.minY + y * frame.height / Double(height))
+        }
+    }
+
+    /// The latest screenshot: positions in click_at and scroll_at are on it.
+    public private(set) static var lastShot: Shot?
+
+    /// Takes a screenshot of the working app's window (longest side at most `maxSide` pixels). Nil without Screen
+    /// Recording permission (asked for once) or with no window.
+    public static func shoot(maxSide: CGFloat = 1280) async -> Shot? {
+        guard let app = await targetApp() else { return nil }
+        guard CGPreflightScreenCaptureAccess() else {
+            if !askedForScreenRecording {
+                askedForScreenRecording = true
+                _ = await Permissions.inFront { CGRequestScreenCaptureAccess() }
+            }
+            return nil
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let windows = content.windows.filter {
+                $0.owningApplication?.processID == app.processIdentifier && $0.windowLayer == 0 && $0.frame.width > 80
+            }
+            // The window you're looking at (under the pointer, else the front one), else the biggest.
+            let viewed = viewedWindowBounds(of: app.processIdentifier)
+            guard let window = windows.first(where: { candidate in
+                    viewed.map { abs(candidate.frame.minX - $0.minX) < 4 && abs(candidate.frame.minY - $0.minY) < 4
+                        && abs(candidate.frame.width - $0.width) < 4 } ?? false
+                  })
+                    ?? windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+            else { return nil }
+            let frame = window.frame
+            let scale = min(NSScreen.main?.backingScaleFactor ?? 2, maxSide / max(frame.width, frame.height))
+            let configuration = SCStreamConfiguration()
+            configuration.width = max(1, Int(frame.width * scale))
+            configuration.height = max(1, Int(frame.height * scale))
+            configuration.showsCursor = false
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration)
+            guard let jpeg = NSBitmapImageRep(cgImage: image)
+                    .representation(using: .jpeg, properties: [.compressionFactor: 0.72]) else { return nil }
+            let shot = Shot(image: image, jpeg: jpeg, width: image.width, height: image.height, frame: frame,
+                            app: app.localizedName ?? "the app", window: window.title ?? "untitled")
+            lastShot = shot
+            return shot
+        } catch {
+            return nil
+        }
+    }
+
+    /// The text in a picture (Vision, on this Mac), top to bottom.
+    public static func recognise(_ image: CGImage) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return nil }
+        let lines = (request.results ?? [])
+            .sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }
+            .compactMap { $0.topCandidates(1).first?.string }
+        let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// The text in a screenshot with where each line is, in its pixels: "Send at (640, 200)". What click_at needs when
+    /// there's no vision model to describe the screen.
+    public static func recognisedLines(_ shot: Shot, limit: Int = 4000) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        guard (try? VNImageRequestHandler(cgImage: shot.image).perform([request])) != nil else { return nil }
+        let lines = (request.results ?? [])
+            .sorted { (Int((1 - $0.boundingBox.midY) * 100), $0.boundingBox.minX)
+                < (Int((1 - $1.boundingBox.midY) * 100), $1.boundingBox.minX) }
+            .compactMap { observation -> String? in
+                guard let text = observation.topCandidates(1).first?.string else { return nil }
+                let box = observation.boundingBox   // 0–1, from the bottom-left
+                let x = Int((box.midX * Double(shot.width)).rounded())
+                let y = Int(((1 - box.midY) * Double(shot.height)).rounded())
+                return "\(text) at (\(x), \(y))"
+            }
+        let text = lines.joined(separator: "\n")
+        return text.isEmpty ? nil : String(text.prefix(limit))
+    }
+
+    /// What's under a point on the screen, as Accessibility names it ("button “Send”"): for the risk check before a
+    /// click at a point, and to say what was clicked.
+    public static func describe(at point: CGPoint) -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        var found: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &found)
+                == .success, let found else { return nil }
+        // A label inside a button: name the button.
+        var node: AXUIElement? = found
+        for _ in 0..<3 {
+            guard let current = node else { break }
+            let role = string(current, kAXRoleAttribute) ?? ""
+            if roles[role] != nil, role != "AXStaticText", let words = label(current, role: role) {
+                return "\(roles[role] ?? "element") “\(words)”"
+            }
+            node = element(current, kAXParentAttribute)
+        }
+        return describe(found)
+    }
+
+    /// Clicks a point on the screen as a person would: the pointer goes there and clicks (twice for `double`, with the
+    /// right button for `right`).
+    public static func click(at point: CGPoint, double: Bool = false, right: Bool = false) async {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        let (down, up, button): (CGEventType, CGEventType, CGMouseButton) = right
+            ? (.rightMouseDown, .rightMouseUp, .right) : (.leftMouseDown, .leftMouseUp, .left)
+        for count in 1...(double ? 2 : 1) {
+            for type in [down, up] {
+                let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point,
+                                    mouseButton: button)
+                event?.setIntegerValueField(.mouseEventClickState, value: Int64(count))
+                event?.post(tap: .cghidEventTap)
+            }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+    }
+
+    /// Scrolls whatever is under a point on the screen (a screenful, or to the top or end).
+    public static func scroll(at point: CGPoint, direction: String) async {
+        let way = direction.lowercased()
+        let pixels = way == "top" ? 20_000 : way == "bottom" || way == "end" ? -20_000 : way == "up" ? 600 : -600
+        let source = CGEventSource(stateID: .combinedSessionState)
+        CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        var left = pixels
+        while left != 0 {
+            let chunk = left > 0 ? min(left, 400) : max(left, -400)
+            let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
+                                wheel1: Int32(chunk) * wheelSign, wheel2: 0, wheel3: 0)
+            event?.location = point
+            event?.post(tap: .cghidEventTap)
+            left -= chunk
+            try? await Task.sleep(nanoseconds: 12_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 450_000_000)
+    }
+
+    // MARK: Scrolling
+
+    /// All of the front window's list, chat, feed, table or document, read the way a person would: scrolled through
+    /// screen by screen to the end, each screenful's text joined to the last without the overlap. A model left to
+    /// do this itself read one screen and answered ("you have 3 unread emails" with 40 more below).
+    public struct Everything: Sendable {
+        public let text: String
+        /// Screenfuls read (1: it all fitted on the screen, nothing was out of view).
+        public let screens: Int
+        /// Read to the very end (else stopped at the limit, with more below).
+        public let reachedEnd: Bool
+    }
+
+    /// `fromTop`: start at the top (a list, a document, settings); false: from where it's scrolled to now (a chat,
+    /// where the newest is at the bottom). The window is put back where it was afterwards.
+    public static func readEverything(fromTop: Bool = true, maxScreens: Int = 25,
+                                      limit: Int = 24_000) async -> Result<Everything, ReadFailure> {
+        guard AXIsProcessTrusted() else { return .failure(.message("Murmur needs Accessibility permission to see the screen.")) }
+        guard let app = await targetApp() else { return .failure(.message("No app is in front.")) }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute)
+                ?? element(root, kAXMainWindowAttribute) else {
+            return .failure(.message("\(app.localizedName ?? "The front app") has no window open."))
+        }
+        let header = "App: \(app.localizedName ?? "?") · Window: \(string(window, kAXTitleAttribute) ?? "untitled")"
+        let area = scrollArea(in: window)
+        let container = area ?? window
+        // A document (Notes, TextEdit, Mail's message, Pages): its whole text is there at once, scrolled or not.
+        if let document = documentText(in: container), document.count > 400 {
+            return .success(Everything(text: header + "\nThe whole document (\(document.count) characters):\n"
+                + String(document.prefix(limit)), screens: 1, reachedEnd: document.count <= limit))
+        }
+        let clip = frame(of: container)
+        let started = position(of: container)
+        if fromTop, started.map({ $0 > 0.005 }) ?? true {
+            await scrollToEnd(container, top: true)
+        }
+        var lines: [String] = []
+        var screens = 0
+        var reachedEnd = false
+        var unchanged = 0
+        var useful = 0   // screens that brought something new
+        while screens < maxScreens {
+            screens += 1
+            var screen = visibleLines(in: container, clip: clip)
+            // Little or no text through Accessibility (canvas and some Electron apps): the window's pixels instead.
+            if screen.joined().count < 60, let recognised = await recognisedText(of: app) {
+                screen = PageDigest.lines(recognised)
+            }
+            let before = lines.count
+            lines = PageDigest.merge(lines, screen)
+            if lines.count > before { useful += 1 }
+            if lines.reduce(0, { $0 + $1.count + 1 }) >= limit { break }
+            let at = position(of: container)
+            if let at, at >= 0.995 { reachedEnd = true; break }
+            if at == nil {
+                // No scroll bar to ask: the end is when a scroll brings nothing new, twice.
+                unchanged = lines.count == before && screens > 1 ? unchanged + 1 : 0
+                if unchanged >= 2 { reachedEnd = true; break }
+            }
+            let page = Int((clip?.height ?? 600) * 0.8)
+            await wheel(container, by: -page)
+            try? await Task.sleep(nanoseconds: 450_000_000)   // lists and feeds load more as they're reached
+            if let at, let now = position(of: container), abs(now - at) < 0.0005 { reachedEnd = true; break }
+        }
+        // Back to where the user was (where the app lets its scroll bar be set; else it stays where reading ended).
+        if let started { setPosition(container, started) }
+        let text = String(lines.joined(separator: "\n").prefix(limit))
+        let how = useful <= 1 ? "It all fits on the screen."
+            : reachedEnd ? "Scrolled through all of it: \(useful) screens, \(fromTop ? "top" : "from where it was") to the very end."
+            : "Scrolled through \(useful) screens; there's more below that wasn't read."
+        return .success(Everything(text: header + "\n" + how + "\n" + text, screens: useful, reachedEnd: reachedEnd))
+    }
+
+    public enum ReadFailure: Error, Sendable {
+        case message(String)
+        public var text: String {
+            switch self { case .message(let text): return text }
+        }
+    }
+
+    /// Scrolls the front window's list or document (the one around element `id` from the last read, else the
+    /// biggest one in view): "down", "up" (a screenful), "top", "bottom". Says where it got to.
+    public static func scroll(_ direction: String, around id: Int? = nil) async -> String {
+        guard AXIsProcessTrusted() else { return "Murmur needs Accessibility permission to scroll." }
+        guard let app = await targetApp() else { return "No app is in front." }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute) else {
+            return "\(app.localizedName ?? "The front app") has no window open."
+        }
+        let container = scrollArea(in: window, around: id) ?? window
+        let way = direction.lowercased().trimmingCharacters(in: .whitespaces)
+        let before = position(of: container)
+        let shownBefore = visibleLines(in: container, clip: frame(of: container))
+        let page = Int((frame(of: container)?.height ?? 600) * 0.8)
+        switch way {
+        case "top", "bottom", "end", "start":
+            await scrollToEnd(container, top: way == "top" || way == "start")
+        case "up":
+            await wheel(container, by: page)
+        default:
+            await wheel(container, by: -page)
+        }
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        let after = position(of: container)
+        let upward = way == "up" || way == "top" || way == "start"
+        if let before, let after, abs(after - before) < 0.0005 {
+            return upward ? "Already at the top." : "Already at the end: there's nothing more below."
+        }
+        if before == nil, visibleLines(in: container, clip: frame(of: container)) == shownBefore {
+            return upward ? "Nothing moved: it's at the top, or this part doesn't scroll."
+                : "Nothing moved: it's at the end, or this part doesn't scroll (try another [n] inside the list)."
+        }
+        guard let after else { return "Scrolled \(way)." }
+        if after >= 0.995 { return "Scrolled \(way): this is the end of it." }
+        if after <= 0.005 { return "Scrolled \(way): this is the top." }
+        return "Scrolled \(way) (now \(Int((after * 100).rounded()))% of the way down)."
+    }
+
+    /// The part of the window that scrolls: the scroll area around element `id` from the last read, else the biggest
+    /// one in view that scrolls up and down (a chat, an inbox, a list, a document).
+    private static func scrollArea(in window: AXUIElement, around id: Int? = nil) -> AXUIElement? {
+        if let id, id >= 1, id <= elements.count {
+            var node: AXUIElement? = elements[id - 1]
+            for _ in 0..<40 {
+                guard let current = node else { break }
+                if string(current, kAXRoleAttribute) == "AXScrollArea" { return current }
+                node = element(current, kAXParentAttribute)
+            }
+        }
+        // Their contents are text and rows, not more scroll areas: not walked.
+        let leaves: Set<String> = ["AXStaticText", "AXRow", "AXCell", "AXLink", "AXButton", "AXImage", "AXTextArea",
+                                   "AXTextField", "AXMenuItem", "AXCheckBox", "AXRadioButton"]
+        var best: (element: AXUIElement, size: CGFloat)?
+        var queue = [window]
+        var index = 0
+        while index < queue.count, index < 3000 {
+            let node = queue[index]
+            index += 1
+            let role = string(node, kAXRoleAttribute) ?? ""
+            if leaves.contains(role) { continue }
+            if role == "AXScrollArea", let box = frame(of: node), box.width > 80, box.height > 80, isOnScreen(node) {
+                // One that scrolls up and down beats a bigger one that doesn't (a sidebar's, a toolbar's).
+                let size = box.width * box.height * (element(node, kAXVerticalScrollBarAttribute) != nil ? 4 : 1)
+                if size > (best?.size ?? 0) { best = (node, size) }
+            }
+            queue.append(contentsOf: children(node))
+        }
+        return best?.element
+    }
+
+    /// How far down it's scrolled, 0 (top) to 1 (end); nil when it has no scroll bar to ask (web content, a
+    /// window), or nothing to scroll.
+    private static func position(of area: AXUIElement) -> Double? {
+        guard let bar = element(area, kAXVerticalScrollBarAttribute),
+              let number = value(bar, kAXValueAttribute) as? NSNumber else { return nil }
+        return min(max(number.doubleValue, 0), 1)
+    }
+
+    /// Scrolls straight to `to` (0 top, 1 end) through its scroll bar; false when the app doesn't allow it.
+    @discardableResult
+    private static func setPosition(_ area: AXUIElement, _ to: Double) -> Bool {
+        guard let bar = element(area, kAXVerticalScrollBarAttribute) else { return false }
+        return AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: to)) == .success
+    }
+
+    /// To the top or the end: through the scroll bar when the app allows it, else with the wheel, in big steps
+    /// until it stops moving (lists that load more as they're reached keep going, up to a limit).
+    private static func scrollToEnd(_ area: AXUIElement, top: Bool) async {
+        if setPosition(area, top ? 0 : 1) {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if let at = position(of: area), top ? at <= 0.005 : at >= 0.995 { return }
+        }
+        var last = visibleLines(in: area, clip: frame(of: area))
+        for _ in 0..<12 {
+            await wheel(area, by: top ? 6000 : -6000)
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if let at = position(of: area), top ? at <= 0.005 : at >= 0.995 { break }
+            let now = visibleLines(in: area, clip: frame(of: area))
+            if now == last { break }
+            last = now
+        }
+    }
+
+    /// Positive: up (towards the top). Flipped once if the app turned out to scroll the other way.
+    private static var wheelSign: Int32 = 1
+
+    /// Scrolls `area` by `pixels` (positive up, negative down) with the scroll wheel, as a person would: the pointer
+    /// goes over it for the moment it takes and comes back.
+    private static func wheel(_ area: AXUIElement, by pixels: Int) async {
+        guard pixels != 0, let box = frame(of: area) else { return }
+        let point = CGPoint(x: box.midX, y: box.minY + min(box.height / 2, 300))
+        let pointer = CGEvent(source: nil)?.location
+        let source = CGEventSource(stateID: .combinedSessionState)
+        CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        let before = position(of: area)
+        var left = pixels
+        while left != 0 {
+            let chunk = left > 0 ? min(left, 400) : max(left, -400)
+            let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
+                                wheel1: Int32(chunk) * wheelSign, wheel2: 0, wheel3: 0)
+            event?.location = point
+            event?.post(tap: .cghidEventTap)
+            left -= chunk
+            try? await Task.sleep(nanoseconds: 12_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        // Went the wrong way (the bar says so): the sign is the other way round here, and the scroll is done again.
+        if let before, let after = position(of: area), abs(after - before) > 0.0005, (after < before) != (pixels > 0) {
+            wheelSign = -wheelSign
+            for _ in 0..<2 {
+                var again = pixels
+                while again != 0 {
+                    let chunk = again > 0 ? min(again, 400) : max(again, -400)
+                    let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
+                                        wheel1: Int32(chunk) * wheelSign, wheel2: 0, wheel3: 0)
+                    event?.location = point
+                    event?.post(tap: .cghidEventTap)
+                    again -= chunk
+                    try? await Task.sleep(nanoseconds: 12_000_000)
+                }
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        if let pointer {
+            CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: pointer, mouseButton: .left)?
+                .post(tap: .cghidEventTap)
+        }
+    }
+
+    /// The text shown inside `container` right now, top to bottom (left to right on a line): what a person sees
+    /// there. `clip`: the part of the screen it shows (things scrolled out of it are left out).
+    private static func visibleLines(in container: AXUIElement, clip: CGRect?) -> [String] {
+        var found: [(y: CGFloat, x: CGFloat, text: String)] = []
+        var queue = [container]
+        var index = 0
+        while index < queue.count, index < 5000 {
+            let node = queue[index]
+            index += 1
+            let role = string(node, kAXRoleAttribute) ?? ""
+            let box = frame(of: node)
+            if let box, let clip, !box.intersects(clip.insetBy(dx: -2, dy: -2)) {
+                continue   // out of view, and so is everything in it
+            }
+            let inside = role == "AXStaticText" ? [] : children(node)
+            // Text, and things that say what they are only by their label (a calendar's event, an image, an icon
+            // button with no text inside it).
+            let text = role == "AXStaticText"
+                ? longString(node, kAXValueAttribute) ?? longString(node, kAXDescriptionAttribute)
+                : inside.isEmpty && role != "AXTextArea" && role != "AXTextField" && role != "AXScrollBar"
+                    ? (longString(node, kAXDescriptionAttribute) ?? longString(node, kAXTitleAttribute))
+                        .flatMap { $0.count >= 3 ? $0 : nil }
+                    : nil
+            if let text, let box {
+                found.append((box.minY, box.minX, text.replacingOccurrences(of: "\n", with: " ")))
+            }
+            queue.append(contentsOf: inside)
+        }
+        // Reading order: by line (to within a few points), then left to right.
+        found.sort { (Int($0.y / 6), $0.x) < (Int($1.y / 6), $1.x) }
+        var lines: [String] = []
+        for item in found where lines.last != item.text { lines.append(item.text) }
+        return lines
+    }
+
+    /// The whole text of a document shown in `container` (a text area's value is all of it, scrolled or not).
+    private static func documentText(in container: AXUIElement) -> String? {
+        var queue = [container]
+        var index = 0
+        var longest: String?
+        while index < queue.count, index < 1500 {
+            let node = queue[index]
+            index += 1
+            if string(node, kAXRoleAttribute) == "AXTextArea",
+               let text = longString(node, kAXValueAttribute, max: 200_000), text.count > (longest?.count ?? 0) {
+                longest = text
+            }
+            queue.append(contentsOf: children(node))
+        }
+        return longest
     }
 
     /// All the text of the web page in the front browser window, top to bottom, including what's scrolled out of view,
@@ -279,15 +745,7 @@ public enum ScreenControl {
             configuration.height = Int(window.frame.height * scale)
             configuration.showsCursor = false
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-            try VNImageRequestHandler(cgImage: image).perform([request])
-            let lines = (request.results ?? [])
-                .sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }        // top of the window first
-                .compactMap { $0.topCandidates(1).first?.string }
-            let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
+            return recognise(image)
         } catch {
             return nil
         }

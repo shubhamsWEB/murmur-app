@@ -150,6 +150,13 @@ final class IndexService: @unchecked Sendable {
                 guard finishLongFiles() else { break }
                 if lock.withLock({ syncRequested || codeSyncRequested }) { continue }
             }
+            // Then pictures indexed before their words could be read (`Indexer.readPictures`): no model, keyword text
+            // only, the same way.
+            if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
+               (try? main.store.unfinishedCount().files) ?? 1 == 0, picturesLeft() > 0 {
+                guard readPictures() else { break }
+                if lock.withLock({ syncRequested || codeSyncRequested }) { continue }
+            }
             if code != nil, lock.withLock({ codeSyncRequested }) { continue }
             emitCounts("idle")
             // Nothing warm to keep around: leave now. Else wait a little for more work.
@@ -274,6 +281,35 @@ final class IndexService: @unchecked Sendable {
             if !states.isEmpty {
                 emit(["event": "summary", "rest": true, "states": states,
                       "ms": Int(Date().timeIntervalSince(started) * 1000)])
+            }
+            return true
+        } catch {
+            emit(["event": "error", "message": "\(error)", "fatal": true])
+            return false
+        }
+    }
+
+    /// Pictures still to read for words (`PhotoText`): none where nothing can read them.
+    private func picturesLeft() -> Int {
+        (try? main.indexer.picturesToRead()) ?? 0
+    }
+
+    /// Reads pictures for words, yielding as the backfill does. False when indexing has to stop.
+    private func readPictures() -> Bool {
+        let started = Date()
+        do {
+            let read = try main.indexer.readPictures(shouldStop: { [self] in
+                lock.withLock {
+                    stopRequested || !backfillAllowed
+                        || Date() >= yieldAt && (syncRequested || codeSyncRequested && code != nil)
+                }
+            }, onPicture: { done, total, path in
+                if done % 25 == 0 || done == total {
+                    emit(["event": "pictures", "done": done, "total": total, "path": path])
+                }
+            })
+            if read > 0 {
+                emit(["event": "pictures", "read": read, "ms": Int(Date().timeIntervalSince(started) * 1000)])
             }
             return true
         } catch {

@@ -229,7 +229,7 @@ private struct Sidebar: View {
                 BrandTile(size: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Murmur").font(.system(size: 15, weight: .semibold)).tracking(-0.2)
-                    Text("Voice for your Mac").font(.system(size: 11)).foregroundStyle(Theme.ink2)
+                    Text("Voice for your Mac · \(AppVersion.current)").font(.system(size: 11)).foregroundStyle(Theme.ink2)
                 }
             }
             .padding(.horizontal, 18)
@@ -254,6 +254,9 @@ private struct Sidebar: View {
             }
             .padding(.horizontal, 10)
             Spacer(minLength: 16)
+            if let version = app.model.updateAvailable {
+                updateCard(version).padding(.horizontal, 12).padding(.bottom, 8)
+            }
             statusCard.padding(.horizontal, 12)
             Button {
                 state.section = .about
@@ -316,6 +319,23 @@ private struct Sidebar: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// A newer Murmur is waiting: say which, and install it from here (Sparkle's window, with Install).
+    private func updateCard(_ version: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Murmur \(version) is ready").font(.system(size: 12, weight: .semibold))
+                Text("You have \(AppVersion.current)").font(.system(size: 11)).foregroundStyle(Theme.ink2).lineLimit(1)
+            }
+            Button("Update Now") { app.updates.checkNow() }
+                .buttonStyle(.murmurPrimaryCompact)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentTint))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.accentRing))
     }
 
     private var statusCard: some View {
@@ -1369,6 +1389,44 @@ private struct CommandsPage: View {
                     .frame(width: 160)
                 }
             }
+            SettingsSection("Screen vision") {
+                SettingRow(title: "Screenshots go to",
+                           detail: "When an app's buttons and text can't be read directly (pictures, canvas apps, icons), Murmur "
+                               + "looks at a screenshot of its window. “On this Mac” keeps every screenshot here.") {
+                    Picker("Screenshots go to", selection: state.bind(get: { VisionText.mode.rawValue },
+                                                                    set: { UserDefaults.standard.set($0, forKey: "screenVision") })) {
+                        Text("On this Mac").tag(VisionText.Mode.local.rawValue)
+                        Text("The cloud model").tag(VisionText.Mode.cloud.rawValue)
+                        Text("Nowhere (text only)").tag(VisionText.Mode.off.rawValue)
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+                }
+                RowDivider()
+                SettingRow(title: "Vision model on this Mac", detail: visionDetail) {
+                    HStack(spacing: 8) {
+                        Picker("Vision model", selection: state.bind(get: { VisionText.localModel }, set: { model in
+                            UserDefaults.standard.set(model, forKey: "visionModel")
+                            Task { await VisionSetup.shared.refresh() }
+                        })) {
+                            ForEach(["qwen3-vl:2b", "qwen3-vl:4b", "qwen3-vl:8b"], id: \.self) { Text($0).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+                        .disabled(VisionSetup.shared.isDownloading)
+                        switch VisionSetup.shared.phase {
+                        case .missing, .failed:
+                            Button("Download") { VisionSetup.shared.start() }
+                                .disabled(!VisionSetup.shared.hasRoom)
+                        case .downloading:
+                            ProgressView().controlSize(.small)
+                        default:
+                            EmptyView()
+                        }
+                    }
+                }
+            }
+            .task { await VisionSetup.shared.refresh() }
             SettingsSection("Coding agents") {
                 ForEach(AssistantCLI.allCases, id: \.self) { helper in
                     agentRow(helper)
@@ -1473,6 +1531,19 @@ private struct CommandsPage: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
+    /// The vision model's row: what it is, and how its download is going.
+    private var visionDetail: String {
+        let vision = VisionSetup.shared
+        switch vision.phase {
+        case .ready: return "\(vision.model) is installed. Screenshots stay on this Mac."
+        case .downloading(let part): return "Downloading \(vision.model): \(Int(part * 100))% of \(vision.sizeText)."
+        case .noOllama: return "Needs Ollama (ollama.com). Until then Murmur reads the screen's text."
+        case .failed(let why): return why
+        case .missing where !vision.hasRoom: return "\(vision.model) needs \(vision.sizeText) and more free disk space."
+        default: return "Qwen3-VL through Ollama: 8B (6.2 GB, best) or 4B (3.3 GB, for 8 GB Macs)."
+        }
+    }
+
     private func keyDetail(_ choice: RouterChoice) -> String {
         guard choice.hasKey else { return "Not set" }
         let workspace = choice == .anthropic && AnthropicWorkspace.id != nil ? " · workspace set" : ""
@@ -1563,8 +1634,31 @@ private struct FoldersPage: View {
 
 // MARK: - About
 
+/// The version people see ("1.4.1"), from the app's Info.plist.
+enum AppVersion {
+    static var current: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
+    }
+}
+
 private struct AboutPage: View {
     let app: AppController
+
+    /// This version, whether a newer one is waiting, and the button that gets it.
+    @ViewBuilder private var updatesRow: some View {
+        if !Updates.hasFeed {
+            SettingRow(title: "Version \(AppVersion.current)", detail: "This build doesn't check for updates.") { EmptyView() }
+        } else if let version = app.model.updateAvailable {
+            SettingRow(title: "Murmur \(version) is available", detail: "You have \(AppVersion.current). It installs and restarts Murmur.") {
+                Button("Update Now") { app.updates.checkNow() }.buttonStyle(.murmurPrimary)
+            }
+        } else {
+            SettingRow(title: "Version \(AppVersion.current)", detail: app.updates.automaticallyChecks
+                       ? "Murmur looks for a newer version every day." : "Automatic checks are off.") {
+                Button("Check for Updates") { app.updates.checkNow() }.buttonStyle(.murmurSecondary)
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -1574,12 +1668,15 @@ private struct AboutPage: View {
                     .frame(width: 72, height: 72)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Murmur").font(.system(size: 26, weight: .semibold)).tracking(-0.4)
-                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                    Text("Version \(AppVersion.current)")
                         .font(.system(size: 13)).foregroundStyle(Theme.ink2)
                 }
             }
             Text("Talk anywhere. Find anything. Get it done.")
                 .font(.system(size: 18, weight: .medium))
+            SettingsSection("Updates") {
+                updatesRow
+            }
             SettingsSection("Help") {
                 SettingRow(title: "Run setup again", detail: "Permissions, the talk key, the speech model and the folders to search.") {
                     Button("Start…") { app.showOnboarding() }.buttonStyle(.murmurSecondary)

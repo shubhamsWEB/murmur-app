@@ -6,12 +6,14 @@ import SQLite3
 /// ("what did I send Roma yesterday?").
 ///
 /// Structured, so it stays small and fast: each command is one row (what you said, where, what kind of thing it
-/// was, how it went, a one-line summary), its actions are rows, and the people, files, pages, apps and media it
-/// touched are entities linked to it. Everything is worked out from the tool calls themselves: no model call, no
-/// embedding, no background work; one short transaction per command. The model always gets a few lines (the
-/// latest commands and what's in play), and asks for more with `recall`, which reads the store with an index and
-/// full-text search. On this Mac only (~/Library/Application Support/Murmur/memory.sqlite), 90 days or 3,000
-/// commands, whichever is less.
+/// was, how it went, a one-line summary), its actions are rows, and the files, pages, apps and media it touched are
+/// entities linked to it. A message recipient stays in that command's action/history, rather than becoming a
+/// general person entity. Everything is worked out from the tool calls themselves: no model call, no
+/// embedding, no background work; one short transaction per command. The model gets durable facts and, for an
+/// explicit follow-up only, a few lines of recent context; it asks for more with `recall`, which reads the store
+/// with an index and full-text search. On this Mac only (~/Library/Application Support/Murmur/memory.sqlite), 90 days or 3,000
+/// commands, whichever is less. Command history is conversational context only for an explicit follow-up; it is
+/// never a default source for a new command's recipient, message, or destination.
 ///
 /// It's also how Murmur fits the way you work: what you tell it to remember ("Mom is Roma, on WhatsApp", "from now on
 /// open links in Chrome") is kept as facts, and what it notices from your commands (Roma's messages always go on
@@ -396,18 +398,35 @@ public enum CommandMemory {
         return lastAt.map { Date().timeIntervalSince($0) }
     }
 
-    /// What the model always gets, in a few lines: the latest commands (last two hours) and what's in play (the
-    /// people, files, pages and apps of the last day, most recent first).
-    static func workingSet() -> String? {
+    /// Whether a short, recent request is actually referring back to the preceding command. Names, apps and message
+    /// text in a fresh command are deliberately not a signal: they must come from the words just spoken.
+    static func shouldIncludeConversationContext(_ utterance: String, lastAt: Date?) -> Bool {
+        guard let lastAt, Date().timeIntervalSince(lastAt) < 300 else { return false }
+        let text = QuickCommands.clean(utterance)
+        guard text.split(separator: " ").count <= 20 else { return false }
+        return text.range(of: #"^(and|also|and also|then|and then|plus|oh and|one more thing|after that) (please )?(ask|tell|send|message|text|whatsapp|open|play|pause|stop|search|find|show|remind|reply|call|email|ping|close|quit|turn|set|check|add|delete|forward|share|save|copy|paste|summari[sz]e|translate|write|type|book|schedule|do)\b|^(tell|ask|send|message|text|reply to|remind|let|call|ping|email|show|give) (her|him|them|it|that|those)\b|^(do it|do that|same thing|do it again|try again|undo that|send it|send that|open it|play it|paste it)\b"#,
+                             options: .regularExpression) != nil
+    }
+
+    /// The durable facts and, only for a clear follow-up, the immediate conversational context. A previous command
+    /// can resolve "send it" or "tell her", but cannot bleed a recipient into a fresh request such as "message Neha".
+    static func workingSet(for utterance: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard let db = open() else { return nil }
         let now = Date().timeIntervalSince1970
-        let recent = rows(db, "SELECT id, at, app, said, summary, outcome FROM episode WHERE at > ? ORDER BY id DESC LIMIT 5",
-                          [now - 2 * 3600]).reversed()
-        let things = rows(db, "SELECT type, name, detail, last_seen FROM entity WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 8",
-                          [now - 24 * 3600])
+        let followsPrevious = shouldIncludeConversationContext(utterance, lastAt: lastAt)
+        let recent = followsPrevious
+            ? rows(db, "SELECT id, at, app, said, summary, outcome FROM episode WHERE at > ? ORDER BY id DESC LIMIT 5",
+                   [now - 2 * 3600]).reversed()
+            : []
+        let things = followsPrevious
+            ? rows(db, "SELECT type, name, detail, last_seen FROM entity WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 8",
+                   [now - 24 * 3600])
+            : []
         let told = rows(db, "SELECT text FROM fact WHERE source = 'told' ORDER BY at DESC LIMIT 20", []).map { $0[0] }
-        let noticed = learnedItems(db)
+        // Per-person chat habits are applied by `send_message` when no app was spoken. They are intentionally not
+        // shown to the model on unrelated commands, where another person's name could be mistaken for the target.
+        let noticed = learnedItems(db).filter { !$0.id.hasPrefix("learned:message:") }
         guard !recent.isEmpty || !things.isEmpty || !told.isEmpty || !noticed.isEmpty else { return nil }
         var lines: [String] = []
         if !told.isEmpty {
@@ -419,7 +438,7 @@ public enum CommandMemory {
                          + noticed.map { "\($0.text) (\($0.detail))" }.joined(separator: "; "))
         }
         if !recent.isEmpty {
-            lines.append("Latest commands (oldest first):")
+            lines.append("Follow-up context only — use this solely to resolve an omitted reference such as ‘her’, ‘it’, ‘again’, or ‘that’. The current request's explicit person, app, and text always win:")
             for row in recent {
                 lines.append("#\(row[0]) \(ago(row[1])) in \(row[2].isEmpty ? "?" : row[2]): \"\(row[3])\" → \(row[4]) [\(row[5])]")
             }
@@ -465,13 +484,9 @@ public enum CommandMemory {
     /// "and also ask when she's coming back", "tell him too", "do it again", "send it", said within a few minutes
     /// of a command: it follows on from it, so it's a command too (it was typed into the box as dictation).
     public static func isFollowUp(_ utterance: String) -> Bool {
-        guard let since = sinceLast, since < 300 else { return false }
-        let text = QuickCommands.clean(utterance)
-        // Follow-ups are short and say what to do: "and also ask her…", "send it", "tell him too". A sentence that
-        // only starts with "Also" or "And" ("Also I noticed a bug…") is dictation.
-        guard text.split(separator: " ").count <= 20 else { return false }
-        return text.range(of: #"^(and|also|and also|then|and then|plus|oh and|one more thing|after that) (please )?(ask|tell|send|message|text|whatsapp|open|play|pause|stop|search|find|show|remind|reply|call|email|ping|close|quit|turn|set|check|add|delete|forward|share|save|copy|paste|summari[sz]e|translate|write|type|book|schedule|do)\b|^(tell|ask|send|message|text|reply to|remind|let|call|ping|email|show|give) (her|him|them|it|that|those)\b|^(do it|do that|same thing|do it again|try again|undo that|send it|send that|open it|play it|paste it)\b"#,
-                          options: .regularExpression) != nil
+        lock.lock(); defer { lock.unlock() }
+        if !opened { _ = open() }
+        return shouldIncludeConversationContext(utterance, lastAt: lastAt)
     }
 
     /// The files opened in the last day, newest first (their names).
@@ -569,7 +584,8 @@ public enum CommandMemory {
             let a = action.args
             switch action.tool {
             case "send_message":
-                if let to = a["to"], !to.isEmpty { found.append(Entity(type: "person", name: to, detail: a["app"] ?? "")) }
+                // The recipient belongs to this command's action and summary. Keeping it as a global entity made a
+                // one-off message look like an ongoing person context for later, unrelated commands.
                 if let chat = a["app"], !chat.isEmpty { found.append(Entity(type: "app", name: chat, detail: "")) }
             case "open_file":
                 if let name = openedName(action) { found.append(Entity(type: "file", name: name, detail: a["query"] ?? "")) }

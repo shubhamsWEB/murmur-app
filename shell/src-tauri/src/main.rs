@@ -15,6 +15,7 @@ mod helper;
 mod hotkey;
 mod hours;
 mod moments;
+mod ocr;
 mod options;
 mod settings;
 mod status;
@@ -175,13 +176,16 @@ impl Shell {
         self.launch(download, "model.log")
     }
 
-    /// What every helper gets: where the model is, and `MURMUR_DEVICE=cpu` when the person chose the processor.
+    /// What every helper gets: where the model is, `MURMUR_DEVICE=cpu` when the person chose the processor, and on
+    /// Windows the OCR helper (`MURMUR_OCR`).
     fn helper_env(&self) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> =
             self.options.models.iter().map(|models| ("MURMUR_MODELS".to_string(), models.display().to_string())).collect();
         if self.settings.lock().unwrap().processor_only {
             env.push(("MURMUR_DEVICE".to_string(), "cpu".to_string()));
         }
+        // Windows: the engine reads screenshots' and photos' text with this program (`Murmur.exe --ocr`).
+        env.extend(ocr::helper_env());
         env
     }
 
@@ -626,6 +630,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(dictation::worker::ARGUMENT) {
         std::process::exit(dictation::worker::serve(&args[2..]));
+    }
+    // …or as the search engine's OCR helper (ocr.rs): a picture's text, and out.
+    if args.get(1).map(String::as_str) == Some(ocr::ARGUMENT) {
+        std::process::exit(ocr::serve(&args[2..]));
     }
     let options = match Options::from_args() {
         Ok(options) => options,
