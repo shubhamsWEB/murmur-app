@@ -34,12 +34,91 @@ public enum PDFText {
 
     /// The pages a request names: "summarise page 10" → "10", "pages 5 to 7" → "5 to 7", "page 3 and 4" → "3 and 4";
     /// "" when it names none ("all 21 pages" names a count, not a page).
+    /// Spoken numbers count: "page one to page twenty two" → "1 to 22", "pages 5 through 7" → "5 to 7".
     public static func pagesMentioned(_ request: String) -> String {
-        let pattern = #"(?i)\b(?:pages?|pg\.?|p\.)\s*(\d+(?:\s*(?:-|–|to|and|,|&)\s*\d+)*)"#
+        let request = digits(request)
+        let pattern = #"(?i)\b(?:pages?|pg\.?|p\.)\s*(\d+(?:\s*(?:-|–|to|till|until|through|and|,|&)\s*(?:(?:pages?|pg\.?|p\.)\s*)?\d+)*)"#
         guard let match = request.range(of: pattern, options: .regularExpression) else { return "" }
         return String(request[match]).replacingOccurrences(of: #"(?i)^(pages?|pg\.?|p\.)\s*"#, with: "",
                                                            options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)\s*\b(?:pages?|pg\.?|p\.)\s*"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)\s*\b(?:through|till|until)\b\s*"#, with: " to ", options: .regularExpression)
             .replacingOccurrences(of: " and ", with: ", ")
+            .replacingOccurrences(of: "  ", with: " ")
+    }
+
+    /// Numbers said as words, as digits: "twenty two" → "22", "one hundred and five" → "105", "forty-one" → "41".
+    /// Other words are left as they were.
+    public static func digits(_ text: String) -> String {
+        let units = ["zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                     "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+                     "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19]
+        let tens = ["twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+                    "ninety": 90]
+        var out: [String] = []
+        var number: Int?
+        var lastWasTens = false
+        var pendingAnd = false
+        func flush() {
+            if let number { out.append(String(number)) }
+            if pendingAnd { out.append("and") }
+            number = nil
+            lastWasTens = false
+            pendingAnd = false
+        }
+        for raw in text.split(separator: " ", omittingEmptySubsequences: false).map(String.init) {
+            let trailing = String(raw.reversed().prefix { ",.;:!?".contains($0) }.reversed())
+            let word = String(raw.dropLast(trailing.count))
+            let lower = word.lowercased()
+            let parts = lower.split(separator: "-").map(String.init)
+            var value: Int?
+            if parts.count == 2, let ten = tens[parts[0]], let unit = units[parts[1]], unit > 0, unit < 10 {
+                value = ten + unit
+            } else if parts.count == 1 {
+                value = units[lower] ?? tens[lower]
+            }
+            if let value {
+                if let current = number, current >= 100, current % 100 == 0, value < 100 {
+                    number = current + value          // "one hundred (and) five"
+                } else if let current = number, lastWasTens, value < 10, !pendingAnd {
+                    number = current + value          // "twenty two"
+                } else {
+                    flush()
+                    number = value
+                }
+                lastWasTens = tens[lower] != nil
+                pendingAnd = false
+            } else if lower == "hundred", let current = number, current < 10, !pendingAnd {
+                number = current * 100
+                lastWasTens = false
+            } else if lower == "and", let current = number, current >= 100, current % 100 == 0, !pendingAnd {
+                pendingAnd = true
+            } else {
+                flush()
+                out.append(word)
+            }
+            if !trailing.isEmpty {
+                flush()
+                if out.isEmpty { out.append(trailing) } else { out[out.count - 1] += trailing }
+            }
+        }
+        flush()
+        return out.joined(separator: " ")
+    }
+
+    /// [1, 2, …, 22] → "1–22"; [3, 8, 9, 10] → "3, 8–10".
+    public static func span(_ pages: [Int]) -> String {
+        var out: [String] = []
+        var start: Int?
+        var last: Int?
+        for page in pages.sorted() {
+            if let l = last, page == l + 1 { last = page; continue }
+            if let s = start, let l = last { out.append(s == l ? "\(s)" : "\(s)–\(l)") }
+            start = page
+            last = page
+        }
+        if let s = start, let l = last { out.append(s == l ? "\(s)" : "\(s)–\(l)") }
+        return out.joined(separator: ", ")
     }
 
     /// The pages' text, each under "--- Page n of N ---".

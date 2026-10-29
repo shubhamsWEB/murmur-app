@@ -767,10 +767,10 @@ public final class CommandAgent {
                 // A summary of a page (or a question about all of it), answered from the part read so far: Murmur
                 // reads the whole page first, once, and the model answers from all of it.
                 if call.name == "reply" || call.name == "done", !readWholePage, wholePageChecks == 0,
-                   PageDigest.wantsWholePage(QuickCommands.clean(utterance)), let browser = browserHere() {
+                   PageDigest.wantsWholePage(QuickCommands.clean(utterance)),
+                   let page = await readWhole() {
                     wholePageChecks += 1
                     host.log("command: \(call.name) before the whole page was read; reading all of it first")
-                    let page = await wholePage(browser)
                     turns.append(.toolResult(callID: call.id, name: call.name, content:
                         "Not yet: that was from part of the page only. " + page
                         + "\n\nNow call reply with the answer, from the whole page."))
@@ -1338,6 +1338,7 @@ public final class CommandAgent {
             return Outcome(result: await showPage(url, opened: "Searching \(text("site")) for \"\(text("query"))\""))
         case "browser_read":
             guard let browser = browserHere() else {
+                if let document = await frontDocument() { return Outcome(result: document) }
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
             }
             let pdf = await showsPDF(browser)
@@ -1356,8 +1357,13 @@ public final class CommandAgent {
                 return Outcome(result: "The whole page, top to bottom:\n\(page)\n\n\(screen)")
             }
             return Outcome(result: screen)
-        case "read_whole_page":
+        case "read_whole_page", "read_document":
             guard let browser = browserHere() else {
+                if let document = await frontDocument(pages: text("pages")) { return Outcome(result: document) }
+                if tool == "read_document" {
+                    return Outcome(result: "\(ScreenControl.workingApp()?.localizedName ?? "The front app") isn't showing a "
+                        + "document file Murmur can read (a PDF, Word, RTF or text file). Use read_everything to read its window.")
+                }
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
             }
             return Outcome(result: await wholePage(browser, pages: text("pages")))
@@ -1439,6 +1445,11 @@ public final class CommandAgent {
             host.log("command: ran an AppleScript → \(result.hasPrefix("Script error") ? "error" : "ok")")
             return Outcome(result: result)
         case "read_screen":
+            if !readWholePage, BrowserControl.inFront() == nil,
+               PageDigest.wantsWholePage(QuickCommands.clean(utterance)) || !PDFText.pagesMentioned(utterance).isEmpty,
+               let document = await frontDocument() {
+                return Outcome(result: document)
+            }
             if !readWholePage, let browser = BrowserControl.inFront() {
                 let pdf = await showsPDF(browser)
                 if pdf || PageDigest.wantsWholePage(QuickCommands.clean(utterance)) {
@@ -1834,6 +1845,63 @@ public final class CommandAgent {
         return await digest(title: title, url: url, text: text, lead: nil)
     }
 
+    /// All of what's in front, for a summary or a question about all of it: the browser's page, or the document open
+    /// in another app. Nil when there's neither.
+    private func readWhole() async -> String? {
+        if let browser = browserHere() { return await wholePage(browser) }
+        return await frontDocument()
+    }
+
+    /// The document open in the front app (a PDF in Preview, a Word or text file), read from its file: the screen
+    /// shows a page or two of it, and a Mac often has no PDF tools for run_command. `pages`: a PDF's pages ("1 to
+    /// 22"), else the ones the request names, else all of it. Nil when a browser is in front or the window isn't a
+    /// readable file.
+    private func frontDocument(pages: String = "") async -> String? {
+        guard BrowserControl.inFront() == nil else { return nil }
+        let app = ScreenControl.workingApp()?.localizedName ?? "the front app"
+        guard let found = FrontDocument.locate() else {
+            host.log("command: no document file behind \(app)'s window")
+            return nil
+        }
+        let file = found.file
+        let name = file.lastPathComponent
+        host.log("command: the open document is \(file.path) (from \(found.from))")
+        let pages = pages.isEmpty ? PDFText.pagesMentioned(utterance) : pages
+        host.progress("Reading \(name)…")
+        guard let document = await FrontDocument.read(file, pages: pages) else {
+            let allowed = FileManager.default.isReadableFile(atPath: file.path)
+            host.log("command: couldn't read the open document \(file.path)\(allowed ? "" : " (macOS doesn't let Murmur read it)")")
+            readWholePage = true
+            if !allowed {
+                return "Murmur can't read \(name): macOS hasn't allowed Murmur to read files in \(file.deletingLastPathComponent().lastPathComponent). "
+                    + "Tell the user to allow Murmur in System Settings → Privacy & Security → Files and Folders (or Full "
+                    + "Disk Access) and ask again. Don't try run_command or other tools to read it."
+            }
+            return "\(name) couldn't be read (it may be damaged, protected with a password, or only scanned images). "
+                + "Answer from what's on screen (read_screen), and say it's only the pages in view."
+        }
+        readWholePage = true
+        sawEverything = true
+        guard let count = document.pageCount else {
+            host.log("command: read the open document \(name): \(document.text.count) characters")
+            return await digest(title: name, url: file.path, text: document.text,
+                                lead: "\(name), open in \(ScreenControl.workingApp()?.localizedName ?? "the front app"), "
+                                    + "read from the file itself: all of it. Answer from this; there's no need to scroll "
+                                    + "the window or run commands to read it.")
+        }
+        host.log("command: read the open document \(name): \(document.pages.count) of \(count) pages, "
+                 + "\(document.text.count) characters")
+        if document.pages.isEmpty {
+            return "\(name) has \(count) pages; there's no page \(pages). Ask for pages 1 to \(count)."
+        }
+        let which = document.pages.count == count ? "all \(count) pages"
+            : "page\(document.pages.count == 1 ? "" : "s") \(PDFText.span(document.pages)) of \(count)"
+        return await digest(title: name, url: file.path, text: document.text,
+                            lead: "\(name), open in \(ScreenControl.workingApp()?.localizedName ?? "the front app"), read "
+                                + "from the file itself: \(which), each under its page number. Answer from this; there's "
+                                + "no need to scroll the window, run commands or install anything to read it.")
+    }
+
     /// A read of the screen with hardly anything in it: little text and next to nothing to press.
     nonisolated static func seesLittle(_ screen: String) -> Bool {
         let controls = screen.split(separator: "\n").filter { $0.hasPrefix("[") }.count
@@ -1934,6 +2002,9 @@ public final class CommandAgent {
         if let browser = BrowserControl.inFront() {
             let page = await wholePage(browser)
             return readWholePage ? ScreenControl.Everything(text: page, screens: 2, reachedEnd: true) : nil
+        }
+        if !inChat(), let document = await frontDocument() {
+            return ScreenControl.Everything(text: document, screens: 2, reachedEnd: true)
         }
         let local = (activeRouter ?? currentRouter()) is OllamaRouter
         switch await ScreenControl.readEverything(fromTop: fromTop, limit: local ? 12_000 : 40_000) {
@@ -2136,6 +2207,10 @@ public final class CommandAgent {
                 + "When everything the user asked for is done, call done. If one response does it all (\"open "
                 + "Slack\"), put done at the end of that same response."),
             (nil, "- Apps: open_app, quit_app, hide_app, find_apps, list_running_apps. Use the app name the user said."),
+            (nil, "- Documents open in an app (a PDF in Preview or Acrobat, a Word, RTF or text file): read_document reads it "
+                + "from the file, every page numbered, and pages picks some (\"summarise pages 1 to 22\" → pages \"1-22\"). "
+                + "Use it for a summary of a document or a question about it; never run_command, scripts or installing tools "
+                + "to read a document, and don't answer about all of it from the pages on screen."),
             (nil, "- Opening a file (\"open my resume pdf\"): open_file with the description in the user's words. A file "
                 + "from memory (\"In play\") only when the user points back to it (\"open it again\", \"that PDF\"); "
                 + "\"open the PDF\" is a new request, not the last file opened."),
@@ -2404,6 +2479,10 @@ public final class CommandAgent {
             tool("scroll_at", "Scroll the part of the screen at a position on the latest look's screenshot",
                  ["x": ("number", "pixels from the left"), "y": ("number", "pixels from the top"),
                   "direction": ("string", "down, up, top or bottom")], required: ["direction"]),
+            tool("read_document", "Read the document open in the front app (a PDF in Preview or Acrobat, a Word, RTF or "
+                 + "text file; a PDF in the browser too) from the file itself, every page numbered: for a summary of it "
+                 + "or of some pages, or a question about it. Use this, not run_command, to read a document",
+                 ["pages": ("string", "for a PDF, optional: a page or pages, e.g. 10, 5-7, 1 to 22")], required: []),
             tool("read_everything", "Read ALL of the front window's list, chat, inbox, feed, table, settings or document "
                  + "(or the whole page in a browser): it scrolls through to the very end itself and gives all the text, "
                  + "top to bottom. For anything that may be out of view: \"all\", \"every\", \"how many\", \"the "

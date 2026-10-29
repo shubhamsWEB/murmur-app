@@ -46,6 +46,9 @@ public enum QuickCommands {
     static let sitePattern = sites.keys.sorted { $0.count > $1.count }
         .map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
 
+    /// Words that make "the pdf …" a sentence about the one on screen, not what to search for.
+    static let aboutTheOpenOne = #"\b(is|are|was|you|can|it|scroll|read|summari[sz]e|summary|explain|on screen|open in|opened)\b"#
+
     private static let rules: [(String, (Match) -> Action?)] = [
         // "check for updates on my macbook", "update my mac", "is there a macos update"
         (#"^(?:check|look|search)(?: for)? (?:any |new |the )?(?:software |system |macos |mac ?os |mac )?updates?(?: (?:on|for) (?:my |the |this )?(?:mac|macbook|laptop|computer|system))?$|^(?:update|upgrade) (?:my |the |this )?(?:mac|macbook|macos|mac os|laptop|computer|system)$|^(?:is there|are there) (?:a |an |any )?(?:software |system |macos |mac )?updates?.*$"#, { _ in
@@ -66,7 +69,10 @@ public enum QuickCommands {
             return Action(tool: "open_file", arguments: ["query": query]) }),
         // "my photos on the beach", "show me pictures of the dog", "the pdf about my lease", "screenshots from last week"
         (#"^(?:show me |show |find |get |open |search for |look for )?(?:all )?(?:my |the |some )?((?:photos?|pictures?|pics|images?|screenshots?|videos?|clips?|recordings?|documents?|docs|pdfs?|files?|slides|presentations?|spreadsheets?|receipts?|invoices?)\b.*)$"#, { m in
-            Action(tool: "search_files", arguments: ["query": m[1]]) }),
+            // "the pdf is open, you can scroll and read it", "the document on screen, summarise it": about the one
+            // in front, for the router, not a search for files called that.
+            if m[1].range(of: QuickCommands.aboutTheOpenOne, options: .regularExpression) != nil { return nil }
+            return Action(tool: "search_files", arguments: ["query": m[1]]) }),
         (#"^(?:find|search for|search) (?:my |the )?(?:file|files|document|documents|pdf|photo|picture)s?(?: about| called| named| with)? (.+)$"#, { m in
             Action(tool: "search_files", arguments: ["query": m[1]]) }),
         // A site's own search: "search youtube for lofi", "find usb hubs on amazon", "look up swift actors on github".
