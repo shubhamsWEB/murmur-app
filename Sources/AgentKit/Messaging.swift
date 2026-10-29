@@ -84,14 +84,20 @@ enum Messaging {
             + "click), type_text the message, then press_keys return (the user already said yes to sending it)."
     }
 
-    /// The person's full name, phone and email from Contacts.
+    /// The person's full name, phone and email from Contacts. A partial name is usable only when it identifies one
+    /// contact; choosing the first of several “Alex” contacts could send a message to the wrong person.
     static func contact(_ name: String) async -> (name: String, phone: String?, email: String?)? {
         await Permissions.automation("com.apple.AddressBook")
         let script = """
         tell application "Contacts"
-            set found to (every person whose name contains "\(quoted(name))")
-            if found is {} then return ""
-            set p to item 1 of found
+            set exactFound to (every person whose name is "\(quoted(name))")
+            if (count of exactFound) = 1 then
+                set p to item 1 of exactFound
+            else
+                set partialFound to (every person whose name contains "\(quoted(name))")
+                if (count of partialFound) is not 1 then return ""
+                set p to item 1 of partialFound
+            end if
             set ph to ""
             set em to ""
             if (count of phones of p) > 0 then set ph to value of first phone of p

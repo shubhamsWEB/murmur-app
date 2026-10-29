@@ -1369,6 +1369,44 @@ private struct CommandsPage: View {
                     .frame(width: 160)
                 }
             }
+            SettingsSection("Screen vision") {
+                SettingRow(title: "Screenshots go to",
+                           detail: "When an app's buttons and text can't be read directly (pictures, canvas apps, icons), Murmur "
+                               + "looks at a screenshot of its window. “On this Mac” keeps every screenshot here.") {
+                    Picker("Screenshots go to", selection: state.bind(get: { VisionText.mode.rawValue },
+                                                                    set: { UserDefaults.standard.set($0, forKey: "screenVision") })) {
+                        Text("On this Mac").tag(VisionText.Mode.local.rawValue)
+                        Text("The cloud model").tag(VisionText.Mode.cloud.rawValue)
+                        Text("Nowhere (text only)").tag(VisionText.Mode.off.rawValue)
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+                }
+                RowDivider()
+                SettingRow(title: "Vision model on this Mac", detail: visionDetail) {
+                    HStack(spacing: 8) {
+                        Picker("Vision model", selection: state.bind(get: { VisionText.localModel }, set: { model in
+                            UserDefaults.standard.set(model, forKey: "visionModel")
+                            Task { await VisionSetup.shared.refresh() }
+                        })) {
+                            ForEach(["qwen3-vl:2b", "qwen3-vl:4b", "qwen3-vl:8b"], id: \.self) { Text($0).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+                        .disabled(VisionSetup.shared.isDownloading)
+                        switch VisionSetup.shared.phase {
+                        case .missing, .failed:
+                            Button("Download") { VisionSetup.shared.start() }
+                                .disabled(!VisionSetup.shared.hasRoom)
+                        case .downloading:
+                            ProgressView().controlSize(.small)
+                        default:
+                            EmptyView()
+                        }
+                    }
+                }
+            }
+            .task { await VisionSetup.shared.refresh() }
             SettingsSection("Coding agents") {
                 ForEach(AssistantCLI.allCases, id: \.self) { helper in
                     agentRow(helper)
@@ -1471,6 +1509,19 @@ private struct CommandsPage: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// The vision model's row: what it is, and how its download is going.
+    private var visionDetail: String {
+        let vision = VisionSetup.shared
+        switch vision.phase {
+        case .ready: return "\(vision.model) is installed. Screenshots stay on this Mac."
+        case .downloading(let part): return "Downloading \(vision.model): \(Int(part * 100))% of \(vision.sizeText)."
+        case .noOllama: return "Needs Ollama (ollama.com). Until then Murmur reads the screen's text."
+        case .failed(let why): return why
+        case .missing where !vision.hasRoom: return "\(vision.model) needs \(vision.sizeText) and more free disk space."
+        default: return "Qwen3-VL through Ollama: 8B (6.2 GB, best) or 4B (3.3 GB, for 8 GB Macs)."
+        }
     }
 
     private func keyDetail(_ choice: RouterChoice) -> String {

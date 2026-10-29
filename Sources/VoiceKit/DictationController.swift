@@ -254,10 +254,12 @@ public final class DictationController: ObservableObject {
         }
     }
 
-    /// Quiet Voice: boost soft speech up to 40 dB instead of 30 dB, for whispering or speaking softly. (Named for
-    /// your voice, not OpenAI's Whisper: speech is always recognised on this Mac. The setting keeps its old key.)
+    /// Quiet Voice: boost soft speech up to 40 dB instead of 30 dB, for whispering or speaking softly. On unless
+    /// you turn it off: speaking softly to the Mac is the usual way, and a stronger boost costs nothing at normal
+    /// volume. (Named for your voice, not OpenAI's Whisper: speech is always recognised on this Mac. The setting
+    /// keeps its old key, so a choice already made stays.)
     public var whisperMode: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.whisperDefault) }
+        get { UserDefaults.standard.object(forKey: Self.whisperDefault) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.whisperDefault) }
     }
 

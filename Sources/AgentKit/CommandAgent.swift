@@ -155,6 +155,19 @@ public final class CommandAgent {
     /// The page was read to the end in this command (for a summary or a question about all of it).
     private var readWholePage = false
     private var wholePageChecks = 0
+    /// The command looked at the screen (read it, clicked or scrolled in it), and whether all of what's there was
+    /// seen (read to the end, or scrolled to the end): an answer about "all", "how many" or "the latest" from one
+    /// screenful is read through to the end first.
+    private var lookedAtScreen = false
+    private var sawEverything = false
+    private var everythingChecks = 0
+    /// Something in a list was opened (an email, a post): the screen is that one item now, not the list, so reading
+    /// "all of it" would read the item, not the list the answer is about.
+    private var openedAnItem = false
+    /// The model has looked at a screenshot in this command: after a click or scroll at a point it gets a fresh one,
+    /// since that's how it's finding its way.
+    private var usingVision = false
+    private var visionHintShown = false
     /// The model working this command (it can change to the local one when a cloud model fails).
     private var activeRouter: Router?
     /// What this command did so far (skills followed, steps, model, time), shown with its answer.
@@ -164,7 +177,7 @@ public final class CommandAgent {
     private static let openingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "read_screen", "wait",
         "browser_read", "browser_tabs", "browser_scroll", "browser_back", "plan", "use_skill", "read_skill_file",
-        "more_tools", "read_whole_page",
+        "more_tools", "read_whole_page", "scroll", "read_everything", "look", "scroll_at",
     ]
 
     /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
@@ -216,7 +229,7 @@ public final class CommandAgent {
     private static let screenChangingTools: Set<String> = [
         "open_app", "open_url", "web_search", "site_search", "open_settings", "open_folder", "click", "press_keys",
         "type_text", "write_in_app", "browser_click", "browser_type", "browser_scroll", "browser_switch_tab",
-        "browser_back",
+        "browser_back", "scroll", "click_at", "click_on", "scroll_at",
     ]
     /// A click on one of these asks you first.
     private static let riskyWords = #"(?i)\b(send|delete|remove|buy|purchase|pay|place order|checkout|check out|post|publish|submit|transfer|unsubscribe|sign out|log out|confirm|book|reply all)\b"#
@@ -589,7 +602,7 @@ public final class CommandAgent {
         context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
         if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
         if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
-        if let memory = CommandMemory.workingSet() {
+        if let memory = CommandMemory.workingSet(for: utterance) {
             context += "\nMemory (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" refer to):\n\(memory)"
         }
         if let session = CodingSession.current {
@@ -722,8 +735,20 @@ public final class CommandAgent {
                 return
             }
             if reply.calls.isEmpty {
-                // A model sometimes answers in plain text: treat that as the reply.
+                // A model sometimes answers in plain text: treat that as the reply. With the task list unfinished,
+                // that's giving up half-way ("I couldn't open the others"): it goes on, as a reply would.
                 let text = ModelOutput.answer(reply.text)
+                if !text.isEmpty, planChecks < 3, plan.contains(where: { !$0.done }) {
+                    planChecks += 1
+                    let open = plan.filter { !$0.done }.map { "[ ] \($0.text)" }.joined(separator: "\n")
+                    host.log("command: answered in text with \(plan.filter { !$0.done }.count) steps open; going on")
+                    turns.append(.assistant(text: reply.text, calls: []))
+                    turns.append(.user("Not finished: your task list still has open steps:\n\(open)\nDo them now with tool "
+                        + "calls. If something didn't work, try another way: read_screen to see where you are, click "
+                        + "by its [n], scroll to find it, press_keys (\"escape\", \"cmd+[\" to go back), or open the item "
+                        + "again from the list. Only when a step truly can't be done, mark it in plan and say why."))
+                    continue
+                }
                 if !text.isEmpty { host.showAnswer(text); return }
                 // Nothing at all: ask once more rather than stop silently half-way.
                 if nudgedForTools { await wrapUp(router: router, system: system, turns: turns, tools: tools); return }
@@ -760,6 +785,22 @@ public final class CommandAgent {
                         "Not finished: your task list still has open steps:\n\(open)\nDo them now. If one turned out "
                         + "unnecessary or impossible, call plan with the updated list (mark it [x] and say why in a note). "
                         + "Then give the final answer from your notes."))
+                    continue
+                }
+                // An answer about all of a list, chat, inbox or feed ("how many unread", "the cheapest", "every
+                // invoice") from what was in view: Murmur scrolls through the rest first, once, and the model goes on
+                // from all of it (it may still have something to click or answer).
+                if call.name == "reply" || call.name == "done", everythingChecks == 0, !sawEverything, !readWholePage,
+                   !plan.contains(where: { !$0.done }), !openedAnItem,
+                   lookedAtScreen || Self.pointsAtScreen(utterance),
+                   PageDigest.wantsEverything(QuickCommands.clean(utterance)),
+                   let all = await everything(fromTop: !inChat()), all.screens > 1 {
+                    everythingChecks += 1
+                    host.log("command: \(call.name) from one screenful; read all \(all.screens) screens first")
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Not yet: that was from the part on screen only, and there's more of it out of view. All of "
+                        + "it, scrolled through:\n" + all.text + "\n\nNow finish the request from all of it: act on "
+                        + "what's needed (scroll to it, read_screen, click) or call reply with the answer."))
                     continue
                 }
                 if call.name == "done", awaitingPick {
@@ -836,7 +877,20 @@ public final class CommandAgent {
                 results.append(outcome.result)
                 // A look counts only if nothing changed the screen after it.
                 if Self.screenChangingTools.contains(call.name) { changedScreen = true; looked = false }
-                if call.name == "read_screen" || call.name == "browser_read" { looked = true }
+                if ["read_screen", "browser_read", "read_everything", "read_whole_page", "look"].contains(call.name) { looked = true }
+                if ["read_screen", "browser_read", "click", "scroll", "browser_scroll", "browser_click", "look", "click_at",
+                    "click_on", "scroll_at"].contains(call.name) {
+                    lookedAtScreen = true
+                }
+                if ["click", "browser_click", "click_at", "click_on"].contains(call.name) { openedAnItem = true }
+                if ["read_screen", "browser_read", "browser_back", "read_everything", "read_whole_page", "look"].contains(call.name) {
+                    openedAnItem = false
+                }
+                if call.name == "read_everything" || call.name == "read_whole_page"
+                    || ((call.name == "scroll" || call.name == "browser_scroll")
+                        && outcome.result.range(of: #"(?i)\b(end of|at the end|very end)\b"#, options: .regularExpression) != nil) {
+                    sawEverything = true
+                }
                 var content = outcome.result
                 // The last call of a step that changed the screen carries a fresh look at it, so the model sees
                 // where it is (a page that loaded, a dialog that opened) without spending a step to ask.
@@ -925,7 +979,7 @@ public final class CommandAgent {
     /// Moving through pages and lists: the same call again is progress (the next screenful), not a loop.
     private static let browsingTools: Set<String> = [
         "browser_scroll", "browser_read", "browser_back", "read_screen", "wait", "note", "plan",
-        "use_skill", "read_skill_file", "more_tools", "read_whole_page",
+        "use_skill", "read_skill_file", "more_tools", "read_whole_page", "scroll", "read_everything", "look", "scroll_at",
     ]
 
     /// Skills loaded with use_skill: they join the instructions (and stay the same from then on).
@@ -1031,7 +1085,8 @@ public final class CommandAgent {
         if wantsAnswer {
             // An answer would have finished the command already: none has been given.
             return "Not done yet. \(asked) They want to be told something, and you haven't told them. Read what's "
-                + "needed (browser_read, browser_scroll or browser_click to get to it, read_screen outside the browser), "
+                + "needed (browser_read, browser_scroll or browser_click to get to it, read_screen outside the browser; "
+                + "read_everything or scroll when it may be out of view), "
                 + "then call reply with the actual answer: the numbers, names or text they asked for."
         }
         if hasMoreSteps, !didMoreThanOpen {
@@ -1285,7 +1340,8 @@ public final class CommandAgent {
             guard let browser = browserHere() else {
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
             }
-            if !readWholePage, PageDigest.wantsWholePage(QuickCommands.clean(utterance)) {
+            let pdf = await showsPDF(browser)
+            if !readWholePage, pdf || PageDigest.wantsWholePage(QuickCommands.clean(utterance)) {
                 return Outcome(result: await wholePage(browser))
             }
             host.progress("Reading the page…")
@@ -1304,7 +1360,7 @@ public final class CommandAgent {
             guard let browser = browserHere() else {
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): read_screen to see it, or open_url to open a page.")
             }
-            return Outcome(result: await wholePage(browser))
+            return Outcome(result: await wholePage(browser, pages: text("pages")))
         case "browser_click":
             guard let browser = browserHere() else {
                 return Outcome(result: "No browser is in front (the user is in \(ScreenControl.workingApp()?.localizedName ?? "another app")): use read_screen and click, or open_url first.")
@@ -1383,9 +1439,11 @@ public final class CommandAgent {
             host.log("command: ran an AppleScript → \(result.hasPrefix("Script error") ? "error" : "ok")")
             return Outcome(result: result)
         case "read_screen":
-            if !readWholePage, PageDigest.wantsWholePage(QuickCommands.clean(utterance)),
-               let browser = BrowserControl.inFront() {
-                return Outcome(result: await wholePage(browser))
+            if !readWholePage, let browser = BrowserControl.inFront() {
+                let pdf = await showsPDF(browser)
+                if pdf || PageDigest.wantsWholePage(QuickCommands.clean(utterance)) {
+                    return Outcome(result: await wholePage(browser))
+                }
             }
             // In a browser, the page itself says more than its window does.
             if let browser = BrowserControl.inFront(), await canScript(browser),
@@ -1403,7 +1461,86 @@ public final class CommandAgent {
                 host.log("command: and the whole page through Accessibility: \(page.count) characters")
                 return Outcome(result: screen + "\n\nThe whole page, top to bottom (including what's scrolled out of view):\n\(page)")
             }
+            // The app shares little through Accessibility (a canvas, a game, a remote desktop, a picture): look at it.
+            if Self.seesLittle(screen) {
+                host.log("command: Accessibility shows little here; looking at a screenshot")
+                return Outcome(result: screen + "\n\nAccessibility shows little in this app, so here's a look at it:\n"
+                    + (await see(question: "")))
+            }
             return Outcome(result: screen)
+        case "look":
+            return Outcome(result: await see(question: text("question")))
+        case "click_at", "click_on":
+            let double = text("double") == "true", right = text("right") == "true"
+            var point: CGPoint?
+            var how = ""
+            if tool == "click_on" {
+                let target = text("target")
+                guard !target.isEmpty else { return Outcome(result: "Say what to click.") }
+                // Accessibility first (exact, and it's the thing itself), then a vision model on this Mac.
+                if !double, !right, target.range(of: Self.riskyWords, options: .regularExpression) == nil {
+                    let clicked = await ScreenControl.click(labeled: target)
+                    if clicked.hasPrefix("Clicked") { return Outcome(result: clicked) }
+                }
+                guard let shot = await ScreenControl.shoot() else {
+                    return Outcome(result: "Couldn't take a screenshot to find “\(target)” (Murmur needs Screen "
+                        + "Recording permission). Use read_screen and click instead.")
+                }
+                host.progress("Finding “\(target)” on the screen…")
+                switch await LocalVision.locate(target, jpeg: shot.jpeg, width: shot.width, height: shot.height) {
+                case .success(let found?):
+                    point = shot.screenPoint(x: Double(found.x), y: Double(found.y))
+                    how = " (found at \(found.x), \(found.y) on the screenshot)"
+                case .success(nil):
+                    return Outcome(result: "“\(target)” isn't on the screen. look to see what's there, or scroll to it.")
+                case .failure(let failure):
+                    return Outcome(result: "Couldn't find “\(target)” by sight: \(failure.text) Use look, then click_at.")
+                }
+            } else {
+                guard let shot = ScreenControl.lastShot else {
+                    return Outcome(result: "Take a screenshot with look first: click_at's positions are on it.")
+                }
+                point = shot.screenPoint(x: args["x"]?.number ?? 0, y: args["y"]?.number ?? 0)
+            }
+            guard let point else { return Outcome(result: "No position to click.") }
+            let what = ScreenControl.describe(at: point) ?? (tool == "click_on" ? "“\(text("target"))”" : "that spot")
+            if what.range(of: Self.riskyWords, options: .regularExpression) != nil
+                || text("target").range(of: Self.riskyWords, options: .regularExpression) != nil {
+                guard await allow(.clicks, "Click \(what)?", "This may send, post or delete something.") else {
+                    return Outcome(result: "You said no to clicking \(what).", finished: true)
+                }
+            }
+            host.progress("Clicking \(what)…")
+            await ScreenControl.click(at: point, double: double, right: right)
+            host.log("command: clicked \(what) at \(Int(point.x)),\(Int(point.y))\(how)")
+            return Outcome(result: "\(right ? "Right-clicked" : double ? "Double-clicked" : "Clicked") \(what)\(how).")
+        case "scroll_at":
+            guard let shot = ScreenControl.lastShot else {
+                return Outcome(result: "Take a screenshot with look first: scroll_at's position is on it.")
+            }
+            let point = shot.screenPoint(x: args["x"]?.number ?? Double(shot.width) / 2,
+                                         y: args["y"]?.number ?? Double(shot.height) / 2)
+            let way = text("direction").isEmpty ? "down" : text("direction")
+            host.progress("Scrolling…")
+            await ScreenControl.scroll(at: point, direction: way)
+            return Outcome(result: "Scrolled \(way) there.")
+        case "scroll":
+            // In the browser, the page's own scrolling (it knows the panel that scrolls in web apps).
+            if let browser = BrowserControl.inFront(), await canScript(browser) {
+                return Outcome(result: await BrowserControl.scroll(text("direction"), in: browser))
+            }
+            host.progress("Scrolling…")
+            let around = args["id"]?.number.map { Int($0) }
+            let result = await ScreenControl.scroll(text("direction").isEmpty ? "down" : text("direction"), around: around)
+            host.log("command: scrolled \(text("direction")) → \(result)")
+            return Outcome(result: result)
+        case "read_everything":
+            host.progress("Reading all of it…")
+            let fromTop = text("from").lowercased() != "here"
+            guard let all = await everything(fromTop: fromTop) else {
+                return Outcome(result: await ScreenControl.read())
+            }
+            return Outcome(result: all.text)
         case "click":
             let id = Int(args["id"]?.number ?? 0)
             let what = ScreenControl.name(of: id) ?? "[\(id)]"
@@ -1511,11 +1648,25 @@ public final class CommandAgent {
         case "app_dictionary":
             return Outcome(result: await AppData.scriptingDictionary(text("app")))
         case "send_message":
-            let said = text("to"), body = text("text")
+            let requested = text("to"), body = text("text")
+            // This sits after model routing, so an old name in the model context can never redirect a clearly spoken
+            // recipient. It intentionally does not try to resolve pronouns; those remain explicit follow-ups.
+            let requestedApp = text("app")
+            let target = MessageIntent.authoritativeTarget(in: utterance, modelRecipient: requested, modelApp: requestedApp)
+            let said = target.recipient
+            if !requested.isEmpty,
+               prefs.person(said).caseInsensitiveCompare(prefs.person(requested)) != .orderedSame {
+                host.log("command: message recipient policy used spoken \"\(said)\" instead of model \"\(requested)\"")
+            }
             // "Mom" → Roma; no app named → where Roma is messaged (what you said, else what Murmur noticed).
             let to = prefs.person(said)
-            let app = !text("app").isEmpty ? text("app")
+            let app = target.app ?? (!requestedApp.isEmpty ? requestedApp
                 : prefs.chatApp(for: to) ?? ScreenControl.workingApp()?.localizedName ?? "Messages"
+            )
+            if let spokenApp = target.app, !requestedApp.isEmpty,
+               spokenApp.caseInsensitiveCompare(requestedApp) != .orderedSame {
+                host.log("command: message app policy used spoken \"\(spokenApp)\" instead of model \"\(requestedApp)\"")
+            }
             guard !to.isEmpty, !body.isEmpty else { return Outcome(result: "Who should it go to, and what should it say?") }
             guard await allow(.messages, "Send this to \(to) on \(app)?", "“\(body)”") else {
                 return Outcome(result: "You chose not to send it.", finished: true)
@@ -1556,9 +1707,16 @@ public final class CommandAgent {
             if await canScript(browser) {
                 _ = await BrowserControl.evaluate("history.back(); 'ok'", in: browser)
             } else {
+                let before = await pageMark()
                 NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first?.activate()
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 _ = ScreenControl.press("cmd+[")
+                // Web apps (Gmail, LinkedIn) open an item without a new page in the history: their own back button.
+                if let before, await pageUnchanged(since: before) {
+                    host.log("command: cmd+[ didn't go back; trying the page's own back button")
+                    let clicked = await ScreenControl.click(labeled: "Back to")
+                    if !clicked.hasPrefix("Clicked") { _ = await ScreenControl.click(labeled: "Back") }
+                }
             }
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             return Outcome(result: "Went back to the previous page.")
@@ -1601,7 +1759,7 @@ public final class CommandAgent {
 
     /// Tools after which the page should look different.
     private static let pageChangingTools: Set<String> = [
-        "browser_click", "click", "open_url", "web_search", "site_search", "browser_back",
+        "browser_click", "click", "open_url", "web_search", "site_search", "browser_back", "click_at", "click_on",
     ]
 
     /// Where the browser is and what its page holds, cheaply: the address, the title and a sign of the text.
@@ -1634,22 +1792,127 @@ public final class CommandAgent {
 
     /// The page read to the very end, for the model: whole when it fits, else read in parts with notes taken on each
     /// part for the request (by the same model, with no tools), so the answer covers all of it.
-    private func wholePage(_ browser: BrowserControl.Browser) async -> String {
+    private func wholePage(_ browser: BrowserControl.Browser, pages: String = "") async -> String {
         host.progress("Reading the whole page…")
         var title = "", url = "", text = ""
+        var cut = false
+        let tab = await BrowserControl.currentTab(in: browser)
+        // "Summarise page 10 of this PDF": just that page, unless the model asked for others.
+        let pages = pages.isEmpty ? PDFText.pagesMentioned(utterance) : pages
+        // A PDF: read from the file, every page numbered, not from the viewer (which shares a few pages at most).
+        if let tab, PDFText.isPDF(url: tab.url, title: tab.title) {
+            host.progress("Reading the PDF…")
+            if let pdf = await PDFText.read(tab.url, pages: pages) {
+                host.log("command: read the PDF itself: \(pdf.pages.count) of \(pdf.pageCount) pages, \(pdf.text.count) characters")
+                if pdf.pages.isEmpty {
+                    return "The PDF has \(pdf.pageCount) pages; there's no page \(pages). Ask for pages 1 to \(pdf.pageCount)."
+                }
+                readWholePage = true
+                let which = pdf.pages.count == pdf.pageCount ? "all \(pdf.pageCount) pages"
+                    : "page\(pdf.pages.count == 1 ? "" : "s") \(pdf.pages.map(String.init).joined(separator: ", ")) of \(pdf.pageCount)"
+                return await digest(title: tab.title, url: tab.url, text: pdf.text,
+                                    lead: "The PDF itself, read from the file: \(which), each under its page number. "
+                                        + "Answer from this; there's no need to scroll the viewer or type in its page box.")
+            }
+            host.log("command: couldn't fetch the PDF itself; reading the viewer instead")
+        }
         if await canScript(browser), case .success(let page) = await BrowserControl.readAll(in: browser) {
             (title, url, text) = (page.title, page.url, page.text)
-        } else if let page = await ScreenControl.readPage() {
-            text = page
+        } else if let page = await ScreenControl.readPage(limit: 150_000) {
+            (title, url, text) = (tab?.title ?? "", tab?.url ?? "", page)
+            cut = page.count >= 150_000
         }
         guard !text.isEmpty else {
             return "Couldn't get the page's text. Use read_screen, or browser_scroll and browser_read."
         }
-        readWholePage = true
+        readWholePage = !cut
+        host.log("command: read the whole page in \(browser.name): \(text.count) characters\(cut ? " (cut)" : "")")
+        if cut {
+            return await digest(title: title, url: url, text: text, lead: "The page's first \(text.count) characters "
+                + "(it goes on further; this is not all of it).")
+        }
+        return await digest(title: title, url: url, text: text, lead: nil)
+    }
+
+    /// A read of the screen with hardly anything in it: little text and next to nothing to press.
+    nonisolated static func seesLittle(_ screen: String) -> Bool {
+        let controls = screen.split(separator: "\n").filter { $0.hasPrefix("[") }.count
+        let text = screen.components(separatedBy: "Text on screen:").dropFirst().first?
+            .components(separatedBy: "Things to press or type into:").first?.count ?? 0
+        return controls <= 3 && text < 200
+    }
+
+    /// A look at the working app's window, for the model: with on-device vision (the default), its description and
+    /// the positions of what can be clicked, from Qwen3-VL on this Mac (the screenshot stays here); with cloud vision
+    /// and a cloud model, the screenshot itself as an image; otherwise (vision off, or no model ready) the text on it
+    /// with positions, from the Mac's own text recognition.
+    private func see(question: String) async -> String {
+        host.progress("Looking at the screen…")
+        guard let shot = await ScreenControl.shoot() else {
+            return "Couldn't take a screenshot: Murmur needs Screen Recording permission (System Settings → Privacy & "
+                + "Security → Screen Recording). Use read_screen meanwhile."
+        }
+        usingVision = true
+        let header = "Screenshot of \(shot.app) · “\(shot.window)”, \(shot.width)×\(shot.height) pixels. Positions are "
+            + "in its pixels from the top-left: click_at and scroll_at take them."
+        let router = activeRouter ?? currentRouter()
+        let recognised = { ScreenControl.recognisedLines(shot).map { "\nText on it, with positions:\n" + $0 } ?? "" }
+        switch VisionText.mode {
+        case .cloud where !(router is OllamaRouter):
+            let id = ScreenshotStore.shared.put(shot.jpeg)
+            host.log("command: screenshot to \(router.name) (\(shot.width)×\(shot.height), \(shot.jpeg.count / 1024) KB)")
+            return header + recognised() + "\n" + VisionText.marker(id)
+        case .off:
+            return header + recognised()
+        default:
+            let started = Date()
+            switch await LocalVision.describe(shot.jpeg, width: shot.width, height: shot.height, app: shot.app,
+                                              window: shot.window, question: question) {
+            case .success(let description):
+                host.log(String(format: "command: looked with %@ on this Mac in %.1f s", VisionText.localModel,
+                                Date().timeIntervalSince(started)))
+                return header + "\nWhat's on it (seen on this Mac):\n" + description
+            case .failure(let failure):
+                host.log("command: on-device vision unavailable (\(failure.text)); text recognition instead")
+                // The first time an app needs seeing and the model isn't here: offer it, once ever. It downloads in
+                // the background; this command goes on with the screen's text.
+                let vision = VisionSetup.shared
+                if case .notReady = failure, !VisionSetup.offered, OllamaProbe.isInstalled, vision.hasRoom,
+                   !vision.isDownloading {
+                    VisionSetup.offered = true
+                    if await host.confirm("See this app better?",
+                                          "Murmur can look at apps like this one with a vision model on your Mac "
+                                          + "(\(vision.model), \(vision.sizeText)). Download it in the background? "
+                                          + "Screenshots stay on this Mac.") {
+                        vision.start()
+                        host.log("command: downloading \(vision.model) in the background")
+                    }
+                }
+                if !visionHintShown {
+                    visionHintShown = true
+                    host.progress(failure.text)
+                }
+                return header + recognised() + "\n(On-device vision isn't available: \(failure.text))"
+            }
+        }
+    }
+
+    /// The browser's tab shows a PDF.
+    private func showsPDF(_ browser: BrowserControl.Browser) async -> Bool {
+        guard let tab = await BrowserControl.currentTab(in: browser) else { return false }
+        return PDFText.isPDF(url: tab.url, title: tab.title)
+    }
+
+    /// Text for the model: whole when it fits, else read in parts with notes taken on each for the request (by the
+    /// same model, with no tools), so the answer covers all of it. `lead`: what the text is, when it isn't simply the
+    /// whole page.
+    private func digest(title: String, url: String, text: String, lead: String?) async -> String {
         let router = activeRouter ?? currentRouter()
         let local = router is OllamaRouter
-        host.log("command: read the whole page in \(browser.name): \(text.count) characters")
-        if text.count <= (local ? 14_000 : 60_000) { return PageDigest.whole(title: title, url: url, text: text) }
+        if text.count <= (local ? 14_000 : 60_000) {
+            guard let lead else { return PageDigest.whole(title: title, url: url, text: text) }
+            return "\(lead)\nPage: \(title) — \(url)\n\n\(text)"
+        }
         let parts = PageDigest.parts(text, size: local ? 9_000 : 40_000)
         var notes: [String] = []
         for (index, part) in parts.enumerated() {
@@ -1661,7 +1924,34 @@ public final class CommandAgent {
             notes.append(written.isEmpty ? String(part.prefix(1500)) + " …" : written)
         }
         host.log("command: notes on \(parts.count) parts of the page")
-        return PageDigest.notes(title: title, url: url, characters: text.count, parts: notes)
+        let summary = PageDigest.notes(title: title, url: url, characters: text.count, parts: notes)
+        return lead.map { "\($0)\n\n" + summary } ?? summary
+    }
+
+    /// All of what's in the front window, scrolled through to the end: the whole page in a browser, else the
+    /// window's list, chat or document. Nil when it can't be read.
+    private func everything(fromTop: Bool) async -> ScreenControl.Everything? {
+        if let browser = BrowserControl.inFront() {
+            let page = await wholePage(browser)
+            return readWholePage ? ScreenControl.Everything(text: page, screens: 2, reachedEnd: true) : nil
+        }
+        let local = (activeRouter ?? currentRouter()) is OllamaRouter
+        switch await ScreenControl.readEverything(fromTop: fromTop, limit: local ? 12_000 : 40_000) {
+        case .success(let all):
+            sawEverything = true
+            host.log("command: read all of the window: \(all.screens) screens, \(all.text.count) characters"
+                + (all.reachedEnd ? "" : ", stopped before the end"))
+            return all
+        case .failure(let failure):
+            host.log("command: couldn't read all of the window: \(failure.text)")
+            return nil
+        }
+    }
+
+    /// A chat app is in front: its newest messages are at the bottom, so reading all of it starts from where it is.
+    private func inChat() -> Bool {
+        guard let id = ScreenControl.workingApp()?.bundleIdentifier else { return false }
+        return Messaging.apps.contains(id)
     }
 
     /// The browser the page tools act in: the one in front, or the one this command opened a page in. Not the
@@ -1803,6 +2093,10 @@ public final class CommandAgent {
     private func screenAfterChange(_ tool: String) async -> String {
         let web: Set<String> = ["open_url", "web_search", "site_search"]
         try? await Task.sleep(nanoseconds: web.contains(tool) ? 2_000_000_000 : 700_000_000)
+        // Finding its way by screenshots: the next one, so it sees what the click or scroll did.
+        if usingVision, ["click_at", "click_on", "scroll_at", "press_keys", "type_text"].contains(tool) {
+            return "\n\nThe screen now:\n" + (await see(question: ""))
+        }
         if let browser = BrowserControl.inFront(), await canScript(browser),
            case .success(let page) = await BrowserControl.read(in: browser, limit: 3500) {
             return "\n\nThe page now:\n\(page)"
@@ -1870,6 +2164,22 @@ public final class CommandAgent {
                 + "tools don't cover. After an action that changes the screen you are shown the new screen with its "
                 + "[n] numbers; use only numbers from the latest screen. Keep going until the whole request is done, "
                 + "then call done."),
+            (nil, "- When read_screen can't see it (little text, an icon without words, a canvas, a game, a remote "
+                + "desktop, an image, a chart): look gives a screenshot's contents with positions; click_on clicks a "
+                + "thing by description; click_at and scroll_at act at a position on the latest look. Prefer [n] "
+                + "elements and app tools when they work; use sight when they don't. After a click by sight you're "
+                + "shown the screen again: check it did what you meant."),
+            (nil, "- Local commands: run_command is a first-class route, not a last resort. Files, folders, disk, "
+                + "network, processes, git, converting and extracting (text from a PDF or document with textutil or "
+                + "mdls, image details with sips) are surer through a command than by clicking."),
+            (nil, "- See all of it, like a person scrolling: read_screen shows only what's in view, and says when "
+                + "there's more below or above. When what you need may be further on (a long list, inbox, chat, feed, "
+                + "table, settings pane or document; \"all\", \"every\", \"how many\", \"the latest\", \"unread\", "
+                + "\"the cheapest\"), call read_everything (it scrolls to the very end itself and gives all the text; "
+                + "from \"here\" in a chat), or scroll and read_screen again until you've seen what's needed. To act "
+                + "on something that was out of view, scroll until it's on screen, read_screen, then click it. Open an "
+                + "item (click it) when its details aren't in the list. Never answer, or say something isn't there, "
+                + "from the first screenful alone."),
             (.browser, "- In the browser (Chrome, Safari, Brave, Edge, Arc), use the browser tools: they work inside the page and "
                 + "are faster and surer than read_screen. browser_read gives the page's address, full text, fields and "
                 + "links/buttons; browser_click clicks a link or button by its words (\"the first video\": click its "
@@ -1920,7 +2230,8 @@ public final class CommandAgent {
                 + "answer, never to describe a step."),
             (nil, "- Memory first: before acting, check the memory below. Use the user's name for their own documents, "
                 + "nicknames for people (\"Mom\" is who they said), their chosen browser and apps, and every preference "
-                + "they told you, in every step and every search."),
+                + "they told you, in every step and every search. The user's current words are authoritative: never replace "
+                + "an explicitly named person, group, app, or message text with one from memory or an earlier command."),
             (nil, "- Work where the user is. The front app below (its window, Finder's selection, the browser tab when a "
                 + "browser is in front, and the screen when the request points at it) is where \"this\", \"that\", "
                 + "\"the first one\", \"play\" and \"open\" happen, unless the user names another app or a website. "
@@ -1971,6 +2282,9 @@ public final class CommandAgent {
                 + "found, drop what isn't needed, add a step when something blocks you (a sign-in, a pop-up). Mark "
                 + "steps [x] as you finish them. When every step is done, reply with the answer built from your "
                 + "notes: grouped, most important first. Never answer from the first screen alone."),
+            (.browser, "- PDFs open in the browser: read_whole_page reads the file itself, every page numbered (\"--- "
+                + "Page 10 of 21 ---\"); for particular pages pass pages (\"10\", \"5-7\"). Answer about a page from its "
+                + "text; don't type in the viewer's page box or scroll it to read."),
             (.browser, "- Long pages: browser_read gives only the text from where the page is scrolled to. For a whole page "
                 + "(a long post, its comments, an article, a README), call read_whole_page instead of scrolling: it "
                 + "reads to the very end. Click \"see more\" or \"load more comments\" first when the answer needs "
@@ -2053,7 +2367,9 @@ public final class CommandAgent {
                  + "reddit, linkedin, spotify…)", ["site": ("string", "the site"), "query": ("string", "what to search")]),
             tool("browser_read", "Read the page in the browser: address, title, its text, fields, links and buttons"),
             tool("read_whole_page", "Read the whole page in the browser, to the very end (it scrolls and loads the "
-                 + "rest itself): for a summary, or a question about all of an article, post, thread or its comments"),
+                 + "rest itself): for a summary, or a question about all of an article, post, thread or its comments. "
+                 + "A PDF is read from the file itself, every page numbered; pages picks some of them",
+                 ["pages": ("string", "for a PDF only, optional: a page or pages, e.g. 10, 5-7, 3, 8")], required: []),
             tool("browser_click", "Click a link or button on the browser page by its words",
                  ["text": ("string", "the link's or button's words, as shown")]),
             tool("browser_type", "Type into a field on the browser page (by its label or placeholder; empty: the "
@@ -2069,6 +2385,31 @@ public final class CommandAgent {
                  ["script": ("string", "the AppleScript"), "purpose": ("string", "what it does, in a few words")]),
             tool("read_screen", "See the front app's window: the text on it, and its buttons, links and fields, numbered"),
             tool("click", "Click element [n] from the latest read_screen", ["id": ("number", "the element's number")]),
+            tool("scroll", "Scroll the front app's window, or the list or panel element [n] is in, like a person with "
+                 + "the trackpad (any app; in the browser, the page). Says where it got to (the end, the top, how far down)",
+                 ["direction": ("string", "down, up, top or bottom"),
+                  "id": ("number", "an element from read_screen inside the list to scroll, optional")],
+                 required: ["direction"]),
+            tool("look", "Look at a screenshot of the front window: everything on it (text, buttons, icons, images, "
+                 + "charts, canvas and remote apps) with the positions of what can be clicked. For what read_screen "
+                 + "can't see, or to check how things look",
+                 ["question": ("string", "what to look for or answer from it, optional")], required: []),
+            tool("click_on", "Click something on the screen by what it is or says (\"the blue Apply button\", \"the "
+                 + "second photo\", \"the gear icon\"), found by sight when it has no [n]",
+                 ["target": ("string", "what to click, as you'd describe it"),
+                  "double": ("boolean", "double-click"), "right": ("boolean", "right-click")], required: ["target"]),
+            tool("click_at", "Click a position on the latest look's screenshot (in its pixels)",
+                 ["x": ("number", "pixels from the left"), "y": ("number", "pixels from the top"),
+                  "double": ("boolean", "double-click"), "right": ("boolean", "right-click")], required: ["x", "y"]),
+            tool("scroll_at", "Scroll the part of the screen at a position on the latest look's screenshot",
+                 ["x": ("number", "pixels from the left"), "y": ("number", "pixels from the top"),
+                  "direction": ("string", "down, up, top or bottom")], required: ["direction"]),
+            tool("read_everything", "Read ALL of the front window's list, chat, inbox, feed, table, settings or document "
+                 + "(or the whole page in a browser): it scrolls through to the very end itself and gives all the text, "
+                 + "top to bottom. For anything that may be out of view: \"all\", \"every\", \"how many\", \"the "
+                 + "latest\", \"unread\", a long list or conversation",
+                 ["from": ("string", "top (default) or here (from where it's scrolled to now, e.g. in a chat)")],
+                 required: []),
             tool("type_text", "Type text into the front app (optionally into field [n] first; submit presses Return)",
                  ["text": ("string", "what to type"), "into": ("number", "field number from read_screen, optional"),
                   "submit": ("boolean", "press Return afterwards")], required: ["text"]),

@@ -76,6 +76,9 @@ final class OnboardingState {
     var searchCode = false {
         didSet { if searchCode { codeFolders.startEstimates() } }
     }
+    /// On the commands step: download the on-device vision model (Qwen3-VL) after setup, so Murmur can see apps that
+    /// don't share their text. On when Ollama is on this Mac and there's room for it.
+    var wantsVision = OllamaProbe.isInstalled && VisionSetup.shared.hasRoom
     /// You pressed the hotkey on the shortcut step.
     private(set) var hotkeyWorked = false
     var launchAtLogin: Bool
@@ -159,6 +162,13 @@ final class OnboardingState {
         case .shortcut:
             go(to: .commands)
         case .commands:
+            // Seeing the screen: Screen Recording now (one system prompt), the model in the background, so setup
+            // never waits on a download.
+            if wantsVision {
+                if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+                VisionSetup.shared.start()
+                log("onboarding: downloading \(VisionSetup.shared.model) for on-device screen vision")
+            }
             go(to: .ready)
         case .ready:
             finish()
@@ -1160,6 +1170,9 @@ private struct CommandsStep: View {
             .frame(maxWidth: 560, alignment: .leading)
             .padding(.top, 24)
             .id(revision)
+            visionRow
+                .frame(maxWidth: 560, alignment: .leading)
+                .padding(.top, 10)
             if let pullProblem {
                 Text(pullProblem).font(.system(size: 12)).foregroundStyle(Theme.danger).lineLimit(3).padding(.top, 10)
             }
@@ -1184,6 +1197,53 @@ private struct CommandsStep: View {
             return "Commands that need a model will use \(RouterChoice.current == .anthropic ? "Claude" : "OpenAI")."
         }
         return "Skipping is fine: everything else works now, and Murmur tells you when a command needs a model."
+    }
+
+    /// Seeing the screen on this Mac: the vision model, downloaded after setup. Screenshots stay here whichever
+    /// model plans the commands.
+    @ViewBuilder
+    private var visionRow: some View {
+        let vision = VisionSetup.shared
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Let Murmur see your screen").font(.system(size: 14, weight: .semibold))
+                Spacer(minLength: 8)
+                if case .ready = vision.phase {
+                    Pill(text: "Ready", tone: .good)
+                } else if vision.isDownloading {
+                    Pill(text: vision.status, tone: .busy)
+                }
+                Toggle("Let Murmur see your screen", isOn: Binding(get: { state.wantsVision }, set: { state.wantsVision = $0 }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(!OllamaProbe.isInstalled || !vision.hasRoom || vision.phase == .ready)
+            }
+            Text(visionDetail(vision))
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.line))
+        .task { await vision.refresh() }
+    }
+
+    private func visionDetail(_ vision: VisionSetup) -> String {
+        if !OllamaProbe.isInstalled {
+            return "For apps that don't share their text (pictures, canvas apps, icons), Murmur looks at a screenshot "
+                + "with a vision model on this Mac. Get Ollama above to use it; until then it reads the screen's text."
+        }
+        if !vision.hasRoom {
+            return "The vision model (\(vision.model), \(vision.sizeText)) needs more free disk space. Murmur reads "
+                + "the screen's text meanwhile; you can download it later in Commands & AI."
+        }
+        if case .ready = vision.phase {
+            return "\(vision.model) is on this Mac. Screenshots stay here, even when Claude or OpenAI plans the command."
+        }
+        return "Downloads \(vision.model) (\(vision.sizeText)) in the background after setup, and asks for Screen "
+            + "Recording. Screenshots stay on this Mac, even when Claude or OpenAI plans the command."
     }
 
     private var keyPill: Pill? {
