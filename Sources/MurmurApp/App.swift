@@ -40,11 +40,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let settings = AppSettings.load()
         AppLog.shared.open(in: settings.indexDirectory)
-        log("launch pid \(getpid()): roots \(settings.roots.map { tildePath($0.path) }) · "
+        log("launch pid \(getpid()) from \(tildePath(Bundle.main.bundlePath)): roots \(settings.roots.map { tildePath($0.path) }) · "
             + "index \(tildePath(settings.indexDirectory.path)) · models \(tildePath(settings.modelsDirectory.path))")
         let (atLogin, why) = Launch.atLogin()   // while the open-application event is still the current one
         let showWindow = !atLogin && !DebugHooks.drivesUI
         log("launch: \(atLogin ? "at login" : "opened by hand") (\(why))\(showWindow ? ", showing the window" : "")")
+        // Opened from the disk image or Downloads: offer to move to Applications, then open from there. After the log
+        // is open, so what it decided is in it.
+        if MoveToApplications.offerIfNeeded() {
+            NSApp.terminate(nil)
+            return
+        }
 
         let app = AppController(settings: settings)
         self.app = app
