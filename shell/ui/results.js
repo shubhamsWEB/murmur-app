@@ -96,6 +96,8 @@ function matchedMeaning(hit) {
 /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06".
 function reasonOf(hit) {
   const words = hit.keyword_rank != null;
+  // What a photo shows, found by its words ("cat"): the picture, not text in a file.
+  if (hit.segment === "labels") return "Matches what it shows";
   if (!matchedMeaning(hit)) return words ? "Has your words" : "Matches its name";
   const at = hit.loc != null ? clock(hit.loc) : "";
   const page = hit.loc != null ? `page ${Math.trunc(hit.loc)}` : "a page";

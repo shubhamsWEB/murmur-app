@@ -212,6 +212,60 @@ public final class Indexer {
         return states
     }
 
+    /// How many pictures `readPictures` has still to read (0 where nothing can read them).
+    public func picturesToRead() throws -> Int {
+        guard PhotoText.isAvailable else { return 0 }
+        return try store.picturesToReadCount(screenshots: Self.readsScreenshotsLater, version: PhotoText.version)
+    }
+
+    /// Screenshots are read again for words where the OCR helper came after them (Windows); on a Mac they always
+    /// were.
+    static var readsScreenshotsLater: Bool { OCRHelper.command != nil && !PhotoText.readsLabels }
+
+    /// Pictures indexed before their words could be read (`PhotoText`): what each photo shows and the words in it, and,
+    /// where the OCR helper reads them (Windows), the words in screenshots indexed before it did. No model and no new
+    /// vectors: only keyword text, so an index never has to be built again for it. Newest first, a batch at a time,
+    /// until `shouldStop`. Returns how many were read.
+    @discardableResult
+    public func readPictures(shouldStop: () -> Bool = { false }, onPicture: (Int, Int, String) -> Void = { _, _, _ in })
+        throws -> Int {
+        guard PhotoText.isAvailable else { return 0 }
+        let screenshots = Self.readsScreenshotsLater
+        let total = try store.picturesToReadCount(screenshots: screenshots, version: PhotoText.version)
+        var done = 0
+        while !shouldStop() {
+            let batch = try store.picturesToRead(screenshots: screenshots, version: PhotoText.version, limit: 50)
+            if batch.isEmpty { break }
+            for file in batch {
+                if shouldStop() { return done }
+                Self.startReading(file.path)
+                let url = URL(fileURLWithPath: file.path)
+                let screenshot = file.kind == .screenshot
+                let read = screenshot ? PhotoText.Read(text: OCR.text(ofImageAt: url)) : PhotoText.read(url)
+                Self.readingLock.withLock { Self.reading = nil }
+                try store.db.transaction {
+                    // Read again (a newer version): what the older one stored goes.
+                    if !screenshot { try store.deleteSegments(of: file.id, kind: .labels) }
+                    try store.deleteSegments(of: file.id, kind: .ocr)
+                    if !read.text.isEmpty {
+                        try store.addSegment(file: file.id, kind: .ocr, modality: .text, excerpt: excerpt(read.text),
+                                             text: read.text)
+                    }
+                    if !read.labels.isEmpty {
+                        try store.addSegment(file: file.id, kind: .labels, modality: .text,
+                                             text: PhotoText.labelText(read.labels))
+                    }
+                    var changes: [String: String?] = ["photo_text": "\(PhotoText.version)"]
+                    if screenshot { changes["ocr_chars"] = "\(read.text.count)" }
+                    try store.updateInfo(file.id, changes)
+                }
+                done += 1
+                onPicture(done, total, file.path)
+            }
+        }
+        return done
+    }
+
     /// Runs `jobs` in order until `shouldStop` (asked between jobs), passing each one's results to `committed` (with
     /// its place in `jobs`). Jobs that `skip` turns down when their turn comes are left out.
     ///
@@ -354,6 +408,8 @@ public final class Indexer {
         let slot: Int
         let image: ImageExtractor.Prepared
         let ocr: String
+        /// What a photo shows (`PhotoText`); none for screenshots.
+        var labels: [String] = []
     }
 
     /// A batch being prepared on the preparation queue.
@@ -417,8 +473,10 @@ public final class Indexer {
                         let image = try ImageExtractor.prepare(url, maxPixel: screenshot ? 1536 : 1024,
                                                                minSide: options.minImageSide, to: folder,
                                                                png: screenshot)
-                        let ocr = screenshot ? OCR.text(ofImageAt: url) : ""
-                        ready.append(ReadyImage(slot: slot, image: image, ocr: ocr))
+                        // A screenshot's words; a photo's words and what it shows (`PhotoText`), where they can be read.
+                        let photo = !screenshot && PhotoText.isAvailable ? PhotoText.read(url) : PhotoText.Read()
+                        let ocr = screenshot ? OCR.text(ofImageAt: url) : photo.text
+                        ready.append(ReadyImage(slot: slot, image: image, ocr: ocr, labels: photo.labels))
                     } catch let error as ExtractError {
                         if case .tooSmall = error {
                             prepared.outcomes[slot] = Outcome(state: "skipped", detail: "\(error)")
@@ -558,9 +616,16 @@ public final class Indexer {
                     try store.addSegment(file: file.id, kind: .ocr, modality: .text, excerpt: excerpt(item.ocr),
                                          text: item.ocr)
                 }
+                if !item.labels.isEmpty {
+                    try store.addSegment(file: file.id, kind: .labels, modality: .text,
+                                         text: PhotoText.labelText(item.labels))
+                }
                 var info = ["width": "\(item.image.width)", "height": "\(item.image.height)"]
                 if let taken = item.image.taken { info["taken"] = taken }
                 if screenshot { info["ocr_chars"] = "\(item.ocr.count)" }
+                if PhotoText.isAvailable && (!screenshot || OCRHelper.command != nil) {
+                    info["photo_text"] = "\(PhotoText.version)"
+                }
                 try store.finish(file.id, state: "done", info: info)
                 results[item.slot] = ("done", screenshot ? "ocr \(item.ocr.count) chars" : nil)
             }

@@ -46,6 +46,8 @@ let usage = """
       --exclude-ext EXT    don't index files with this extension (repeatable, or comma-separated: "heic,txt")
       --reindex            drop vectors and embed everything again (after changing settings or model)
       --zgate Z            how far a meaning match must stand out (default 2.0)
+      --old-search         search (and eval) as before pictures' words and near misses, to compare on one index;
+                           --no-labels, --no-near-misses, --pooled-small-groups turn off one change at a time
       --word-weight W      bonus for containing all of the query's words (default 2.0, and for code see Searcher)
       --shot-tokens N      vision tokens per screenshot (default 280; 560 was 2× slower, no better on real shots)
       --code-stretch N     characters a stretch of code holds at most (default 1800; 1200 and 3600 lost on the evals)
@@ -143,6 +145,15 @@ struct Arguments {
 
     /// Dev knobs for A/B runs in evals/.
     var zGate: Double { values["--zgate"].flatMap(Double.init) ?? 2.0 }
+
+    /// `--old-search`: the search as it was before pictures' words, near misses and the small-group average (for
+    /// evals: the same index, both ways). `--no-labels`, `--no-near-misses`, `--pooled-small-groups`: one at a time.
+    func applySearchSwitches() {
+        let old = flags.contains("--old-search")
+        Searcher.useLabels = !(old || flags.contains("--no-labels"))
+        Searcher.nearMisses = !(old || flags.contains("--no-near-misses"))
+        Searcher.smallGroupsBlend = !(old || flags.contains("--pooled-small-groups"))
+    }
     var wordWeight: Double? { values["--word-weight"].flatMap(Double.init) }   // nil: the index's own (`Searcher`)
 
     func kinds() throws -> Set<FileKind>? {
@@ -186,6 +197,7 @@ func location(_ hit: SearchHit) -> String {
     case .lines: hit.loc.map { "lines \(Int($0))–\(Int(hit.locEnd ?? $0))" + (hit.focus.map { ", opens at \(Int($0))" } ?? "") } ?? ""
     case .cells: hit.loc.map { $0 == hit.locEnd ? "cell \(Int($0))" : "cells \(Int($0))–\(Int(hit.locEnd ?? $0))" } ?? ""
     case .ocr: "text in image"
+    case .labels: "shows it"
     default: ""
     }
 }
@@ -332,8 +344,11 @@ func index(_ args: Arguments) throws {
     } else {
         print("done in \(duration(Date().timeIntervalSince(started))): " + statesLine(states))
     }
-    // The rest of long files, as the app does once nothing is pending (not after a --limit run: things still are).
-    guard limit == nil, try store.unfinishedCount().files > 0 else { return }
+    // The rest of long files, as the app does once nothing is pending (not after a --limit run: things still are), then
+    // pictures' words.
+    guard limit == nil else { return }
+    defer { try? readPictures(indexer) }
+    guard try store.unfinishedCount().files > 0 else { return }
     started = Date()
     let finished = try indexer.finishLongFiles(onStep: { step in
         let name = (step.path as NSString).lastPathComponent
@@ -343,6 +358,15 @@ func index(_ args: Arguments) throws {
     })
     print("the rest of long files in \(duration(Date().timeIntervalSince(started))): "
           + (finished.isEmpty ? "none finished" : statesLine(finished)))
+}
+
+/// Pictures indexed before their words could be read (`PhotoText`): what photos show and the words in them.
+func readPictures(_ indexer: Indexer) throws {
+    let started = Date()
+    let read = try indexer.readPictures(onPicture: { done, total, path in
+        if done % 25 == 0 || done == total { print("[pictures \(done)/\(total)] \((path as NSString).lastPathComponent)") }
+    })
+    if read > 0 { print("read \(read) pictures for words in \(duration(Date().timeIntervalSince(started)))") }
 }
 
 func statesLine(_ states: [String: Int]) -> String {
@@ -717,10 +741,10 @@ do {
     switch command {
     case "estimate": try estimate(args)
     case "index": try index(args)
-    case "search": try search(args)
+    case "search": args.applySearchSwitches(); try search(args)
     case "status": try status(args)
     case "speed": try speed(args)
-    case "eval": try evaluate(args)
+    case "eval": args.applySearchSwitches(); try evaluate(args)
     case "index-service":
         let status = try indexService(args)
         #if os(Linux)

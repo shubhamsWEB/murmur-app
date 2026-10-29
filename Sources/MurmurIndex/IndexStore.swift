@@ -357,6 +357,46 @@ public final class IndexStore {
         return count
     }
 
+    /// Pictures indexed before `PhotoText` read what they show and the words in them (its `version`, in their info as
+    /// "photo_text"), newest first: photos, and screenshots too when `screenshots` (where their text wasn't read when
+    /// they were indexed: the OCR helper came later). `limit` at a time.
+    public func picturesToRead(screenshots: Bool, version: Int, limit: Int) throws -> [FileRecord] {
+        var out: [FileRecord] = []
+        let kinds = screenshots ? "'image', 'screenshot'" : "'image'"
+        try db.query("""
+            SELECT \(Self.fileColumns) FROM files WHERE state = 'done' AND kind IN (\(kinds))
+            AND coalesce(CAST(json_extract(info, '$.photo_text') AS INTEGER), 0) < ?\(scopeSQL)
+            ORDER BY mtime DESC LIMIT ?
+            """, [.int(Int64(version))] + scopeValues + [.int(Int64(limit))]) { out.append(Self.record($0)) }
+        return out
+    }
+
+    public func picturesToReadCount(screenshots: Bool, version: Int) throws -> Int {
+        var count = 0
+        let kinds = screenshots ? "'image', 'screenshot'" : "'image'"
+        try db.query("""
+            SELECT COUNT(*) FROM files WHERE state = 'done' AND kind IN (\(kinds))
+            AND coalesce(CAST(json_extract(info, '$.photo_text') AS INTEGER), 0) < ?\(scopeSQL)
+            """, [.int(Int64(version))] + scopeValues) { count = Int($0.int(0)) }
+        return count
+    }
+
+    /// Sets some of a file's info (nil removes a key), leaving its state, its note and the rest of its info as they are.
+    public func updateInfo(_ id: Int64, _ changes: [String: String?]) throws {
+        var info = try info(of: id)
+        for (key, value) in changes { info[key] = value }
+        let json = info.isEmpty ? nil : (try? JSONSerialization.data(withJSONObject: info, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        try db.run("UPDATE files SET info = ? WHERE id = ?", [.optional(json), .int(id)])
+    }
+
+    /// Removes a file's segments of `kind` (and their keyword text).
+    func deleteSegments(of file: Int64, kind: SegmentKind) throws {
+        try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? AND kind = ?)",
+                   [.int(file), .text(kind.rawValue)])
+        try db.run("DELETE FROM segments WHERE file = ? AND kind = ?", [.int(file), .text(kind.rawValue)])
+    }
+
     /// What indexing learned about a file (`finish`'s `info`).
     public func info(of id: Int64) throws -> [String: String] {
         var info: [String: String] = [:]

@@ -96,12 +96,15 @@ struct ResultRow: Identifiable, Equatable {
 
     /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06".
     var reason: String {
+        // What a photo shows, found by its words ("cat"): the picture, not text in a file.
+        if segment == .labels { return "Matches what it shows" }
         guard matchedMeaning else { return matchedWords ? "Has your words" : "Matches its name" }
         let place = loc.map(Self.clock) ?? ""
         let page = loc.map { "page \(Int($0))" } ?? "a page"
         switch segment {
         case .image: return kind == .screenshot ? "Matches what's on screen" : "Matches the picture"
         case .ocr: return "Matches the text in it"
+        case .labels: return "Matches what it shows"
         case .frame: return "Matches the frame at \(place)"
         case .audio: return kind == .video ? "Matches the sound at \(place)" : "Matches what's heard at \(place)"
         case .page: return "Matches the text on \(page)"

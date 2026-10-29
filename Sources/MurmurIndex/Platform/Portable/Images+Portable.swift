@@ -71,10 +71,22 @@ extension ImageExtractor {
 }
 
 extension OCR {
+    /// Scanned PDF pages aren't read here (`IndexStore.readAgainOnce`).
     static let isAvailable = false
 
-    /// No text recognition here yet: screenshots have their picture vector and their name.
-    static func text(ofImageAt url: URL) -> String { "" }
+    /// A screenshot's text, from the app's OCR helper when it has one (Windows' own OCR); "" otherwise, and the
+    /// screenshot has its picture vector and its name.
+    static func text(ofImageAt url: URL) -> String { OCRHelper.text(ofImageAt: url.path) }
+}
+
+extension PhotoText {
+    /// No image labelling here: a photo's picture vector stands for what it shows.
+    static let readsLabels = false
+
+    /// The words in a photo, from the app's OCR helper when it has one.
+    static func read(_ url: URL) -> Read {
+        Read(labels: [], text: kept(OCRHelper.text(ofImageAt: url.path)))
+    }
 }
 
 /// Packed 8-bit RGB in memory: what stb decodes to and encodes from.
