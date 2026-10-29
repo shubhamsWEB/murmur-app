@@ -82,7 +82,8 @@ ln -s /Applications "$STAGE/Applications"
 cat > "$STAGE/Read Me First.txt" <<TXT
 Murmur $VERSION — voice for your Mac
 
-1. Drag Murmur onto Applications, then open it from Applications.
+1. Open Murmur and click Move to Applications: it moves itself there, opens again and ejects this disk.
+   (Or drag Murmur onto Applications yourself, then open it from there.)
 2. Setup walks you through the microphone, typing in other apps, and the folders to search.
    On first launch Murmur downloads its speech and search models once (about 1.4 GB).
 3. Hold fn anywhere and talk.
@@ -92,8 +93,20 @@ $( [[ $SIGNED_FOR_RELEASE == 1 ]] && echo "" || echo "
 If macOS says Apple could not verify Murmur: open System Settings → Privacy & Security, scroll down,
 and click Open Anyway next to Murmur. You only do this once." )
 TXT
+# The disk shows Murmur's icon when it's open (on the desktop and in Finder's sidebar): the icon as .VolumeIcon.icns
+# at its top, and the top folder marked as having a custom icon. That mark has to be set on the mounted disk, so it's
+# made writable first and compressed after.
+cp Resources/AppIcon.icns "$STAGE/.VolumeIcon.icns"
 rm -f "$DMG"
-hdiutil create -volname "Murmur $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG" > /dev/null
+RW="$(dirname "$STAGE")/Murmur-rw.dmg"
+hdiutil create -volname "Murmur $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" > /dev/null
+MOUNT="$(dirname "$STAGE")/mount"
+mkdir -p "$MOUNT"
+hdiutil attach "$RW" -readwrite -noverify -noautoopen -nobrowse -mountpoint "$MOUNT" > /dev/null
+# Finder's "has a custom icon" flag (0x0400 in the folder's Finder info), without needing Xcode's SetFile.
+xattr -wx com.apple.FinderInfo "0000000000000000040000000000000000000000000000000000000000000000" "$MOUNT"
+hdiutil detach "$MOUNT" -quiet || hdiutil detach "$MOUNT" -force -quiet
+hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG" > /dev/null
 rm -rf "$(dirname "$STAGE")"
 
 NOTARIZED=0
