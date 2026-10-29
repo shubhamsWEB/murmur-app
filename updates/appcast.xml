@@ -6,16 +6,15 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.4.2</title>
-      <pubDate>Thu, 29 Oct 2026 13:57:29 +0000</pubDate>
-      <sparkle:version>10</sparkle:version>
-      <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
+      <title>Murmur 1.4.3</title>
+      <pubDate>Thu, 29 Oct 2026 16:39:31 +0000</pubDate>
+      <sparkle:version>11</sparkle:version>
+      <sparkle:shortVersionString>1.4.3</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new</h3>
-<p><b>Summarise any document you have open.</b> Ask about a PDF in Preview or Acrobat, or a Word, RTF or text file, and Murmur reads it from the file itself: "summarise pages 1 to 22" gives you those pages, even in a 470-page book, with nothing extra to install. Page numbers can be said in words ("page one to page twenty two").</p>
-<h3>Fixes</h3>
-<ul><li>Home no longer says Murmur can't type into other apps after you've allowed it in Accessibility. It updates within a couple of seconds, without restarting Murmur.</li><li>"The PDF is open, read it" is now treated as a request about the document on screen, not a search for files.</li><li>If macOS hasn't let Murmur read the folder a document is in, Murmur says so and tells you where to allow it, instead of giving up without saying why.</li></ul>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.4.2/Murmur-1.4.2.dmg" type="application/octet-stream" sparkle:edSignature="GR3gpJaF1drZpk78yRr1y/vPDiORp4HFG/yHzwNIT9Gmtq5F0+2gagoPf8ZeuSkBfRkcOo6vQzXejiMelduPBw==" length="14632376"/>
+<p><b>Installs itself in Applications.</b> Open Murmur from the downloaded disk image (or from Downloads) and it offers to move itself to your Applications folder, opens again from there, and ejects the disk image. No more dragging it onto the Applications shortcut. If an older Murmur is already there, it's replaced; if macOS needs an administrator's permission, it asks for your password.</p>
+<p><b>Murmur's icon on its disk image.</b> The disk image shows Murmur's icon on your desktop and in Finder while it's open.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.4.3/Murmur-1.4.3.dmg" type="application/octet-stream" sparkle:edSignature="PcHyoSG+oh+zm6AVfDD6ln4UkCYYEXvD5L4GAjWZ7pHmKkPXiuXixRMjIzfbWMlSKF98QtcC1knBce0sI44XBw==" length="13706037"/>
     </item>
   </channel>
 </rss>
