@@ -36,6 +36,44 @@ fi
 echo "› Checking the app's signature"
 codesign --verify --deep --strict "$APP"
 
+# Notary credentials: the API key on GitHub, else the keychain profile.
+NOTARY=()
+if [[ $SIGNED_FOR_RELEASE == 1 ]]; then
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
+    NOTARY=(--key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+  elif xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" > /dev/null 2>&1; then
+    NOTARY=(--keychain-profile "$NOTARY_PROFILE")
+  fi
+fi
+
+# Sends `$1` to Apple's notary service and waits; on a rejection, prints Apple's reasons (which file, what's wrong).
+notarize() {
+  local log="$DIST/notary-$(basename "$1").log"
+  mkdir -p "$DIST"
+  xcrun notarytool submit "$1" "${NOTARY[@]}" --wait --timeout 30m --output-format plist > "$log.plist" || true
+  local status id
+  status="$(/usr/libexec/PlistBuddy -c 'Print :status' "$log.plist" 2>/dev/null || echo unknown)"
+  id="$(/usr/libexec/PlistBuddy -c 'Print :id' "$log.plist" 2>/dev/null || echo)"
+  echo "  $(basename "$1"): $status${id:+ ($id)}"
+  if [[ "$status" != Accepted ]]; then
+    [[ -n "$id" ]] && xcrun notarytool log "$id" "${NOTARY[@]}" "$log.json" > /dev/null 2>&1 && cat "$log.json" >&2
+    echo "Apple didn't accept $(basename "$1") (its reasons above)" >&2
+    exit 1
+  fi
+}
+
+# The app itself is notarized and its ticket stapled first, so it opens without a warning once it's copied out of the
+# DMG, even offline or where Apple's servers can't be reached (a DMG's ticket travels with the DMG, not the app).
+if [[ ${#NOTARY[@]} -gt 0 ]]; then
+  echo "› Notarizing the app (a few minutes)"
+  ZIP="$(mktemp -d)/Murmur.zip"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  notarize "$ZIP"
+  rm -f "$ZIP"
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+fi
+
 echo "› Making $DMG"
 STAGE="$(mktemp -d)/Murmur"
 mkdir -p "$STAGE" "$DIST"
@@ -61,20 +99,13 @@ rm -rf "$(dirname "$STAGE")"
 NOTARIZED=0
 if [[ $SIGNED_FOR_RELEASE == 1 ]]; then
   codesign --force --sign "$DEVELOPER_ID" --timestamp "$DMG"
-  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
-    NOTARY=(--key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
-  elif xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" > /dev/null 2>&1; then
-    NOTARY=(--keychain-profile "$NOTARY_PROFILE")
-  else
-    NOTARY=()
-  fi
   if [[ ${#NOTARY[@]} -gt 0 ]]; then
-    echo "› Notarizing (a few minutes)"
-    xcrun notarytool submit "$DMG" "${NOTARY[@]}" --wait --timeout 30m | tee "$DIST/notary.log"
-    grep -q "status: Accepted" "$DIST/notary.log" || { echo "Apple didn't accept the DMG (above)" >&2; exit 1; }
+    echo "› Notarizing the DMG (a few minutes)"
+    notarize "$DMG"
     xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
     NOTARIZED=1
-    echo "› Notarized and stapled: opens on any Mac without warnings"
+    echo "› Notarized and stapled, the app and the DMG: opens on any Mac without warnings"
   else
     echo "› Not notarized: no notary profile \"$NOTARY_PROFILE\" (see the top of this script)"
   fi

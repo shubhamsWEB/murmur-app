@@ -74,7 +74,9 @@ PLIST="$APP/Contents/Info.plist"
 [[ -n "${BUNDLE_ID:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
 [[ -n "${VERSION:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
 [[ -n "${BUILD_NUMBER:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
-[[ -n "${SPARKLE_FEED:-}" ]] && /usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED" "$PLIST"
+# Added, not set: Resources/Info.plist has neither key (a build without them never looks for updates).
+[[ -n "${SPARKLE_FEED:-}" ]] && { /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$PLIST" 2>/dev/null || true
+                                  /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $SPARKLE_FEED" "$PLIST"; }
 [[ -n "${SPARKLE_KEY:-}" ]] && { /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$PLIST" 2>/dev/null || true
                                  /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_KEY" "$PLIST"; }
 
