@@ -1,6 +1,6 @@
 [package]
 name = "murmur-shell"
-version = "1.4.2"
+version = "1.4.3"
 description = "Murmur for Windows and Linux: dictation, the tray icon, the hotkey and the search panel, over Murmur's helper"
 edition = "2021"
 publish = false
