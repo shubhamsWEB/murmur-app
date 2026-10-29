@@ -6,20 +6,16 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.4.1</title>
-      <pubDate>Thu, 29 Oct 2026 12:14:07 +0000</pubDate>
-      <sparkle:version>9</sparkle:version>
-      <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
+      <title>Murmur 1.4.2</title>
+      <pubDate>Thu, 29 Oct 2026 13:57:29 +0000</pubDate>
+      <sparkle:version>10</sparkle:version>
+      <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new</h3>
-<p><b>Signed by Apple.</b> The Mac app is signed with Murmur's Apple Developer ID and notarized by Apple, so it opens without a warning on any Mac.</p>
-<p><b>Updates in one click.</b> The sidebar shows which version you have. When a newer Murmur is out, an <b>Update Now</b> card appears above Murmur's status, and <b>About &amp; Help → Updates</b> lets you check any time. On Windows, <b>Settings → Check Now</b> becomes <b>Update Now</b> while one is waiting. If you're on 1.4.0 on a Mac, install this version from its download page once; from here on Murmur updates itself.</p>
-<p><b>Find photos by what's in them.</b> Search "cat photo" and the photo of your cat comes up, not just documents that mention cats. On a Mac, Murmur notes what each photo shows; on both Mac and Windows it reads the words in images, such as receipts, screenshots and signs. Photos you already have are read in the background.</p>
-<p><b>Commands read the whole screen.</b> Ask about a long email, page or PDF and Murmur scrolls through all of it before answering, rather than reading only what's visible. It can click and scroll in apps on its own to finish a task.</p>
-<p><b>See the screen on your Mac.</b> For things only a picture shows, Murmur can look at your screen with a vision model that runs on your Mac (Qwen3-VL through Ollama), so screenshots never leave it. Set it up during setup or in <b>Commands &amp; AI → Screen vision</b>, or use your Claude or OpenAI key instead.</p>
+<p><b>Summarise any document you have open.</b> Ask about a PDF in Preview or Acrobat, or a Word, RTF or text file, and Murmur reads it from the file itself: "summarise pages 1 to 22" gives you those pages, even in a 470-page book, with nothing extra to install. Page numbers can be said in words ("page one to page twenty two").</p>
 <h3>Fixes</h3>
-<ul><li>PDFs open in the browser are read in full, not cut short partway through.</li><li>Commands that open an email or a page keep going until the task is done, instead of stopping after the first step.</li></ul>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.4.1/Murmur-1.4.1.dmg" type="application/octet-stream" sparkle:edSignature="Q/Zw+ME9U9BShmt8t4rraK4LtEH0WaDJlgHNOJXAXwwpr8v/c9aBTo207XSJwOcH2CjAwQVAh4AbE4hwxlTJBw==" length="14701238"/>
+<ul><li>Home no longer says Murmur can't type into other apps after you've allowed it in Accessibility. It updates within a couple of seconds, without restarting Murmur.</li><li>"The PDF is open, read it" is now treated as a request about the document on screen, not a search for files.</li><li>If macOS hasn't let Murmur read the folder a document is in, Murmur says so and tells you where to allow it, instead of giving up without saying why.</li></ul>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.4.2/Murmur-1.4.2.dmg" type="application/octet-stream" sparkle:edSignature="GR3gpJaF1drZpk78yRr1y/vPDiORp4HFG/yHzwNIT9Gmtq5F0+2gagoPf8ZeuSkBfRkcOo6vQzXejiMelduPBw==" length="14632376"/>
     </item>
   </channel>
 </rss>
