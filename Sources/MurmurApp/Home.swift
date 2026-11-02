@@ -859,7 +859,27 @@ private struct CleanupSettings: View {
             }
             if dictation.aiCleanup {
                 RowDivider()
-                SettingRow(title: "Model", detail: modelDetail) { EmptyView() }
+                SettingRow(title: "Model", detail: modelDetail) {
+                    HStack(spacing: 8) {
+                        if own.choice == .murmur {
+                            switch own.phase {
+                            case .missing where CleanupModel.source != nil, .failed:
+                                Button("Download \(CleanupModel.sizeText)") { own.start() }
+                            case .downloading:
+                                ProgressView().controlSize(.small)
+                            default:
+                                EmptyView()
+                            }
+                        }
+                        Picker("Cleanup model", selection: Binding(get: { own.choice }, set: { own.choice = $0 })) {
+                            ForEach(CleanupModel.Choice.allCases, id: \.self) { Text($0.display).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 170)
+                        .disabled(own.isDownloading)
+                    }
+                }
+                .task { await own.refresh() }
                 ForEach(DictationCleanup.Category.allCases, id: \.self) { category in
                     RowDivider()
                     SettingRow(title: category.display, detail: category.examples) {
@@ -876,12 +896,33 @@ private struct CleanupSettings: View {
         }
     }
 
+    private var own: CleanupModel { CleanupModel.shared }
+
     private var modelDetail: String {
-        let name = dictation.cleanupModel
-        if name == "Local model" {
-            return "The local model (Ollama) set in Commands & Assistants. Your words stay on this Mac."
+        let fallback: String
+        if dictation.cleanupModel == "Local model" {
+            fallback = "the local model (Ollama) set in Commands & Assistants. Your words stay on this Mac."
+        } else {
+            fallback = "\(dictation.cleanupModel), as set in Commands & Assistants. What you dictate is sent to it to be tidied."
         }
-        return "\(name), as set in Commands & Assistants. What you dictate is sent to it to be tidied."
+        guard own.choice == .murmur else { return "Uses " + fallback }
+        let about = "Murmur's own model, made only for tidying dictation: on this Mac, in a fraction of a second."
+        switch own.phase {
+        case .ready:
+            return about + " Your words stay on this Mac."
+        case .unknown:
+            return about
+        case .noOllama:
+            return about + " It runs in Ollama, which isn't installed. Until then, cleanup uses " + fallback
+        case .missing where CleanupModel.source == nil:
+            return about + " It isn't on this Mac yet (build it with murmur-models). Until then, cleanup uses " + fallback
+        case .missing:
+            return about + " Download it (\(CleanupModel.sizeText)); until then, cleanup uses " + fallback
+        case .downloading(let part):
+            return about + " Downloading, \(Int(part * 100))%. Until it's in, cleanup uses " + fallback
+        case .failed(let why):
+            return about + " \(why) Until it's in, cleanup uses " + fallback
+        }
     }
 }
 
@@ -1297,6 +1338,10 @@ private struct MemoryPage: View {
 private struct CommandsPage: View {
     let dictation: DictationController
     let state: HomeState
+    /// The local model: whether it's on this Mac, and its download from here.
+    @State private var localModelState: OllamaProbe.State?
+    @State private var pullingLocal = false
+    @State private var localProblem: String?
     @State private var installed: [AssistantCLI: Bool] = [:]
     /// The model picked, held by the page itself so the cards change the moment you click (the setting lives in
     /// UserDefaults, which SwiftUI doesn't watch).
@@ -1380,15 +1425,34 @@ private struct CommandsPage: View {
                     .padding(.vertical, 12)
             }
             SettingsSection("Local model") {
-                SettingRow(title: "Ollama model", detail: "Used when “On this Mac” is picked. Install with “ollama pull qwen3:4b”.") {
-                    Picker("Ollama model", selection: state.bind(get: { dictation.localRouterModel },
-                                                              set: { dictation.localRouterModel = $0 })) {
-                        ForEach(["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "llama3.2:3b"], id: \.self) { Text($0).tag($0) }
+                SettingRow(title: "Ollama model", detail: localModelDetail) {
+                    HStack(spacing: 8) {
+                        switch localModelState {
+                        case .missingModel:
+                            Button(pullingLocal ? "Downloading…"
+                                   : "Download \(LocalModels.sizeText(dictation.localRouterModel))") {
+                                pullLocalModel()
+                            }
+                            .disabled(pullingLocal)
+                        case .notRunning:
+                            Button("Open Ollama") { Task { await OllamaProbe.start(); await checkLocalModel() } }
+                        default:
+                            EmptyView()
+                        }
+                        Picker("Ollama model", selection: state.bind(get: { dictation.localRouterModel }, set: { model in
+                            dictation.localRouterModel = model
+                            localProblem = nil
+                            Task { await checkLocalModel() }
+                        })) {
+                            ForEach(LocalModels.choices, id: \.self) { Text(LocalModels.display($0)).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                        .disabled(pullingLocal)
                     }
-                    .labelsHidden()
-                    .frame(width: 160)
                 }
             }
+            .task { await checkLocalModel() }
             SettingsSection("Screen vision") {
                 SettingRow(title: "Screenshots go to",
                            detail: "When an app's buttons and text can't be read directly (pictures, canvas apps, icons), Murmur "
@@ -1409,10 +1473,11 @@ private struct CommandsPage: View {
                             UserDefaults.standard.set(model, forKey: "visionModel")
                             Task { await VisionSetup.shared.refresh() }
                         })) {
-                            ForEach(["qwen3-vl:2b", "qwen3-vl:4b", "qwen3-vl:8b"], id: \.self) { Text($0).tag($0) }
+                            ForEach(["qwen3-vl:4b-instruct", "qwen3-vl:8b-instruct", "qwen3-vl:2b-instruct", "qwen3-vl:4b",
+                                     "qwen3-vl:8b"], id: \.self) { Text($0).tag($0) }
                         }
                         .labelsHidden()
-                        .frame(width: 130)
+                        .frame(width: 170)
                         .disabled(VisionSetup.shared.isDownloading)
                         switch VisionSetup.shared.phase {
                         case .missing, .failed:
@@ -1532,6 +1597,38 @@ private struct CommandsPage: View {
     }
 
     /// The vision model's row: what it is, and how its download is going.
+    private func checkLocalModel() async {
+        guard !pullingLocal else { return }
+        localModelState = await OllamaProbe.check(model: dictation.localRouterModel)
+    }
+
+    private func pullLocalModel() {
+        let model = dictation.localRouterModel
+        pullingLocal = true
+        localProblem = nil
+        Task {
+            localProblem = await OllamaProbe.pull(model)
+            pullingLocal = false
+            await checkLocalModel()
+        }
+    }
+
+    private var localModelDetail: String {
+        let model = dictation.localRouterModel
+        var text = model == LocalModels.agent
+            ? "Murmur Agent is Murmur's own model, trained on its tools: quicker and more accurate than the general "
+                + "models here. Used when “On this Mac” is picked."
+            : "Used when “On this Mac” is picked. Murmur Agent, Murmur's own model, is quicker and more accurate."
+        switch localModelState {
+        case .notInstalled: text += " Needs Ollama (ollama.com)."
+        case .notRunning: text += " Ollama isn't open."
+        case .missingModel: text += " Not downloaded yet."
+        default: break
+        }
+        if let localProblem { text += " The download didn't finish: \(localProblem)" }
+        return text
+    }
+
     private var visionDetail: String {
         let vision = VisionSetup.shared
         switch vision.phase {
@@ -1540,7 +1637,8 @@ private struct CommandsPage: View {
         case .noOllama: return "Needs Ollama (ollama.com). Until then Murmur reads the screen's text."
         case .failed(let why): return why
         case .missing where !vision.hasRoom: return "\(vision.model) needs \(vision.sizeText) and more free disk space."
-        default: return "Qwen3-VL through Ollama: 8B (6.2 GB, best) or 4B (3.3 GB, for 8 GB Macs)."
+        default: return "Qwen3-VL through Ollama. 4B Instruct (3.3 GB) answers in seconds; 8B Instruct (6.1 GB) is a "
+            + "little more accurate and twice as slow. The plain tags think first and are much slower."
         }
     }
 

@@ -19,7 +19,10 @@ enum MessageIntent {
                   let recipient = captures[pattern.recipient] else { continue }
             let cleaned = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
                 .replacingOccurrences(of: #"^(?:the|my)\s+"#, with: "", options: .regularExpression)
-            guard !cleaned.isEmpty, !pronouns.contains(cleaned) else { continue }
+            // “Message hi to Roma on WhatsApp”: the words before “to” are the message, not the name. A form that
+            // starts the request took “hi to Roma”; the “to …” form further down finds Roma.
+            guard !cleaned.isEmpty, !pronouns.contains(cleaned),
+                  cleaned.range(of: #"\bto\b"#, options: [.regularExpression, .caseInsensitive]) == nil else { continue }
             return Target(recipient: cleaned, app: pattern.app.flatMap { captures[$0] }.flatMap(canonicalApp))
         }
         return nil

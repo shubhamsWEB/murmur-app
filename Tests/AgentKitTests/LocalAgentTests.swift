@@ -90,6 +90,34 @@ struct MessageIntentTests {
             == .init(recipient: "rahul", app: nil))
         #expect(MessageIntent.explicitTarget(in: "Tell Neha that I am going to Mumbai saying bye")?.recipient == "neha")
         #expect(MessageIntent.explicitTarget(in: "Abhi Priya ko WhatsApp pe bolo") == nil)
+        // The message first, then “to” the person: was read as a person named “Hi To Roma”.
+        #expect(MessageIntent.explicitTarget(in: "Message hi to Roma on WhatsApp")
+            == .init(recipient: "roma", app: "WhatsApp"))
+        #expect(MessageIntent.explicitTarget(in: "Text good morning to Neha on Slack")
+            == .init(recipient: "neha", app: "Slack"))
+    }
+
+    @Test func theAppAnAppleScriptTalksTo() {
+        #expect(AppData.scriptedApp(in: #"osascript -e 'tell application "WhatsApp" to get chats'"#) == "WhatsApp")
+        #expect(AppData.scriptedApp(in: #"osascript -e "tell app \"Messages\" to get chats""#) == "Messages")
+        #expect(AppData.scriptedApp(in: "mdfind -name resume") == nil)
+    }
+
+    @MainActor @Test func onlyMurmurAgentV2OnGetsTheShortPrompt() {
+        #expect(LocalModels.usesShortPrompt("murmur-agent:v2"))
+        #expect(LocalModels.usesShortPrompt("shubhama664/murmur-agent:v3"))
+        #expect(!LocalModels.usesShortPrompt("murmur-agent"))
+        #expect(!LocalModels.usesShortPrompt("murmur-agent:v1"))
+        #expect(!LocalModels.usesShortPrompt("qwen3:4b"))
+        // The same text for the same tool sets, whatever was asked: Ollama can reuse what it read last time.
+        #expect(CommandAgent.compactPrompt(groups: [.messages]) == CommandAgent.compactPrompt(groups: [.messages]))
+        #expect(CommandAgent.compactPrompt(groups: [.messages]).count * 4 < CommandAgent.systemPrompt(helpers: [], groups: [.messages]).count)
+        #expect(CommandAgent.compactRequest("open slack", context: "Now: Monday.").hasSuffix("\n\nCommand: open slack"))
+    }
+
+    @Test func aToolCallOllamaCouldntReadIsAskedAgain() {
+        #expect(OllamaClient.isMalformedToolCall("expected element type <function> but have <parameter>"))
+        #expect(!OllamaClient.isMalformedToolCall("model \"murmur-agent\" not found"))
     }
 
     @Test func pronounFollowUpDoesNotInventANewRecipient() {
@@ -245,6 +273,22 @@ struct TaskHealthTests {
         TaskResume.reload()
         #expect(!TaskResume.hasPending)
     }
+    @Test func aQuestionWaitsForItsAnswer() {
+        let asked = "Which resume do you mean? I found several:\n- Shubham_Agrawal_Resume.pdf, 16 Sep\n- Resume.docx"
+        #expect(TaskResume.question(in: asked) != nil)
+        #expect(TaskResume.question(in: "I found two. Should I send the PDF or the Word file?") != nil)
+        #expect(TaskResume.question(in: "Sent it to Roma on WhatsApp.") == nil)
+        #expect(TaskResume.question(in: "The page explains why it matters? Not really. It lists prices.") == nil)
+        TaskResume.save(.init(request: "send my resume to Roma", steps: [], notes: [], answer: asked, question: asked))
+        TaskResume.reload()
+        #expect(TaskResume.awaitingAnswer != nil)
+        #expect(TaskResume.takeAwaitingAnswer()?.request == "send my resume to Roma")
+        #expect(TaskResume.awaitingAnswer == nil)   // answered once
+        TaskResume.save(.init(request: "x", steps: [], notes: [], at: Date().addingTimeInterval(-10 * 60), question: "Which?"))
+        #expect(TaskResume.awaitingAnswer == nil)   // too long ago
+        TaskResume.clear()
+    }
+
     @Test func resumeWords() {
         #expect(TaskResume.isResume("continue"))
         #expect(TaskResume.isResume("aage badho"))
@@ -342,6 +386,30 @@ extension TaskResumeTests {
 
 /// A PDF in the browser, read from the file: which pages a request means.
 struct PDFTextTests {
+    /// A request with a later step the quick path can't do goes to the agent whole, not as a lone search.
+    @Test func quickPathLeavesMultiStepRequestsToTheAgent() {
+        #expect(QuickCommands.parseAll("find the photo of my cat sleeping on the sofa and share it with mom on whatsapp") == nil)
+        #expect(QuickCommands.parseAll("find the cheapest airpods pro on amazon and flipkart and tell me the difference") == nil)
+        #expect(QuickCommands.parseAll("find three good open source alternatives to wispr flow, compare them in a table and save it in notes") == nil)
+        #expect(QuickCommands.parseAll("search my files for the lease and then summarise it") == nil)
+        // Any verb, not only the listed ones.
+        #expect(QuickCommands.parseAll("find the invoice and pass it to rohan") == nil)
+        #expect(QuickCommands.parseAll("find my resume and also attach it to the email") == nil)
+        #expect(!QuickCommands.hasLaterStep("find black and white photos"))
+        // Still quick: one thing, or parts that are quick commands themselves.
+        #expect(QuickCommands.parseAll("find photos of mom and dad")?.first?.tool == "search_files")
+        #expect(QuickCommands.parseAll("search for tom and jerry on youtube")?.first?.tool == "site_search")
+        #expect(QuickCommands.parseAll("set volume to 30 and lock the screen")?.count == 2)
+    }
+    /// The search results window only when finding is the whole request; otherwise the matches go to the next step.
+    @Test func searchShowsResultsOnlyWhenThatsAllThatWasAsked() {
+        #expect(CommandAgent.onlyFindsFiles("find my resume"))
+        #expect(CommandAgent.onlyFindsFiles("show me the photos from goa"))
+        #expect(CommandAgent.onlyFindsFiles("where is the lease agreement"))
+        #expect(!CommandAgent.onlyFindsFiles("send my resume to Roma"))
+        #expect(!CommandAgent.onlyFindsFiles("find the cat photo and share it with mom"))
+        #expect(!CommandAgent.onlyFindsFiles("attach my latest invoice to the email"))
+    }
     @Test func pagesAskedFor() {
         #expect(PDFText.pages("10", of: 21) == [10])
         #expect(PDFText.pages("5-7", of: 21) == [5, 6, 7])
@@ -414,5 +482,20 @@ struct VisionTextTests {
         #expect(!CommandAgent.seesLittle(busy))
         #expect(ToolGroup.offers("look", in: []))
         #expect(ToolGroup.offers("click_on", in: []))
+    }
+}
+
+/// What the on-device vision model is asked: one question, briefly, with the Mac's own reading of the text.
+struct VisionPromptTests {
+    @Test func aShortAnswerFromTheTextAndThePicture() {
+        let prompt = VisionText.answerPrompt(app: "WhatsApp", window: "Papa", question: "What does the photo say?",
+                                             text: "Your photo, 1:25 PM\nKYC update form")
+        #expect(prompt.contains("KYC update form"))
+        #expect(prompt.contains("at most four sentences: What does the photo say?"))
+        #expect(!prompt.contains("every button"))
+        #expect(VisionText.answerPrompt(app: "Figma", window: "x", question: "", text: nil).contains("three or four sentences"))
+    }
+    @Test func theInstructModelByDefault() {
+        #expect(VisionText.defaultModel.hasSuffix("-instruct"))
     }
 }

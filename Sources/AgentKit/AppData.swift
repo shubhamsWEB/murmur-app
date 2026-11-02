@@ -84,6 +84,29 @@ enum AppData {
 
     // MARK: Any scriptable app
 
+    /// Whether an app can be scripted (has an AppleScript dictionary). Nil when there's no such app, or it's one
+    /// Murmur doesn't know (System Events and the like), so the script is left to run. Remembered per app.
+    static func isScriptable(_ name: String) async -> Bool? {
+        guard let app = AppCatalog.shared.resolve(name) else { return nil }
+        if let known = scriptable[app.url.path] { return known }
+        let xml = await MacActions.run("/usr/bin/sdef", [app.url.path], timeout: 15)
+        let answer = xml.contains("<dictionary")
+        scriptable[app.url.path] = answer
+        return answer
+    }
+
+    private static var scriptable: [String: Bool] = [:]
+
+    /// The app an AppleScript command talks to: `osascript -e 'tell application "WhatsApp" to …'` → WhatsApp.
+    nonisolated static func scriptedApp(in command: String) -> String? {
+        guard command.contains("osascript"),
+              let regex = try? NSRegularExpression(pattern: #"tell\s+app(?:lication)?\s+\\?"([^"\\]+)\\?""#,
+                                                   options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: command, range: NSRange(command.startIndex..., in: command)),
+              let range = Range(match.range(at: 1), in: command) else { return nil }
+        return String(command[range])
+    }
+
     /// An app's AppleScript dictionary, condensed: the things it has (with their properties and what they contain)
     /// and its commands. Nil-free: an app that can't be scripted says so, and to use its screen instead.
     static func scriptingDictionary(_ name: String) async -> String {

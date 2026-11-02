@@ -1,4 +1,5 @@
 import AppKit
+import NaturalLanguage
 
 /// A file the search found for a description, best first: what the model sees to pick the one the user means.
 public struct FileCandidate: Sendable {
@@ -72,11 +73,20 @@ public struct CommandHost {
 @MainActor
 public final class CommandAgent {
     public static let routerModelKey = "routerModel"
-    public static let defaultRouterModel = "qwen3:4b"
+    /// Murmur's own model for new installs. Earlier installs that never picked one used qwen3:4b, which they keep
+    /// (`keepEarlierDefault`) until they choose Murmur Agent in Settings: it's a download, not a silent swap.
+    public static let defaultRouterModel = LocalModels.agent
+    static let earlierDefault = "qwen3:4b"
 
     public var routerModel: String {
         get { UserDefaults.standard.string(forKey: Self.routerModelKey) ?? Self.defaultRouterModel }
         set { UserDefaults.standard.set(newValue, forKey: Self.routerModelKey) }
+    }
+
+    /// At launch: a Mac that has set Murmur up before without choosing a model keeps the one it was using.
+    public static func keepEarlierDefault(setUpBefore: Bool) {
+        guard setUpBefore, UserDefaults.standard.string(forKey: routerModelKey) == nil else { return }
+        UserDefaults.standard.set(earlierDefault, forKey: routerModelKey)
     }
 
     private let host: CommandHost
@@ -132,6 +142,10 @@ public final class CommandAgent {
     private var taskApproved = false
     /// Skills given in full in this command's instructions, and ones the model loaded since with use_skill.
     private var skillsInFull: [String] = []
+    /// This request's context (time, front app, memory, selection) and the user's own skills: what Murmur's own
+    /// model gets with the short prompt (`request`).
+    private var requestContext = ""
+    private var userSkills = ""
     private var loadedSkills: [String] = []
     /// Asked at the start of a big task already (when its plan was first written).
     private var askedForTask = false
@@ -181,6 +195,33 @@ public final class CommandAgent {
     ]
 
     /// "open saleshq.ai and summarise the website", "go to YouTube, then play lofi": a second part after the first.
+    /// "find my resume", "show me the goa photos", "where's the lease": finding files is all that's asked (its only
+    /// verbs are finding ones). "Send my resume to Roma" or "find the cat photo and share it" ask for more.
+    nonisolated static func onlyFindsFiles(_ utterance: String) -> Bool {
+        let text = QuickCommands.clean(utterance)
+        if hasMoreThanOneStep(text) || QuickCommands.hasLaterStep(text) { return false }
+        // Words that always ask for more than finding, wherever they are. The tagger below doesn't always take a
+        // request's first word for a verb ("attach my latest invoice…" came back a noun now and then). Only words
+        // that are rarely things to find: "email", "message" or "copy" can be ("find the email from Rahul").
+        let acting: Set<String> = ["send", "share", "attach", "forward", "upload", "open", "delete", "remove", "move",
+                                   "rename", "compress", "zip", "summarise", "summarize", "edit", "bhejo", "bhej",
+                                   "kholo"]
+        if text.split(whereSeparator: { !$0.isLetter }).contains(where: { acting.contains(String($0).lowercased()) }) {
+            return false
+        }
+        let finding: Set<String> = ["find", "search", "show", "look", "locate", "get", "pull", "bring", "see", "is", "are",
+                                    "was", "were", "be", "dhundh", "dhoondh", "dhundo", "khojo", "dikhao", "do", "de"]
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = text
+        var onlyFinding = true
+        tagger.enumerateTags(in: text.startIndex..<text.endIndex, unit: .word, scheme: .lexicalClass,
+                             options: [.omitWhitespace, .omitPunctuation]) { tag, range in
+            if tag == .verb, !finding.contains(text[range].lowercased()) { onlyFinding = false; return false }
+            return true
+        }
+        return onlyFinding
+    }
+
     nonisolated static func hasMoreThanOneStep(_ utterance: String) -> Bool {
         let text = QuickCommands.clean(utterance)
         return text.range(of: #"(\band\b|\bthen\b|,)\s*(then\s+)?(also\s+)?[a-z]+"#, options: .regularExpression) != nil
@@ -251,8 +292,32 @@ public final class CommandAgent {
     /// `explicit`: you clearly gave a command. When it's only the model's guess and the model just answers (no
     /// action), it was dictation after all: the words are typed instead of shown as an answer.
     /// `editable`: the selection is in a text field, so an edit of it can replace it.
+    /// A command is running (`run` hasn't returned).
+    public private(set) var isRunning = false
+    /// Set by `stop()`: the running command ends before its next step or tool.
+    private var stopRequested = false
+
+    /// Stops the running command (Esc, or a new command): it does nothing more after what it's doing right now, and
+    /// what it got through is kept, so "continue" can pick it up.
+    public func stop() {
+        guard isRunning, !stopRequested else { return }
+        stopRequested = true
+        host.log("command: stop asked for")
+        host.progress("Stopping…")
+    }
+
+    private func endStopped(at step: Int) {
+        host.log("command: stopped by the user at step \(step + 1)")
+        stoppedEarly = true
+        saveProgress()
+        host.showAnswer("Stopped." + (plan.contains { !$0.done } ? " Say “continue” to pick it up." : ""))
+    }
+
     public func run(_ utterance: String, frontApp: String?, selection: String?, explicit: Bool = true,
                     editable: Bool = false) async {
+        isRunning = true
+        stopRequested = false
+        defer { isRunning = false }
         let started = Date()
         // In Finder what's selected is files (⌘C copies their names, which looked like selected text): they reach
         // the model as Finder's selection instead.
@@ -303,6 +368,23 @@ public final class CommandAgent {
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
             host.log(String(format: "command: selection task done in %.2f s", Date().timeIntervalSince(started)))
+            return
+        }
+        // The answer to the question the last command stopped on: the same task goes on with it.
+        if !TaskResume.isResume(utterance), let pending = TaskResume.takeAwaitingAnswer() {
+            plan = pending.steps.map { PlanStep(text: $0.text, done: $0.done) }
+            notes = pending.notes
+            let answer = utterance
+            self.utterance = pending.request
+            host.log("command: “\(answer.prefix(60))” answers the question on “\(pending.request.prefix(60))”")
+            host.progress("Carrying on…")
+            await route("My request was: \"\(pending.request)\". You asked me:\n\"\"\"\n\(pending.answer?.prefix(2000) ?? "")"
+                        + "\n\"\"\"\nMy answer: \"\(answer)\". Finish my request with that answer: don't ask again about "
+                        + "what I've answered, and don't redo anything already done. If what I said is a new request "
+                        + "rather than an answer, do that instead.",
+                        frontApp: frontApp, selection: selection, explicit: explicit)
+            clearIfFinished()
+            host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
             return
         }
         // "Continue": a task that didn't finish (out of steps or time, or Murmur quit) picks up where it was, with its
@@ -624,6 +706,8 @@ public final class CommandAgent {
             context += "\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n\(selection.prefix(8000))\n\"\"\""
         }
         let helpers = AssistantCLI.allCases.filter(\.isAllowed)
+        requestContext = context
+        userSkills = SkillLibrary.shared.prompt(for: utterance, userOnly: true).text
         // Skills: how the user wants things done. "Always" ones and ones the request names in full, the rest listed.
         let skills = SkillLibrary.shared.prompt(for: utterance)
         skillsInFull = skills.inFull
@@ -673,6 +757,10 @@ public final class CommandAgent {
         let began = Date()
         var budget = maxSteps
         for step in 0..<stepCap {
+            if stopRequested || Task.isCancelled {
+                endStopped(at: step)
+                return
+            }
             // New tool sets since the last step (asked for, or a tool from one was used): rules and tools to match.
             if groups != builtFor {
                 builtFor = groups
@@ -696,6 +784,11 @@ public final class CommandAgent {
                 host.log(String(format: "command: %@ step %d took %.2f s", router.name, step + 1,
                                 Date().timeIntervalSince(asked)))
             } catch {
+                // Stopped while waiting for the model: the request was cancelled, which isn't a model failure.
+                if stopRequested || Task.isCancelled {
+                    endStopped(at: step)
+                    return
+                }
                 host.log("command: \(router.name) failed at step \(step + 1): \(error.localizedDescription)")
                 RouterDiagnostics.lastError = error.localizedDescription   // a rejected key isn't asked again
                 // Too slow, or the connection dropped: ask the same model once more before giving up on it.
@@ -763,6 +856,11 @@ public final class CommandAgent {
             var changedScreen = false
             var looked = false
             for (index, call) in reply.calls.enumerated() {
+                // Stopped while the model was thinking: nothing more is done, not even the step it chose.
+                if stopRequested || Task.isCancelled {
+                    endStopped(at: step)
+                    return
+                }
                 host.log("command: step \(step + 1) → \(call.name) \(call.arguments.mapValues(\.description))")
                 // A summary of a page (or a question about all of it), answered from the part read so far: Murmur
                 // reads the whole page first, once, and the model answers from all of it.
@@ -1021,9 +1119,16 @@ public final class CommandAgent {
     /// And the whole prompt is fitted to the local model's context, oldest steps first, rather than cut by Ollama.
     private func request(_ system: String, _ turns: [RouterTurn], tools: [ToolSpec],
                          router: Router) -> (system: String, turns: [RouterTurn]) {
-        let compact = Self.compacted(turns)
-        guard router is OllamaRouter else { return (system + skillState + progressState, compact) }
-        let instructions = system + skillState
+        var compact = Self.compacted(turns)
+        guard let local = router as? OllamaRouter else { return (system + skillState + progressState, compact) }
+        var instructions = system + skillState
+        // Murmur's own model (v2 on): the short instructions, the user's own skills, and the context with the request.
+        if LocalModels.usesShortPrompt(local.model) {
+            instructions = Self.compactPrompt(groups: groups) + userSkills + skillState
+            if case .user(let said)? = compact.first {
+                compact[0] = .user(Self.compactRequest(said, context: requestContext))
+            }
+        }
         let progress = progressState
         let fixed = ContextBudget.tokens(instructions) + ContextBudget.tokens(tools) + ContextBudget.tokens(progress)
         let fitted = ContextBudget.fit(compact, fixed: fixed, window: OllamaClient.contextWindow)
@@ -1046,6 +1151,13 @@ public final class CommandAgent {
     /// answered, a list gone through): kept for half an hour as finished, so "continue" goes on from that answer.
     /// Otherwise what this command kept is cleared; one that never kept anything leaves an older task alone.
     private func clearIfFinished() {
+        // It stopped to ask (“Which resume do you mean?”): the next thing said is the answer, and this task goes on.
+        if routing, !stoppedEarly, let answer = shown.answer, let question = TaskResume.question(in: answer) {
+            TaskResume.save(.init(request: utterance, steps: plan.map { .init(text: $0.text, done: $0.done) },
+                                  notes: notes, answer: answer, question: question))
+            host.log("command: asked the user; their next words answer it (for \(Int(TaskResume.answerWaitsFor / 60)) min)")
+            return
+        }
         if stoppedEarly || plan.contains(where: { !$0.done }) { return }
         let goesFurther = routing && shown.answer != nil
             && (Self.asksForInformation(utterance) || PageDigest.wantsWholePage(QuickCommands.clean(utterance))
@@ -1265,6 +1377,19 @@ public final class CommandAgent {
             }
             // The user's name isn't added: a document that mentions them a lot (a handover, a contract) then outranked
             // the Aadhaar or PAN card asked for.
+            // The results window only when finding is all that was asked ("find my resume", "show me the goa photos",
+            // or the model asks for it): it ends the command. Otherwise ("send my resume to Roma", "find the cat photo
+            // and share it") the matches, with their paths, go back to the model for the next step.
+            if text("show") != "true", !Self.onlyFindsFiles(utterance) || plan.contains(where: { !$0.done }) {
+                host.progress("Finding “\(query)”…")
+                let found = routing ? await host.findFiles(query) : []
+                guard !found.isEmpty else { return Outcome(result: "No files match “\(query)”.") }
+                let matches = Array(found.prefix(5))
+                offered.formUnion(matches.map(\.path))
+                host.log("command: \(matches.count) matches for “\(query)” for the next step")
+                return Outcome(result: Self.describe(matches, for: query)
+                    + "\nThe request goes on: use the right file's path in the next step (send_message's file, open_file, …).")
+            }
             host.searchFiles(query)
             return Outcome(result: "Showing file search results for \"\(query)\".", finished: true, shown: true)
         case "open_url":
@@ -1494,8 +1619,10 @@ public final class CommandAgent {
                     if clicked.hasPrefix("Clicked") { return Outcome(result: clicked) }
                 }
                 guard let shot = await ScreenControl.shoot() else {
-                    return Outcome(result: "Couldn't take a screenshot to find “\(target)” (Murmur needs Screen "
-                        + "Recording permission). Use read_screen and click instead.")
+                    let why = ScreenControl.shotProblem ?? "unknown"
+                    host.log("command: no screenshot: \(why)")
+                    return Outcome(result: "Couldn't take a screenshot to find “\(target)” (\(why)). Use read_screen "
+                        + "and click instead.")
                 }
                 host.progress("Finding “\(target)” on the screen…")
                 switch await LocalVision.locate(target, jpeg: shot.jpeg, width: shot.width, height: shot.height) {
@@ -1605,6 +1732,13 @@ public final class CommandAgent {
                 return Outcome(result: opened, finished: true, shown: true)
             }
             host.pasteHere(body)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            // Said only once it's there: a paste with the cursor on a button or a list went nowhere.
+            if ScreenControl.focusedTextContains(body) == false {
+                host.log("command: wrote in \(appName), but the text isn't where the cursor is")
+                return Outcome(result: "The text didn't land in \(appName): the cursor wasn't in a text box. read_screen, "
+                    + "click where it should go, then insert_text it.")
+            }
             host.log("command: wrote \(body.count) characters in \(appName)")
             host.progress("Written in \(appName)")
             return Outcome(result: "Wrote it in \(appName).", finished: true, shown: true)
@@ -1612,6 +1746,11 @@ public final class CommandAgent {
             // Into the box you were typing in, even if the command went elsewhere to get the text.
             await backToInput()
             host.pasteHere(text("text"))
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if ScreenControl.focusedTextContains(text("text")) == false {
+                return Outcome(result: "It didn't paste: the cursor in \(inputTarget?.app.localizedName ?? "the app") isn't "
+                    + "in a text box. read_screen, click the box it should go in, then insert_text again.")
+            }
             return Outcome(result: "Pasted.", finished: true, shown: true)
         case "read_clipboard":
             let copied = NSPasteboard.general.string(forType: .string) ?? ""
@@ -1628,7 +1767,12 @@ public final class CommandAgent {
             }
             await backToInput()
             _ = ScreenControl.press("cmd+v")
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let copied = NSPasteboard.general.string(forType: .string),
+               ScreenControl.focusedTextContains(copied) == false {
+                return Outcome(result: "It didn't paste: the cursor in \(inputTarget?.app.localizedName ?? "the app") "
+                    + "isn't in a text box. read_screen, click the box it should go in, then paste_clipboard again.")
+            }
             return Outcome(result: "Pasted the clipboard into \(inputTarget?.app.localizedName ?? "the app").",
                            finished: true, shown: true)
         case "replace_selection":
@@ -1678,13 +1822,32 @@ public final class CommandAgent {
                spokenApp.caseInsensitiveCompare(requestedApp) != .orderedSame {
                 host.log("command: message app policy used spoken \"\(spokenApp)\" instead of model \"\(requestedApp)\"")
             }
-            guard !to.isEmpty, !body.isEmpty else { return Outcome(result: "Who should it go to, and what should it say?") }
-            guard await allow(.messages, "Send this to \(to) on \(app)?", "“\(body)”") else {
+            // A file to send with it (a photo, a PDF): its full path, from search_files or the screen.
+            var file: URL?
+            if !text("file").isEmpty {
+                let path = (text("file") as NSString).expandingTildeInPath
+                guard path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) else {
+                    return Outcome(result: "There's no file at \(text("file")). Find it first (search_files), then use its full path.")
+                }
+                file = URL(fileURLWithPath: path)
+            }
+            guard !to.isEmpty, !body.isEmpty || file != nil else {
+                return Outcome(result: "Who should it go to, and what should it say?")
+            }
+            let what = [file.map { "📎 \($0.lastPathComponent)" }, body.isEmpty ? nil : "“\(body)”"]
+                .compactMap { $0 }.joined(separator: "\n")
+            guard await allow(.messages, "Send this to \(to) on \(app)?", what) else {
                 return Outcome(result: "You chose not to send it.", finished: true)
             }
             messageApproved = true
             host.progress("Sending to \(to)…")
-            let result = await Messaging.send(body, to: to, in: app, paste: host.pasteHere)
+            // Opened their chat in this command (clicked something with their name in it): for a file to someone with
+            // no number in Contacts, Murmur sends into the chat that's open, and only then.
+            let openedChat = did.contains { ["click", "click_on", "browser_click"].contains($0.tool)
+                && $0.result.range(of: "\\b\(NSRegularExpression.escapedPattern(for: to))\\b",
+                                   options: [.regularExpression, .caseInsensitive]) != nil }
+            let result = await Messaging.send(body, to: to, in: app, file: file, chatOpened: openedChat,
+                                              paste: host.pasteHere)
             host.log("command: send_message → \(result.prefix(160))")
             if result.hasPrefix("Sent") { sentMessages.append(body) }
             return Outcome(result: result)
@@ -1917,8 +2080,13 @@ public final class CommandAgent {
     private func see(question: String) async -> String {
         host.progress("Looking at the screen…")
         guard let shot = await ScreenControl.shoot() else {
-            return "Couldn't take a screenshot: Murmur needs Screen Recording permission (System Settings → Privacy & "
-                + "Security → Screen Recording). Use read_screen meanwhile."
+            let why = ScreenControl.shotProblem ?? "unknown"
+            host.log("command: no screenshot: \(why)")
+            if why.hasPrefix("Screen Recording") {
+                return "Couldn't take a screenshot: Murmur needs Screen Recording permission (System Settings → "
+                    + "Privacy & Security → Screen Recording). Use read_screen meanwhile."
+            }
+            return "Couldn't take a screenshot (\(why)). Use read_screen meanwhile."
         }
         usingVision = true
         let header = "Screenshot of \(shot.app) · “\(shot.window)”, \(shot.width)×\(shot.height) pixels. Positions are "
@@ -1934,12 +2102,22 @@ public final class CommandAgent {
             return header + recognised()
         default:
             let started = Date()
+            // The text first, from the Mac's own recognition (exact and quick); the vision model answers from it
+            // and the picture.
+            let text = ScreenControl.recognisedLines(shot)
+            // For the model the words alone: positions are for clicking, and it gives its own on a 0–1000 scale.
+            let words = text.map { lines in
+                lines.components(separatedBy: "\n").map {
+                    $0.replacingOccurrences(of: #" at \(\d+, \d+\)$"#, with: "", options: .regularExpression)
+                }.joined(separator: "\n")
+            }
             switch await LocalVision.describe(shot.jpeg, width: shot.width, height: shot.height, app: shot.app,
-                                              window: shot.window, question: question) {
-            case .success(let description):
-                host.log(String(format: "command: looked with %@ on this Mac in %.1f s", VisionText.localModel,
+                                              window: shot.window, question: question, text: words) {
+            case .success(let answer):
+                host.log(String(format: "command: looked with %@ on this Mac in %.1f s", LocalVision.lastModel,
                                 Date().timeIntervalSince(started)))
-                return header + "\nWhat's on it (seen on this Mac):\n" + description
+                return header + (text.map { "\nText on it, with positions:\n" + $0 } ?? "")
+                    + "\nSeen on this Mac: " + answer
             case .failure(let failure):
                 host.log("command: on-device vision unavailable (\(failure.text)); text recognition instead")
                 // The first time an app needs seeing and the model isn't here: offer it, once ever. It downloads in
@@ -2179,6 +2357,16 @@ public final class CommandAgent {
     /// A shell command the model asked for: reading commands run at once, anything else is shown to you first.
     private func runCommand(_ command: String, purpose: String) async -> Outcome {
         guard !command.isEmpty else { return Outcome(result: "No command given.") }
+        // AppleScript for an app that has none (WhatsApp, Slack, most chat apps) only fails, and a small model keeps
+        // rewording it: say why once, and what works instead.
+        if let app = AppData.scriptedApp(in: command), await AppData.isScriptable(app) == false {
+            let isChat = Messaging.chatApps.contains { entry in entry.names.contains { app.lowercased().contains($0) } }
+            host.log("command: not running AppleScript for \(app): it can't be scripted")
+            return Outcome(result: "\(app) can't be scripted (it has no AppleScript dictionary), so no osascript will "
+                + "work on it; don't try another. "
+                + (isChat ? "To send a message or a file in it, call send_message: Murmur opens the chat itself. " : "")
+                + "Otherwise open_app it, then read_screen and click.")
+        }
         if ShellCommand.usesSudo(command) {
             return Outcome(result: "Murmur doesn't run commands as administrator (sudo). Tell the user the command so "
                 + "they can run it in Terminal themselves.")
@@ -2386,6 +2574,27 @@ public final class CommandAgent {
         return lines.joined(separator: "\n")
     }
 
+    /// The short instructions for Murmur's own model from v2 on (`LocalModels.usesShortPrompt`). It was trained on
+    /// what the full rules make a model do, so they aren't sent: about a fifth of the reading on every step. The
+    /// text depends only on the tool sets: what changes per request (the time, the front app, memory, a selection)
+    /// goes with the request instead (`compactRequest`), so Ollama reuses the rules and tools it read for the last
+    /// command. murmur-models trains on exactly this (exported by ExportForTraining).
+    static func compactPrompt(groups: Set<ToolGroup>) -> String {
+        var lines = [
+            "You are Murmur, a voice assistant on the user's Mac. Carry out the user's spoken command with tool calls, "
+                + "step by step, until all of it is done, then call done. Use reply to tell the user what they asked "
+                + "to know or what you found. If the request is unclear, reply with one short question.",
+        ]
+        let more = ToolGroup.moreToolsHint(loaded: groups)
+        if !more.isEmpty { lines.append("More tools with more_tools: \(more).") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The first message to Murmur's own model: the request's context, then what was said.
+    static func compactRequest(_ utterance: String, context: String) -> String {
+        "\(context)\n\nCommand: \(utterance)"
+    }
+
     static func tools(helpers: [AssistantCLI]) -> [ToolSpec] {
         func tool(_ name: String, _ description: String, _ properties: [String: (String, String)] = [:],
                   required: [String]? = nil) -> ToolSpec {
@@ -2408,8 +2617,11 @@ public final class CommandAgent {
                  + "words, e.g. \"lease 2025 pdf\": a clear best match opens, otherwise you get the matches to pick from",
                  ["query": ("string", "the file's full path, its exact name, or the user's description"),
                   "play": ("string", "true to start playing a video or song")], required: ["query"]),
-            tool("search_files", "Search the user's files by meaning and show the results",
-                 ["query": ("string", "what to look for")]),
+            tool("search_files", "Search the user's files by meaning. When finding is all the user asked, it shows the "
+                 + "results to them and the command ends; otherwise (send it, attach it, open one) the matches come back "
+                 + "to you with their paths",
+                 ["query": ("string", "what to look for"),
+                  "show": ("boolean", "true to show the results to the user and finish, optional")], required: ["query"]),
             tool("open_url", "Open a website, in a named browser if the user said one (\"open youtube on chrome\")",
                  ["url": ("string", "address, e.g. github.com or youtube.com"),
                   "browser": ("string", "browser to use, e.g. Chrome; empty for the default")], required: ["url"]),
@@ -2534,7 +2746,9 @@ public final class CommandAgent {
                  + "(the user is asked first)",
                  ["app": ("string", "WhatsApp, Messages, Slack… (empty: the chat app in front)"),
                   "to": ("string", "the person, group or channel, as the user said it"),
-                  "text": ("string", "the message, in the user's words")], required: ["to", "text"]),
+                  "text": ("string", "the message, in the user's words (may be empty when only a file is sent)"),
+                  "file": ("string", "a file to send too (a photo, a PDF): its full path from search_files, optional")],
+                 required: ["to"]),
             tool("plan", "Write or rewrite your task list for a request with several parts (going through emails, "
                  + "comparing things, a chain of steps): one step per line, [x] for done, [ ] for to do. Call it first, "
                  + "then again whenever you learn something (more items to go through, a step not needed, something "

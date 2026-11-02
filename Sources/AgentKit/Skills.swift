@@ -81,9 +81,15 @@ public final class SkillLibrary: ObservableObject {
 
     /// The skills part of the instructions for one request: "Always" skills in full, "When it fits" ones whose
     /// triggers the request hits (or that it names) in full, the rest listed for use_skill.
-    public func prompt(for utterance: String) -> (text: String, inFull: [String]) {
-        let (full, listed, missing) = SkillFiles.choose(skills, for: utterance, mode: { self.mode(of: $0) },
+    /// `userOnly`: only the skills the user added, for Murmur's own model, which learned the built-in ones.
+    public func prompt(for utterance: String, userOnly: Bool = false) -> (text: String, inFull: [String]) {
+        var (full, listed, missing) = SkillFiles.choose(skills, for: utterance, mode: { self.mode(of: $0) },
                                                          available: { self.isAvailable($0) })
+        if userOnly {
+            full = full.filter { !$0.0.builtIn }
+            listed = listed.filter { !$0.builtIn }
+            missing = missing.filter { !$0.builtIn }
+        }
         guard !full.isEmpty || !listed.isEmpty || !missing.isEmpty else { return ("", []) }
         var lines = ["", "", "# Skills",
                      "Skills are the user's standing instructions for how to work. Follow each skill shown in full "

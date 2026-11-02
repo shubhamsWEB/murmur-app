@@ -149,6 +149,8 @@ public final class DictationKeyMonitor {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
         case .keyDown:
+            // Keys Murmur presses itself (a command's Esc or Return, a paste) aren't the user's.
+            if event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(getpid()) { return }
             onOtherKey?(event.getIntegerValueField(.keyboardEventKeycode))
         case .flagsChanged:
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))

@@ -94,6 +94,11 @@ public enum IntentClassifier {
         if forcedCommand { return Decision(intent: .command, reason: "command key held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
+        // Murmur just asked something (“Which resume do you mean?”): a short reply in the next few minutes answers
+        // it, even said with the dictation key (“the latest one”).
+        if TaskResume.awaitingAnswer != nil, cleaned.split(separator: " ").count <= 12 {
+            return Decision(intent: .command, reason: "answers Murmur's question")
+        }
         // Text selected and "summarise this", "make it more formal", "translate this to Hindi".
         if hasSelection, CommandAgent.isAboutSelection(utterance) {
             return Decision(intent: .command, reason: "an instruction about the selected text")

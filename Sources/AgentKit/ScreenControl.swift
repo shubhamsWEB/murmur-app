@@ -252,16 +252,10 @@ public enum ScreenControl {
     /// Takes a screenshot of the working app's window (longest side at most `maxSide` pixels). Nil without Screen
     /// Recording permission (asked for once) or with no window.
     public static func shoot(maxSide: CGFloat = 1280) async -> Shot? {
-        guard let app = await targetApp() else { return nil }
-        guard CGPreflightScreenCaptureAccess() else {
-            if !askedForScreenRecording {
-                askedForScreenRecording = true
-                _ = await Permissions.inFront { CGRequestScreenCaptureAccess() }
-            }
-            return nil
-        }
+        shotProblem = nil
+        guard let app = await targetApp() else { shotProblem = "no app is in front"; return nil }
+        guard let content = await shareableContent() else { return nil }
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let windows = content.windows.filter {
                 $0.owningApplication?.processID == app.processIdentifier && $0.windowLayer == 0 && $0.frame.width > 80
             }
@@ -272,7 +266,7 @@ public enum ScreenControl {
                         && abs(candidate.frame.width - $0.width) < 4 } ?? false
                   })
                     ?? windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
-            else { return nil }
+            else { shotProblem = "\(app.localizedName ?? "the app") has no window on screen"; return nil }
             let frame = window.frame
             let scale = min(NSScreen.main?.backingScaleFactor ?? 2, maxSide / max(frame.width, frame.height))
             let configuration = SCStreamConfiguration()
@@ -288,6 +282,28 @@ public enum ScreenControl {
             lastShot = shot
             return shot
         } catch {
+            shotProblem = "the capture failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Why the last `shoot` came back empty, in a few words; nil when it worked.
+    public private(set) static var shotProblem: String?
+
+    /// The windows ScreenCaptureKit can capture, which is the real test of Screen Recording permission.
+    /// CGPreflightScreenCaptureAccess isn't asked first: it can say no for an app that has the permission (after a
+    /// rebuild re-signs it, or until it relaunches after the grant), and Murmur then asked again at every launch
+    /// without ever trying. Only a refused capture counts as no permission; then macOS's prompt is shown, once a
+    /// session.
+    private static func shareableContent() async -> SCShareableContent? {
+        do {
+            return try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            shotProblem = "Screen Recording isn't allowed for this copy of Murmur (\(error.localizedDescription))"
+            if !askedForScreenRecording {
+                askedForScreenRecording = true
+                _ = await Permissions.inFront { CGRequestScreenCaptureAccess() }
+            }
             return nil
         }
     }
@@ -724,15 +740,8 @@ public enum ScreenControl {
     /// The text in a picture of the app's front window (Vision, on this Mac). Nil without Screen Recording
     /// permission (asked for once), or when there's nothing to read.
     private static func recognisedText(of app: NSRunningApplication) async -> String? {
-        guard CGPreflightScreenCaptureAccess() else {
-            if !askedForScreenRecording {
-                askedForScreenRecording = true
-                _ = await Permissions.inFront { CGRequestScreenCaptureAccess() }
-            }
-            return nil
-        }
+        guard let content = await shareableContent() else { return nil }
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let windows = content.windows.filter {
                 $0.owningApplication?.processID == app.processIdentifier && $0.windowLayer == 0 && $0.frame.width > 80
             }
@@ -759,6 +768,12 @@ public enum ScreenControl {
     /// them; links and buttons before other things, ones on screen first. Pressed through Accessibility (scrolled
     /// into view first), else clicked with the pointer. browser_click uses it when the page can't be scripted.
     public static func click(labeled text: String) async -> String {
+        await click(labeled: text, atLeast: 1) ?? "Nothing on the screen says “\(text)”. read_screen to see what's there, or scroll."
+    }
+
+    /// The same, only for a control whose words match at least `atLeast` (`matchScore`): 3 is the same words, or
+    /// starting with them as a word ("Roma, 2 unread messages" for "Roma"). Nil when there's no such control.
+    static func click(labeled text: String, atLeast: Int) async -> String? {
         guard AXIsProcessTrusted() else { return "Murmur needs Accessibility permission to click." }
         let want = folded(text)
         guard !want.isEmpty else { return "Say what to click." }
@@ -782,7 +797,7 @@ public enum ScreenControl {
             let role = string(node, kAXRoleAttribute) ?? ""
             if pressable.contains(role), let words = label(node, role: role) {
                 let match = matchScore(folded(words), want)
-                if match > 0 {
+                if match >= atLeast, match > 0 {
                     let score = match * 10 + (role == "AXLink" || role == "AXButton" ? 2 : 0) + (isOnScreen(node) ? 1 : 0)
                     if score > (best?.score ?? 0) { best = (node, score) }
                 }
@@ -791,9 +806,7 @@ public enum ScreenControl {
             }
             queue.append(contentsOf: children(node))
         }
-        guard let best else {
-            return "Nothing on the screen says “\(text)”. read_screen to see what's there, or scroll."
-        }
+        guard let best else { return nil }
         let what = describe(best.element) ?? "“\(text)”"
         AXUIElementPerformAction(best.element, "AXScrollToVisible" as CFString)
         if AXUIElementPerformAction(best.element, kAXPressAction as CFString) == .success {
@@ -806,6 +819,26 @@ public enum ScreenControl {
         mouseClick(at: point)
         try? await Task.sleep(nanoseconds: 700_000_000)
         return "Clicked \(what)."
+    }
+
+    /// A heading in the front window that reads exactly `text`: in a chat app, the name at the top of the open chat.
+    static func hasHeading(_ text: String) async -> Bool {
+        let want = folded(text)
+        guard !want.isEmpty, AXIsProcessTrusted(), let app = await targetApp() else { return false }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let window = viewedWindow(of: app) ?? element(root, kAXFocusedWindowAttribute) else { return false }
+        var queue = [window]
+        var index = 0
+        while index < queue.count, index < 10_000 {
+            let node = queue[index]
+            index += 1
+            if string(node, kAXRoleAttribute) == "AXHeading", let words = label(node, role: "AXHeading"),
+               folded(words) == want {
+                return true
+            }
+            queue.append(contentsOf: children(node))
+        }
+        return false
     }
 
     /// Lowercased, quotes and punctuation dropped, spaces collapsed: "“Sent”" → "sent".
@@ -847,6 +880,94 @@ public enum ScreenControl {
             ?? editable.first
         guard let pick else { return false }
         return await focus(pick.offset + 1)
+    }
+
+    /// Puts the cursor in a chat's message box: the text box whose label says it's for a message ("Type a message",
+    /// "Compose message"), else the lowest one in the window that isn't a search field. Clicking a chat leaves the focus
+    /// on the chat's name: a paste then went nowhere and Return opened the contact's details. The box is clicked
+    /// like a person would (WhatsApp ignores being focused programmatically). read_screen's list can miss a box that
+    /// has only just appeared, so the whole window is searched too, and it tries twice while the chat settles.
+    public static func focusComposer() async -> Bool {
+        for attempt in 0..<2 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: 700_000_000) }
+            _ = await read()
+            var boxes = elements.filter(isMessageBox)
+            if boxes.isEmpty, let app = workingApp(), let window = viewedWindow(of: app) ?? focusedWindow(of: app) {
+                boxes = textBoxes(in: window).filter(isMessageBox)
+            }
+            func label(_ element: AXUIElement) -> String {
+                [string(element, kAXDescriptionAttribute), string(element, "AXPlaceholderValue"),
+                 string(element, kAXTitleAttribute)].compactMap { $0 }.joined(separator: " ").lowercased()
+            }
+            let named = boxes.first { box in ["message", "type", "compose", "write", "reply"].contains { label(box).contains($0) } }
+            let lowest = boxes.max { (frame(of: $0)?.minY ?? 0) < (frame(of: $1)?.minY ?? 0) }
+            guard let pick = named ?? lowest else { continue }
+            if let point = center(of: pick) { mouseClick(at: point) }
+            AXUIElementSetAttributeValue(pick, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            return true
+        }
+        return false
+    }
+
+    /// A text box someone types a message into: a text field or area that isn't a search field.
+    private static func isMessageBox(_ element: AXUIElement) -> Bool {
+        let role = string(element, kAXRoleAttribute) ?? ""
+        guard role == "AXTextField" || role == "AXTextArea" else { return false }
+        if string(element, kAXSubroleAttribute) == "AXSearchField" { return false }
+        let label = [string(element, kAXDescriptionAttribute), string(element, "AXPlaceholderValue"),
+                     string(element, kAXTitleAttribute)].compactMap { $0 }.joined(separator: " ").lowercased()
+        return !label.contains("search")
+    }
+
+    /// Every text field and area in a window (at most a few thousand elements are looked at).
+    private static func textBoxes(in window: AXUIElement) -> [AXUIElement] {
+        var found: [AXUIElement] = []
+        var queue = [window]
+        var seen = 0
+        while !queue.isEmpty, seen < 4000 {
+            let element = queue.removeFirst()
+            seen += 1
+            let role = string(element, kAXRoleAttribute) ?? ""
+            if role == "AXTextField" || role == "AXTextArea" { found.append(element) }
+            queue += children(element)
+        }
+        return found
+    }
+
+    private static func focusedWindow(of app: NSRunningApplication) -> AXUIElement? {
+        element(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute)
+    }
+
+    /// Whether `text` arrived where the keyboard is: true or false when the focused box can be read; false when the
+    /// focus is on something that takes no text (a button, a list row: the paste went nowhere); nil when it can't be
+    /// told (web editors and some apps don't share their text).
+    public static func focusedTextContains(_ text: String) -> Bool? {
+        guard AXIsProcessTrusted() else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        guard let focused = element(system, kAXFocusedUIElementAttribute) else { return nil }
+        let role = string(focused, kAXRoleAttribute) ?? ""
+        if ["AXButton", "AXRow", "AXCell", "AXList", "AXTable", "AXOutline", "AXMenuItem", "AXImage", "AXLink"]
+            .contains(role) { return false }
+        guard ["AXTextField", "AXTextArea", "AXComboBox"].contains(role),
+              let typed = value(focused, kAXValueAttribute) as? String else { return nil }
+        // Apps reformat what's pasted (rich text, smart quotes): look for the start of its first line.
+        let first = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let probe = String(first.trimmingCharacters(in: .whitespaces).prefix(40))
+        guard !probe.isEmpty else { return nil }
+        func plain(_ s: String) -> String {
+            s.lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
+        return plain(typed).contains(plain(probe))
+    }
+
+    /// The keyboard focus is in a text box in the working app (not a button or a list).
+    public static func focusIsEditable() -> Bool {
+        guard AXIsProcessTrusted(), let app = workingApp() else { return false }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let focused = element(root, kAXFocusedUIElementAttribute) else { return false }
+        return ["AXTextField", "AXTextArea", "AXComboBox"].contains(string(focused, kAXRoleAttribute) ?? "")
     }
 
     /// Presses the menu item called `title` anywhere in `app`'s menu bar, unless it's already ticked: a setting with

@@ -16,11 +16,23 @@ public enum VisionText {
         Mode(rawValue: UserDefaults.standard.string(forKey: "screenVision") ?? "") ?? .local
     }
 
-    /// The local vision model: Qwen3-VL, 8B with 16 GB of memory or more (about 94% on ScreenSpot, 6 GB), else 4B
-    /// (about 90%, 3.3 GB). `defaults write com.copico.Murmur visionModel <ollama tag>` for another.
+    /// The local vision model: Qwen3-VL 4B Instruct (about 90% on ScreenSpot, 3.3 GB). Instruct, not the plain tag:
+    /// that's the thinking model, which reasoned for a minute or ran out of room before answering. 4B, not 8B, on
+    /// every Mac: it shares memory with the command model and answers about twice as fast.
+    /// `defaults write com.copico.Murmur visionModel <ollama tag>` for another.
     public static var localModel: String {
         if let chosen = UserDefaults.standard.string(forKey: "visionModel"), !chosen.isEmpty { return chosen }
-        return ProcessInfo.processInfo.physicalMemory >= 15 * 1_073_741_824 ? "qwen3-vl:8b" : "qwen3-vl:4b"
+        return defaultModel
+    }
+
+    public static let defaultModel = "qwen3-vl:4b-instruct"
+
+    /// What earlier versions downloaded: used while the default isn't on this Mac yet (and no model was chosen).
+    public static let earlierModels = ["qwen3-vl:8b", "qwen3-vl:4b", "qwen3-vl:2b"]
+
+    /// Whether a model is chosen in Settings (else the default, or an earlier one already here).
+    public static var modelChosen: Bool {
+        !(UserDefaults.standard.string(forKey: "visionModel") ?? "").isEmpty
     }
 
     // MARK: Screenshots in tool results
@@ -98,17 +110,23 @@ public enum VisionText {
 
     // MARK: Prompts for the local vision model
 
-    public static func describePrompt(app: String, window: String, question: String) -> String {
-        "This is a screenshot of the \(app) window \"\(window)\" on a Mac. An assistant that can't see it will act on "
-            + "your description, so be complete and exact.\n"
-            + "1. TEXT: all the text you can read, top to bottom, left to right, as it appears (lists item by item).\n"
-            + "2. CONTROLS: every button, link, field, tab, menu, checkbox, list row and icon that can be clicked, one "
-            + "per line as `- <its words or what it shows> (<kind>) at (x, y)`, x and y from 0 to 1000 across and down "
-            + "the image, at its centre.\n"
-            + "3. MORE: say if the window's content is cut off (a scroll bar, text running past an edge, \"load "
-            + "more\").\n"
-            + (question.isEmpty ? "" : "4. ANSWER: \(question)\n")
-            + "Only describe what is really there."
+    /// What the vision model is asked: the question (or a short account of the screen), answered in a few sentences
+    /// with the text the Mac read off the screenshot to go by. Reading every word and listing every control took an
+    /// 8B model over a minute; the text comes from the Mac's own recognition now (exact, in a fraction of a second),
+    /// so the model only does what it alone can: pictures, icons, colours, layout, and what the question is about.
+    public static func answerPrompt(app: String, window: String, question: String, text: String?) -> String {
+        var prompt = "This is a screenshot of the \(app) window \"\(window)\" on a Mac.\n"
+        if let text, !text.isEmpty {
+            prompt += "The text on it, read exactly by the Mac, top to bottom:\n\"\"\"\n\(text.prefix(3000))\n\"\"\"\n"
+        }
+        prompt += question.isEmpty
+            ? "In three or four sentences, say what this screen is and what matters on it: the main content, any "
+                + "picture and what it shows, and anything waiting for the user (a dialog, an error, a button to press)."
+            : "Answer in at most four sentences: \(question)"
+        prompt += "\nUse the text above for exact words; look at the image for pictures, icons, colours and layout. If "
+            + "the answer is something to click, end with its centre as (x, y), x and y from 0 to 1000 across and down "
+            + "the image. Only say what is really there."
+        return prompt
     }
 
     public static func locatePrompt(_ target: String) -> String {

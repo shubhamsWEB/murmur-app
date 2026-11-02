@@ -109,6 +109,8 @@ final class AppController {
         statusMenu.dictationItems = { [weak self] in self?.dictation.compactMenuItems() ?? [] }
         statusMenu.dictation = dictation
         statusMenu.onCommands = { [weak self] in self?.showHome(.commands) }
+        // Before anything asks for the local model: an earlier install keeps qwen3:4b unless it picks Murmur Agent.
+        CommandAgent.keepEarlierDefault(setUpBefore: model.settings.onboarded || !model.settings.roots.isEmpty)
         dictation.start()
 
         hotkeys.onPress = { [weak self] in
