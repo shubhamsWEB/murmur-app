@@ -23,15 +23,19 @@ public enum TaskResume {
         public let answer: String?
         /// It finished (with an answer): "continue" goes further from that answer, for half an hour.
         public let finished: Bool?
+        /// It stopped to ask the user something ("Which resume do you mean?"): what they say next is the answer,
+        /// and the same task goes on with it.
+        public let question: String?
 
         public init(request: String, steps: [Step], notes: [String], at: Date = Date(), answer: String? = nil,
-                    finished: Bool? = nil) {
+                    finished: Bool? = nil, question: String? = nil) {
             self.request = request
             self.steps = steps
             self.notes = notes
             self.at = at
             self.answer = answer
             self.finished = finished
+            self.question = question
         }
 
         public var openSteps: Int { steps.filter { !$0.done }.count }
@@ -41,6 +45,39 @@ public enum TaskResume {
     public static let keptFor: TimeInterval = 2 * 24 * 3600
     /// How long a finished one can still be taken further.
     public static let finishedKeptFor: TimeInterval = 30 * 60
+    /// How long a question waits for its answer.
+    public static let answerWaitsFor: TimeInterval = 3 * 60
+
+    /// The question the last command stopped on, while it's waiting for an answer.
+    public static var awaitingAnswer: String? {
+        lock.lock(); defer { lock.unlock() }
+        return current()?.question
+    }
+
+    /// The task waiting for an answer, taken; nil when none is.
+    public static func takeAwaitingAnswer() -> Pending? {
+        lock.lock(); defer { lock.unlock() }
+        guard let task = current(), task.question != nil else { return nil }
+        cached = nil
+        try? FileManager.default.removeItem(at: file)
+        return task
+    }
+
+    /// The question a reply ends the task on: one that opens with a question ("Which resume do you mean? I found
+    /// several: …") or closes with one ("… Should I send the PDF or the Word file?"). Nil for an answer that only
+    /// mentions a question mark somewhere in the middle.
+    public static func question(in reply: String) -> String? {
+        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.contains("?") else { return nil }
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if let last = lines.last, last.hasSuffix("?") { return text }
+        let firstSentence = text.prefix { $0 != "\n" }.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard firstSentence.count == 2, firstSentence[0].count < 160, !firstSentence[0].contains(".") else { return nil }
+        let opening = firstSentence[0].lowercased().trimmingCharacters(in: .whitespaces)
+        let asking = #"^(which|what|who|where|when|how|do you|did you|should i|shall i|would you|can you|could you|is it|are you|want me|kaun|kaunsa|kya)\b"#
+        return opening.range(of: asking, options: .regularExpression) != nil ? text : nil
+    }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cached: Pending?
@@ -97,6 +134,7 @@ public enum TaskResume {
         }
         guard let task = cached else { return nil }
         let age = Date().timeIntervalSince(task.at)
+        if task.question != nil { return age < answerWaitsFor ? task : nil }
         if task.finished == true { return age < finishedKeptFor ? task : nil }
         return age < keptFor && task.openSteps > 0 ? task : nil
     }

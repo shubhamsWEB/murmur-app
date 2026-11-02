@@ -29,11 +29,11 @@ public final class VisionSetup {
 
     /// The download's size, as said to you.
     public var sizeText: String {
-        model.hasSuffix("8b") ? "6.2 GB" : model.hasSuffix("2b") ? "1.9 GB" : model.hasSuffix("4b") ? "3.3 GB" : "a few GB"
+        model.contains(":8b") ? "6.1 GB" : model.contains(":2b") ? "1.9 GB" : model.contains(":4b") ? "3.3 GB" : "a few GB"
     }
 
     private var sizeBytes: Int64 {
-        model.hasSuffix("8b") ? 6_200_000_000 : model.hasSuffix("2b") ? 1_900_000_000 : 3_300_000_000
+        model.contains(":8b") ? 6_100_000_000 : model.contains(":2b") ? 1_900_000_000 : 3_300_000_000
     }
 
     /// Free space for it, with 2 GB to spare. Unknown space counts as enough.
@@ -89,39 +89,17 @@ public final class VisionSetup {
         }
         phase = .downloading(0)
         // Ollama serves while its app is open.
-        if case .notRunning = await OllamaProbe.check(model: model) {
-            await OllamaProbe.start()
-            for _ in 0..<20 {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if case .notRunning = await OllamaProbe.check(model: model) { continue }
-                break
-            }
+        await OllamaProbe.startIfNeeded(model: model)
+        var error = await OllamaProbe.download(model, progress: { [weak self] part in self?.phase = .downloading(part) })
+        // No instruct tag for this size in Ollama's library: the plain one, remembered as the choice.
+        if let failed = error, model.hasSuffix("-instruct"),
+           failed.lowercased().contains("not found") || failed.lowercased().contains("does not exist") {
+            let plain = String(model.dropLast("-instruct".count))
+            UserDefaults.standard.set(plain, forKey: "visionModel")
+            error = await OllamaProbe.download(plain, progress: { [weak self] part in self?.phase = .downloading(part) })
         }
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/pull")!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 3600
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "stream": true])
-        do {
-            let (lines, response) = try await URLSession.shared.bytes(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                phase = .failed("Ollama couldn't start the download.")
-                return
-            }
-            // Each layer reports its own bytes: the total is all of them.
-            var layers: [String: (done: Double, total: Double)] = [:]
-            for try await line in lines.lines {
-                guard let json = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] else { continue }
-                if let error = json["error"] as? String { phase = .failed(error); return }
-                if let digest = json["digest"] as? String, let total = (json["total"] as? NSNumber)?.doubleValue, total > 0 {
-                    layers[digest] = ((json["completed"] as? NSNumber)?.doubleValue ?? 0, total)
-                    let done = layers.values.reduce(0) { $0 + $1.done }, all = layers.values.reduce(0) { $0 + $1.total }
-                    phase = .downloading(min(done / max(all, 1), 0.99))
-                }
-                if json["status"] as? String == "success" { break }
-            }
-        } catch {
-            phase = .failed("The download stopped: \(error.localizedDescription)")
+        if let error {
+            phase = .failed(error)
             return
         }
         if case .ready = await OllamaProbe.check(model: model) {

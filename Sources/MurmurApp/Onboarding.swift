@@ -1271,7 +1271,7 @@ private struct CommandsStep: View {
             Button("Open Ollama") { Task { await OllamaProbe.start() } }
                 .buttonStyle(.murmurSecondaryCompact)
         case .missingModel:
-            Button(pulling ? "Downloading…" : "Download \(model) (about 2.5 GB)") {
+            Button(pulling ? "Downloading…" : "Download \(LocalModels.display(model)) (\(LocalModels.sizeText(model)))") {
                 pulling = true
                 pullProblem = nil
                 Task {

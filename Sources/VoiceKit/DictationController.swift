@@ -144,7 +144,8 @@ public final class DictationController: ObservableObject {
     }
 
     /// AI cleanup (off by default): fillers and stumbles out, self-corrections applied, lists set out, in the style
-    /// for the kind of app. Uses the commands' model; with Claude or OpenAI the dictated words go to that provider.
+    /// for the kind of app. Uses Murmur's cleanup model on this Mac (`CleanupModel`), or the commands' model; with
+    /// Claude or OpenAI the dictated words go to that provider.
     public var aiCleanup: Bool {
         get { UserDefaults.standard.bool(forKey: Self.aiCleanupDefault) }
         set { UserDefaults.standard.set(newValue, forKey: Self.aiCleanupDefault); objectWillChange.send() }
@@ -161,8 +162,19 @@ public final class DictationController: ObservableObject {
         objectWillChange.send()
     }
 
-    /// Where AI cleanup's words go: on this Mac, or to a provider.
+    /// Where AI cleanup's words go when Murmur's own cleanup model isn't used: the commands' model, on this Mac or a
+    /// provider.
     public var cleanupModel: String { agent.currentRouter().name }
+
+    /// The model that tidies dictation: Murmur's cleanup model when it's picked and on this Mac (checked once, then
+    /// again after a failure, or each minute while it's missing), else the commands' model.
+    private func cleanupRouter() async -> (router: Router, name: String) {
+        let own = CleanupModel.shared
+        await own.refreshIfStale()
+        if own.inUse { return (OllamaRouter(model: CleanupModel.tag), CleanupModel.tag) }
+        let router = agent.currentRouter()
+        return (router, router.name)
+    }
 
     /// Fits what you say to the sentence it goes into: the space before it, no capital or full stop mid-sentence.
     /// The words are never changed.
@@ -435,6 +447,9 @@ public final class DictationController: ObservableObject {
     /// Accessibility, Quiet Voice, and the last dictation again.
     public func compactMenuItems() -> [NSMenuItem] {
         var items: [NSMenuItem] = []
+        if commandTask != nil {
+            items.append(ClosureMenuItem("Stop Command") { [weak self] in self?.stopCommand() })
+        }
         if !monitor.isRunning || !AXIsProcessTrusted() {
             items.append(ClosureMenuItem("Allow Typing in Other Apps…") { Self.openPrivacyPane("Privacy_Accessibility") })
         }
@@ -527,8 +542,8 @@ public final class DictationController: ObservableObject {
             })
         }
         let localMenu = NSMenu()
-        for model in ["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "llama3.2:3b"] {
-            localMenu.addItem(ClosureMenuItem(model, checked: model == agent.routerModel) { [weak self] in
+        for model in LocalModels.choices {
+            localMenu.addItem(ClosureMenuItem(LocalModels.display(model), checked: model == agent.routerModel) { [weak self] in
                 self?.agent.routerModel = model
             })
         }
@@ -626,9 +641,27 @@ public final class DictationController: ObservableObject {
         case .listening(handsFree: false):
             cancel()                       // Fn was part of a shortcut (Fn+Delete, Fn+arrow…), not dictation
         default:
-            break
+            // Esc while a command runs stops it. (Keys Murmur presses itself never reach here.)
+            if code == Int64(kVK_Escape), let running = commandTask {
+                log("command: Esc pressed; stopping")
+                agent.stop()
+                running.cancel()
+            }
         }
     }
+
+    /// The command running now, so Esc or the next command can stop it.
+    private var commandTask: Task<Void, Never>?
+
+    /// Stops the running command (the menu's Stop Command).
+    public func stopCommand() {
+        guard let running = commandTask else { return }
+        log("command: Stop Command chosen; stopping")
+        agent.stop()
+        running.cancel()
+    }
+
+    public var isRunningCommand: Bool { commandTask != nil }
 
     // MARK: - Dictation
 
@@ -644,6 +677,12 @@ public final class DictationController: ObservableObject {
         // the microphone is starting.
         phase = .listening(handsFree: handsFree)
         micLive = false
+        // Murmur's cleanup model loads while you speak: unloaded (Ollama lets it go after 30 idle minutes, or for
+        // the command model), loading it took most of cleanup's 4 seconds and the words went in untidied.
+        if aiCleanup, CleanupModel.shared.inUse {
+            let model = CleanupModel.tag
+            Task.detached(priority: .utility) { await OllamaClient(model: model).warmUp() }
+        }
         hud.show(listeningMode(handsFree: handsFree))
         let attempt = UUID()
         micAttempt = attempt
@@ -794,12 +833,29 @@ public final class DictationController: ObservableObject {
                     try? await Task.sleep(nanoseconds: 1_200_000_000)
                 }
                 if decision.intent == .command {
+                    // One command at a time: a new one stops the one still running (they took turns on the
+                    // screen, each undoing the other's work), and starts once it has.
+                    if let running = commandTask {
+                        log("command: a new command stops the one still running")
+                        agent.stop()
+                        running.cancel()
+                        await running.value
+                    }
                     log("command: \"\(text)\"")
                     DictationHistory.shared.add(text, app: frontApp, kind: .command)
-                    hud.show(.working("“\(text.prefix(60))”"))
+                    hud.show(.working("“\(text.prefix(50))” · Esc stops"))
                     lastCommand = text
-                    await agent.run(text, frontApp: frontApp, selection: selection, explicit: decision.explicit,
-                                    editable: focus == .textField)
+                    let agent = agent
+                    let explicit = decision.explicit
+                    let editable = focus == .textField
+                    let selected = selection
+                    let run = Task { @MainActor in
+                        await agent.run(text, frontApp: frontApp, selection: selected, explicit: explicit,
+                                        editable: editable)
+                    }
+                    commandTask = run
+                    await run.value
+                    if commandTask == run { commandTask = nil }
                     if hud.isWorking { hud.hide() }
                     return
                 }
@@ -836,13 +892,13 @@ public final class DictationController: ObservableObject {
         }
     }
 
-    /// AI cleanup with the commands' model. Nil — the words are typed as heard — when the model is slow (over 4 s),
-    /// fails, or replies with anything but a tidied version of what was said.
+    /// AI cleanup with Murmur's cleanup model, or the commands' model. Nil — the words are typed as heard — when the
+    /// model is slow (over 4 s), fails, or replies with anything but a tidied version of what was said.
     private func cleanUp(_ text: String) async -> String? {
         let app = NSWorkspace.shared.frontmostApplication
         let category = DictationCleanup.category(bundleID: app?.bundleIdentifier, windowTitle: Self.frontWindowTitle())
         let style = cleanupStyle(for: category)
-        let router = agent.currentRouter()
+        let (router, modelName) = await cleanupRouter()
         let system = DictationCleanup.system(style: style, category: category)
         let user = DictationCleanup.user(text)
         let started = Date()
@@ -859,9 +915,11 @@ public final class DictationController: ObservableObject {
             }
         }
         let took = Date().timeIntervalSince(started)
-        let what = "\(router.name), \(category.rawValue), \(style.rawValue)"
+        let what = "\(modelName), \(category.rawValue), \(style.rawValue)"
         guard let reply else {
             log(String(format: "dictation: AI cleanup (%@) gave nothing in %.1f s: typed as heard", what, took))
+            // Murmur's model may have been removed or Ollama closed: look again before the next dictation.
+            if modelName == CleanupModel.tag { await CleanupModel.shared.refresh() }
             return nil
         }
         guard let cleaned = DictationCleanup.accept(original: text, cleaned: reply) else {

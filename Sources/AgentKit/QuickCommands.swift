@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 /// The fast path: common commands are recognised by pattern and run at once, with no model involved
 /// ("open Slack", "quit Spotify", "volume 30", "search the web for…"). Anything else goes to the router model.
@@ -136,6 +137,34 @@ public enum QuickCommands {
     ]
 
     /// Words a chained command can start with ("open chrome and search facebook", "mute then lock the screen").
+    /// A second thing to do after "and" or "then" in one part of a request (the `verbs` there split it into quick
+    /// commands already): the next word is a verb ("find the invoice and pass it to Rohan"), by Apple's language
+    /// tagger, so any verb counts, not a list; "photos of mom and dad" or "black and white photos" don't. The list
+    /// below is for what the tagger doesn't know (Hinglish) and phrases ("let me know").
+    static func hasLaterStep(_ part: String) -> Bool {
+        if part.range(of: laterStep, options: .regularExpression) != nil { return true }
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = part
+        var joined = false
+        var found = false
+        tagger.enumerateTags(in: part.startIndex..<part.endIndex, unit: .word, scheme: .lexicalClass,
+                             options: [.omitWhitespace, .omitPunctuation]) { tag, range in
+            let word = part[range].lowercased()
+            if word == "and" || word == "then" { joined = true; return true }
+            if joined, word == "also" { return true }        // "and also send it"
+            if joined, tag == .verb, !["is", "are", "was", "were", "be", "been", "am"].contains(word) {
+                found = true
+                return false
+            }
+            joined = false
+            return true
+        }
+        return found
+    }
+
+    /// A second thing to do, after "and" or "then", that isn't one of `verbs` (those split into quick commands).
+    static let laterStep = #"\b(and|then)\s+(then\s+)?(also\s+)?(share|tell|compare|save|summari[sz]e|email|mail|message|text|reply|forward|post|attach|upload|download|copy|paste|put|make|create|give|ask|remind|book|buy|order|translate|explain|read|check|list|delete|remove|move|rename|zip|print|note|draft|let me know|bata|batao|bhej|bhejo|dikhao)\b"#
+
     static let verbs: Set<String> = [
         "open", "launch", "start", "switch", "go", "visit", "show", "quit", "close", "exit", "kill", "hide",
         "search", "google", "look", "find", "set", "turn", "volume", "mute", "unmute", "louder", "quieter", "softer",
@@ -197,6 +226,10 @@ public enum QuickCommands {
             i += 1
         }
         if !current.isEmpty { parts.append(current.joined(separator: " ")) }
+        // "find the cat photo and share it with mom", "find airpods on amazon and flipkart and tell me the
+        // difference", "find three alternatives, compare them and save it in notes": a later step the quick path
+        // can't do. It would do the first part (a search) and drop the rest, so the agent does the whole request.
+        if parts.contains(where: hasLaterStep) { return nil }
         var actions: [Action] = []
         for part in parts {
             guard let action = parse(part) else { return nil }

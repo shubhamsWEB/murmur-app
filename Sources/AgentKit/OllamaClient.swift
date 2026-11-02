@@ -52,6 +52,28 @@ public struct OllamaClient: Sendable {
     /// One chat turn. `messages` are Ollama message objects; `tools` are function definitions.
     /// `maxTokens`: a cap on the answer (a small local model can ramble on for thousands of words).
     public func chat(messages: [[String: Any]], tools: [[String: Any]], maxTokens: Int? = nil) async throws -> Reply {
+        // Ollama rejects the whole reply when the model writes a tool call it can't read ("expected element type
+        // <function> but have <parameter>"). At temperature 0 asking again gives the same reply, so the retries
+        // sample a little (0.4, then 0.7): a different wording of the same step, nearly always well formed.
+        var attempt = 0
+        while true {
+            do {
+                return try await chatOnce(messages: messages, tools: tools, maxTokens: maxTokens,
+                                          temperature: [0, 0.4, 0.7][attempt])
+            } catch OllamaError.bad(let message) where attempt < 2 && Self.isMalformedToolCall(message) {
+                attempt += 1
+            }
+        }
+    }
+
+    /// Ollama's error for a tool call it couldn't parse from the model's text.
+    static func isMalformedToolCall(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("element type") || lower.contains("tool call") || lower.contains("parse")
+    }
+
+    private func chatOnce(messages: [[String: Any]], tools: [[String: Any]], maxTokens: Int?,
+                          temperature: Double) async throws -> Reply {
         var request = URLRequest(url: base.appendingPathComponent("api/chat"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -63,7 +85,8 @@ public struct OllamaClient: Sendable {
             "stream": false,
             "think": false,                 // a router needs a decision, not a chain of thought
             "keep_alive": "30m",            // stay loaded between commands
-            "options": Self.options(maxTokens.map { ["temperature": 0, "num_predict": $0] } ?? ["temperature": 0]),
+            "options": Self.options(maxTokens.map { ["temperature": temperature, "num_predict": $0] }
+                                    ?? ["temperature": temperature]),
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let data: Data
