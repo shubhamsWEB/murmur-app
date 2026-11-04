@@ -68,6 +68,9 @@ pub struct Settings {
     pub openai_model: String,
     pub anthropic_workspace: String,
     pub ai_cleanup: bool,
+    /// The model clean-up uses: "" for Murmur Cleanup when it's in Ollama (else the commands' model), "commands" for
+    /// the commands' model always.
+    pub cleanup_model: String,
     pub cleanup_styles: BTreeMap<String, String>,
     pub detect_commands_off: bool,
 }
@@ -100,6 +103,7 @@ impl Settings {
                 anthropic_workspace: self.anthropic_workspace.clone(),
             },
             cleanup: self.ai_cleanup,
+            own_cleanup: self.cleanup_model != "commands",
             styles: self.cleanup_styles.clone(),
             detect: !self.detect_commands_off,
         }

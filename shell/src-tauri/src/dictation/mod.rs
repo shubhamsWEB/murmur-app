@@ -517,10 +517,20 @@ impl Inner {
         }
     }
 
+    /// Esc: cancels hands-free dictation; with none going, stops the command that's running (after the step it's
+    /// on), as on the Mac.
     fn escape(&self) {
         if self.hands_free.load(Ordering::SeqCst) {
             self.note("hands-free dictation cancelled");
             self.cancel();
+            return;
+        }
+        if self.recording.lock().unwrap().is_none() {
+            if let Some(assistant) = self.app.try_state::<Arc<Assistant>>() {
+                if assistant.stop() {
+                    self.note("Esc: stopping the command");
+                }
+            }
         }
     }
 
@@ -594,6 +604,7 @@ impl Inner {
         });
         if let Some(assistant) = self.app.try_state::<Arc<Assistant>>() {
             assistant.warm_up();
+            assistant.warm_cleanup();
         }
     }
 

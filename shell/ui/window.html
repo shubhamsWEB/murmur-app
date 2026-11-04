@@ -163,13 +163,22 @@
             <span>Say “open Spotify”, “volume 30” or “summarise this” with the dictation key, and Murmur does it instead
               of typing it. Messages and questions are still typed, unless you start with “Murmur”. Hold <b>Alt</b> with
               the dictation key to make anything you say a command, or <b>Shift</b> to have it typed whatever it
-              says.</span></div>
+              says. Press <b>Esc</b> to stop a command partway; when Murmur asks you something, just say the
+              answer.</span></div>
             <label class="switch"><input type="checkbox" id="ai-detect"><span></span></label></div>
           <div class="srow"><div class="stext"><b>AI clean-up</b>
             <span>Takes out “um”s and false starts, keeps only what you corrected yourself to, sets out lists, and
               writes in the style of the app you're in. If the model is slow or changes too much, your words go in as
               you said them. Paste Exactly What I Said (in the tray) types what was heard.</span></div>
             <label class="switch"><input type="checkbox" id="ai-cleanup"><span></span></label></div>
+          <div class="srow sub" id="ai-cleanup-model-row" hidden><div class="stext"><b>Clean-up model</b>
+            <span id="ai-cleanup-model-about"></span>
+            <span class="problem" id="ai-cleanup-model-problem" hidden></span></div>
+            <div class="sctl"><button class="secondary" id="ai-cleanup-download" hidden>Download</button>
+              <select class="field" id="ai-cleanup-model">
+                <option value="murmur">Murmur Cleanup</option>
+                <option value="commands">Same as commands</option>
+              </select></div></div>
           <div id="ai-styles"></div>
           <div class="srow"><div class="stext"><b>Model</b><span id="ai-model-about"></span>
             <span class="problem" id="ai-last-error" hidden></span></div>

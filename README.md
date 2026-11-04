@@ -83,8 +83,14 @@ Commands open and close apps, open Settings pages, folders and websites (in the 
 and brightness, control media, write in an app, open your files by description, work on selected text ("summarise
 this", "make this more formal") and run PowerShell commands, asking you before anything that changes something. They
 need a model: [Ollama](https://ollama.com) on the PC, or a Claude or OpenAI key, in **Settings → Commands & AI**.
-Common ones ("open Spotify", "volume 30") need none. Reading the screen, clicking and sending messages are Mac-only for
-now.
+Common ones ("open Spotify", "volume 30") need none. Press **Esc** (or choose **Stop Command** in the tray) to stop a
+command after the step it's on; a new command stops the one before it. When Murmur asks something ("Which file do you
+mean?"), say the answer and the same command carries on. Reading the screen, clicking and sending messages are Mac-only
+for now.
+
+AI clean-up uses **Murmur Cleanup**, Murmur's own small model trained only to tidy dictation, once it's downloaded
+(0.5 GB through Ollama, from **Settings → Commands & AI → Clean-up model**). Until then, or with **Same as commands**
+chosen, it uses the commands' model.
 
 The Murmur button sits above the taskbar (drag it anywhere; click it to open Murmur), and the listening pill grows out
 of it while you talk.

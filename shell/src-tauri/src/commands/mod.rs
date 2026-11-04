@@ -23,6 +23,7 @@ use agent::{FileHit, Outcome};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
@@ -33,6 +34,8 @@ pub struct Choices {
     pub ai: ai::Config,
     /// AI clean-up of dictation (off by default, as on the Mac), and the style for each kind of app.
     pub cleanup: bool,
+    /// Clean-up uses Murmur Cleanup when it's in Ollama (on unless "Same as commands" is chosen).
+    pub own_cleanup: bool,
     pub styles: BTreeMap<String, String>,
     /// Commands told apart from dictation without Alt (on by default).
     pub detect: bool,
@@ -59,6 +62,37 @@ pub struct Assistant {
     warmed: Mutex<Option<Instant>>,
     /// Said once per launch: the cloud key was rejected.
     warned_about_key: Mutex<bool>,
+    /// Each command's number: a new command, Esc or Stop Command moves it on, and the one running stops after the step
+    /// it's on (agent.rs asks `stopped`).
+    generation: AtomicU64,
+    /// A command is running.
+    busy: AtomicBool,
+    /// The last command stopped to ask something; what you say next (for three minutes) answers it.
+    question: Mutex<Option<Question>>,
+    /// Murmur Cleanup: whether it's in Ollama (and when that was looked at), and its download.
+    own_cleanup: Mutex<(Option<bool>, Option<Instant>)>,
+    cleanup_download: Mutex<Download>,
+}
+
+/// A question a command ended on.
+#[derive(Clone, Debug)]
+struct Question {
+    request: String,
+    asked: String,
+    at: Instant,
+}
+
+/// How long a question waits for its answer.
+const ANSWER_WAITS: Duration = Duration::from_secs(180);
+
+/// Murmur Cleanup's download, for Settings.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Download {
+    #[default]
+    Idle,
+    /// 0 to 1.
+    Running(f64),
+    Failed(String),
 }
 
 /// The search service's answer as files: one per path, the strong matches (or the first few).
@@ -96,6 +130,11 @@ impl Assistant {
             running: Mutex::new(()),
             warmed: Mutex::new(None),
             warned_about_key: Mutex::new(false),
+            generation: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
+            question: Mutex::new(None),
+            own_cleanup: Mutex::new((None, None)),
+            cleanup_download: Mutex::new(Download::Idle),
         };
         assistant.warm_up();
         assistant
@@ -139,6 +178,105 @@ impl Assistant {
         std::thread::spawn(move || ai::blocking(ai::ollama_warm_up(&model)));
     }
 
+    // MARK: Murmur Cleanup
+
+    /// Whether Murmur Cleanup is in Ollama: looked at again when it wasn't, a minute or more ago (Ollama opened since,
+    /// or the model was built), and every ten minutes when it was.
+    fn own_cleanup_ready(&self) -> bool {
+        let (known, at) = *self.own_cleanup.lock().unwrap();
+        let stale = match (known, at) {
+            (Some(true), Some(at)) => at.elapsed() > Duration::from_secs(600),
+            (Some(false), Some(at)) => at.elapsed() > Duration::from_secs(60),
+            _ => true,
+        };
+        if !stale {
+            return known == Some(true);
+        }
+        let has = ai::blocking(ai::ollama_has(ai::CLEANUP_MODEL)).unwrap_or(false);
+        *self.own_cleanup.lock().unwrap() = (Some(has), Some(Instant::now()));
+        has
+    }
+
+    /// The model clean-up uses now: Murmur Cleanup when it's chosen and in Ollama, else the commands' model.
+    fn cleanup_router(&self) -> ai::Router {
+        if self.choices().own_cleanup && self.own_cleanup_ready() {
+            return ai::Router::Ollama { model: ai::CLEANUP_MODEL.into() };
+        }
+        self.router()
+    }
+
+    /// Murmur Cleanup loads while you speak: unloaded (Ollama lets it go after 30 idle minutes, or for the commands'
+    /// model), loading it took most of clean-up's four seconds and the words went in untidied. Called when listening
+    /// starts.
+    pub fn warm_cleanup(&self) {
+        let choices = self.choices();
+        if !choices.cleanup || !choices.own_cleanup {
+            return;
+        }
+        let known = self.own_cleanup.lock().unwrap().0;
+        if known == Some(true) {
+            std::thread::spawn(|| ai::blocking(ai::ollama_warm_up(ai::CLEANUP_MODEL)));
+        }
+    }
+
+    /// Downloads Murmur Cleanup through Ollama (opening it if it's closed), then names it `murmur-cleanup`. Progress
+    /// is in `info()`'s "ownCleanup".
+    pub fn download_cleanup(self: &std::sync::Arc<Self>) {
+        {
+            let mut download = self.cleanup_download.lock().unwrap();
+            if matches!(*download, Download::Running(_)) {
+                return;
+            }
+            *download = Download::Running(0.0);
+        }
+        let assistant = self.clone();
+        std::thread::spawn(move || {
+            let result = ai::blocking(async {
+                if ai::ollama_has(ai::CLEANUP_MODEL).await == Some(true) {
+                    return None;
+                }
+                if !ai::ollama_installed() {
+                    return Some("Install Ollama first (ollama.com), then download Murmur Cleanup.".to_string());
+                }
+                if !ai::ollama_start().await {
+                    return Some("Ollama didn't start. Open the Ollama app, then try again.".to_string());
+                }
+                let progress = |part: f64| *assistant.cleanup_download.lock().unwrap() = Download::Running(part);
+                if let Some(error) = ai::ollama_pull(ai::CLEANUP_SOURCE, &progress).await {
+                    return Some(error);
+                }
+                if let Some(error) = ai::ollama_copy(ai::CLEANUP_SOURCE, ai::CLEANUP_MODEL).await {
+                    return Some(error);
+                }
+                match ai::ollama_has(ai::CLEANUP_MODEL).await {
+                    Some(true) => None,
+                    _ => Some("The download didn't finish. Try again.".to_string()),
+                }
+            });
+            *assistant.own_cleanup.lock().unwrap() = (Some(result.is_none()), Some(Instant::now()));
+            *assistant.cleanup_download.lock().unwrap() = match result {
+                None => Download::Idle,
+                Some(error) => Download::Failed(error),
+            };
+        });
+    }
+
+    /// For Settings: "ready", "missing", "noOllama", "downloading" (with progress) or "failed" (with why).
+    fn own_cleanup_info(&self) -> Value {
+        match self.cleanup_download.lock().unwrap().clone() {
+            Download::Running(part) => return json!({"state": "downloading", "progress": part}),
+            Download::Failed(error) => return json!({"state": "failed", "message": error}),
+            Download::Idle => {}
+        }
+        if self.own_cleanup_ready() {
+            json!({"state": "ready"})
+        } else if ai::ollama_installed() {
+            json!({"state": "missing"})
+        } else {
+            json!({"state": "noOllama"})
+        }
+    }
+
     // MARK: Dictation, tidied
 
     /// AI clean-up of what was heard. None (typed as heard) when it's off, too short to bother, slow (over four
@@ -150,8 +288,9 @@ impl Assistant {
         }
         let category = cleanup::category(program, title);
         let style = self.style(category);
-        let router = self.router();
-        let what = format!("{}, {}, {}", router.name(), category.name(), style.name());
+        let router = self.cleanup_router();
+        let own = matches!(&router, ai::Router::Ollama { model } if model == ai::CLEANUP_MODEL);
+        let what = format!("{}, {}, {}", if own { "Murmur Cleanup" } else { router.name() }, category.name(), style.name());
         crate::dictation::pill_show(&self.app, "working", "Tidying up");
         let started = Instant::now();
         let reply = ai::blocking(router.chat(&cleanup::system(style, category), &[Turn::User(cleanup::user(text))], &[],
@@ -160,6 +299,10 @@ impl Assistant {
         match reply {
             Err(error) => {
                 log(&format!("AI clean-up ({what}) gave nothing in {took:.1} s ({error}): typed as heard"));
+                // Murmur Cleanup may have been removed, or Ollama closed: looked at again before the next dictation.
+                if own {
+                    *self.own_cleanup.lock().unwrap() = (None, None);
+                }
                 None
             }
             Ok(reply) => match cleanup::accept(text, &ai::output::answer(&reply.text)) {
@@ -185,6 +328,10 @@ impl Assistant {
             } else {
                 intent::Decision { intent: intent::Intent::Dictation, reason: "detection off".into(), explicit: true }
             };
+        }
+        // The last command asked something, and this is short: it's the answer, so it goes back to that command.
+        if self.awaiting_answer().is_some() && text.split_whitespace().count() <= 12 {
+            return intent::Decision { intent: intent::Intent::Command, reason: "answers Murmur's question".into(), explicit: true };
         }
         let focus = match spot.text_field {
             Some(true) => intent::Focus::TextField,
@@ -219,7 +366,18 @@ impl Assistant {
     /// Carries out a command (on dictation's thread; one at a time). `target`: the window you were in when you spoke,
     /// for typing back into it.
     pub fn run(&self, text: &str, spot: &Spot, front: Option<(isize, String, String)>, explicit: bool, log: &(dyn Fn(&str) + Sync)) {
+        // A new command stops the one before it (after the step it's on), so two never run at once.
+        let me = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.busy.load(Ordering::SeqCst) {
+            log("command: a new command; stopping the one before it");
+        }
         let _one = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.generation.load(Ordering::SeqCst) != me {
+            log("command: another came in while this one waited; skipped");
+            return;
+        }
+        self.busy.store(true, Ordering::SeqCst);
+        let question = self.take_question();
         let (target, program, title) = match &front {
             Some((hwnd, program, title)) => (Some(*hwnd), Some(program.clone()), Some(title.clone())),
             None => (None, None, None),
@@ -237,13 +395,57 @@ impl Assistant {
         let choices = self.choices();
         let model = ai::current(&choices.ai);
         let local = ai::local(&choices.ai);
-        let mut host = Pc { app: &self.app, hooks: &self.hooks, log, target, editable: context.editable, answered: false };
-        agent::Agent::new(&mut host, &self.memory, &model, &local).run(text, &context);
+        let mut host = Pc { app: &self.app, hooks: &self.hooks, log, target, editable: context.editable, answered: false,
+                            generation: &self.generation, me };
+        let mut agent = agent::Agent::new(&mut host, &self.memory, &model, &local);
+        let request = match &question {
+            Some(asked) => {
+                agent.run_answer(&asked.request, &asked.asked, text, &context);
+                asked.request.clone()
+            }
+            _ => {
+                agent.run(text, &context);
+                text.to_string()
+            }
+        };
+        let stopped = agent.was_stopped();
+        let ended_on = agent.answer().and_then(agent::question_in).map(String::from);
+        drop(agent);
+        self.busy.store(false, Ordering::SeqCst);
+        if stopped {
+            crate::dictation::pill_flash(&self.app, "Stopped", "info", 1.5);
+            return;
+        }
+        if let Some(asked) = ended_on {
+            log("command: ended on a question; what's said next answers it");
+            *self.question.lock().unwrap() = Some(Question { request, asked, at: Instant::now() });
+        }
         if !host.answered {
             // The pill's last word (what was done) for a moment, then it closes.
             std::thread::sleep(Duration::from_millis(1200));
             crate::dictation::pill_hide(&self.app);
         }
+    }
+
+    /// Stops the command that's running, after the step it's on (Esc, or Stop Command in the tray). False when none
+    /// is running.
+    pub fn stop(&self) -> bool {
+        if !self.busy.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        crate::dictation::pill_show(&self.app, "working", "Stopping…");
+        true
+    }
+
+    /// The question the last command ended on, while it's still waiting for an answer.
+    pub fn awaiting_answer(&self) -> Option<String> {
+        let question = self.question.lock().unwrap();
+        question.as_ref().filter(|q| q.at.elapsed() < ANSWER_WAITS).map(|q| q.asked.clone())
+    }
+
+    fn take_question(&self) -> Option<Question> {
+        self.question.lock().unwrap().take().filter(|q| q.at.elapsed() < ANSWER_WAITS)
     }
 
     // MARK: Settings → Commands & AI
@@ -268,6 +470,9 @@ impl Assistant {
             "defaults": {"local": ai::DEFAULT_LOCAL_MODEL, "anthropic": ai::DEFAULT_ANTHROPIC_MODEL, "openai": ai::DEFAULT_OPENAI_MODEL},
             "keys": {"anthropic": key(ai::Provider::Anthropic), "openai": key(ai::Provider::OpenAI)},
             "cleanup": choices.cleanup,
+            "cleanupModel": if choices.own_cleanup { "murmur" } else { "commands" },
+            "ownCleanup": self.own_cleanup_info(),
+            "ownCleanupSize": ai::CLEANUP_SIZE,
             "categories": categories,
             "detect": choices.detect,
             "ollamaInstalled": ai::ollama_installed(),
@@ -345,6 +550,9 @@ struct Pc<'a> {
     target: Option<isize>,
     editable: bool,
     answered: bool,
+    /// This command's number, and the one now: when they differ, it was stopped.
+    generation: &'a AtomicU64,
+    me: u64,
 }
 
 impl Pc<'_> {
@@ -363,6 +571,10 @@ impl Pc<'_> {
 impl agent::Host for Pc<'_> {
     fn log(&mut self, line: &str) {
         (self.log)(line);
+    }
+
+    fn stopped(&self) -> bool {
+        self.generation.load(Ordering::SeqCst) != self.me
     }
 
     fn progress(&mut self, text: &str) {

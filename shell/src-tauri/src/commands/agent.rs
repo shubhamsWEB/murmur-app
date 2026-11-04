@@ -67,6 +67,10 @@ impl Outcome {
 /// What a command does on the PC, and how it talks to you.
 pub trait Host {
     fn log(&mut self, line: &str);
+    /// The command was stopped (Esc, Stop Command, or a new command): it ends after the step it's on.
+    fn stopped(&self) -> bool {
+        false
+    }
     /// The pill, while it works.
     fn progress(&mut self, text: &str);
     /// An answer to read (the answer window).
@@ -129,12 +133,53 @@ pub struct Agent<'a> {
     offered: Vec<String>,
     awaiting_pick: bool,
     browser: Option<String>,
+    /// It ended because it was stopped.
+    stopped: bool,
 }
 
 impl<'a> Agent<'a> {
     pub fn new(host: &'a mut dyn Host, memory: &'a Memory, model: &'a dyn Model, local: &'a dyn Model) -> Agent<'a> {
         Agent { host, memory, model, local, utterance: String::new(), prefs: Preferences::default(), did: Vec::new(),
-                answer: None, offered: Vec::new(), awaiting_pick: false, browser: None }
+                answer: None, offered: Vec::new(), awaiting_pick: false, browser: None, stopped: false }
+    }
+
+    /// The answer it showed last, if any (a question it asked, say).
+    pub fn answer(&self) -> Option<&str> {
+        self.answer.as_deref()
+    }
+
+    pub fn was_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Whether to stop now, because it was asked to; says so in the log once.
+    fn should_stop(&mut self, at: &str) -> bool {
+        if !self.stopped && self.host.stopped() {
+            self.stopped = true;
+            self.host.log(&format!("command: stopped {at}"));
+        }
+        self.stopped
+    }
+
+    /// What you said answers the question the last command ended on ("Which file do you mean?" → "the latest one"):
+    /// that command goes on with it, as the Mac's TaskResume. If it turns out to be a new request, the model does that.
+    pub fn run_answer(&mut self, request: &str, asked: &str, answer: &str, context: &Context) {
+        let started = Instant::now();
+        self.utterance = request.to_string();
+        self.prefs = self.memory.preferences();
+        self.browser = self.prefs.browser.clone();
+        let app = context.front_app.clone().unwrap_or_default();
+        self.host.log(&format!("command: \"{}\" answers the question on \"{}\"", ai::cut(answer, 60), ai::cut(request, 60)));
+        self.host.progress("Carrying on…");
+        let message = format!("My request was: \"{request}\". You asked me:\n\"\"\"\n{}\n\"\"\"\nMy answer: \"{answer}\". \
+            Finish my request with that answer: don't ask again about what I've answered, and don't redo anything already \
+            done. If what I said is a new request rather than an answer, do that instead.", ai::cut(asked, 2000));
+        let mut context = context.clone();
+        context.explicit = true;
+        let selection = context.selection.clone().filter(|s| !s.trim().is_empty());
+        self.route(&message, &context, selection.as_deref());
+        self.host.log(&format!("command: finished in {:.2} s", started.elapsed().as_secs_f64()));
+        self.finish(&app);
     }
 
     /// Runs one spoken command.
@@ -177,6 +222,9 @@ impl<'a> Agent<'a> {
             let mut results = Vec::new();
             let several = actions.len() > 1;
             for action in actions {
+                if self.should_stop("between quick steps") {
+                    break;
+                }
                 // "open chrome and search facebook": after opening a browser, "search" means the web, in it.
                 let mut tool = action.tool.clone();
                 if tool == "search_files" && self.browser_opened() {
@@ -291,6 +339,9 @@ impl<'a> Agent<'a> {
         let more_steps = has_more_than_one_step(utterance);
         let began = Instant::now();
         for step in 0..MAX_STEPS {
+            if self.should_stop(&format!("before step {}", step + 1)) {
+                return;
+            }
             if began.elapsed() > TIME_CAP {
                 self.host.log(&format!("command: stopped at step {} ({} s)", step + 1, began.elapsed().as_secs()));
                 self.wrap_up(model, &system, &turns, &tools);
@@ -344,6 +395,10 @@ impl<'a> Agent<'a> {
                     }
                 }
             };
+            // Stopped while the model was thinking: nothing more is done.
+            if self.should_stop(&format!("at step {}", step + 1)) {
+                return;
+            }
             let only_answers = reply.calls.iter().all(|c| c.name == "reply" || c.name == "done");
             if !context.explicit && step == 0 && only_answers {
                 // A guessed command that only answers: it was dictation. Type the words.
@@ -371,6 +426,9 @@ impl<'a> Agent<'a> {
             let mut finished_now = false;
             let mut results = Vec::new();
             for (index, call) in reply.calls.iter().enumerate() {
+                if self.should_stop(&format!("in step {}", step + 1)) {
+                    return;
+                }
                 self.host.log(&format!("command: step {} → {} {}", step + 1, call.name, ai::cut(&Value::Object(call.arguments.clone()).to_string(), 300)));
                 if call.name == "done" && self.awaiting_pick {
                     // open_file and done in one response: the matches came back, nothing has opened yet.
@@ -449,6 +507,9 @@ impl<'a> Agent<'a> {
 
     /// Out of steps, or going round in circles: the model says what it found and what's left, rather than nothing.
     fn wrap_up(&mut self, model: &dyn Model, system: &str, turns: &[Turn], tools: &[ToolSpec]) {
+        if self.should_stop("before wrapping up") {
+            return;
+        }
         let mut turns = turns.to_vec();
         turns.push(Turn::User("Stop here. Call reply now: in two or three sentences, what you found or did for the request, \
                                with any answer you have, and what's still left to do.".into()));
@@ -662,6 +723,28 @@ impl<'a> Agent<'a> {
     }
 }
 
+/// The question a reply ends the command on: one that opens with a question ("Which resume do you mean? I found
+/// several: …") or closes with one ("… Should I open the PDF or the Word file?"). None for an answer that only has a
+/// question mark somewhere in the middle. As the Mac's TaskResume.question(in:).
+pub fn question_in(reply: &str) -> Option<&str> {
+    let text = reply.trim();
+    if !text.contains('?') {
+        return None;
+    }
+    if text.lines().map(str::trim).filter(|l| !l.is_empty()).last().is_some_and(|l| l.ends_with('?')) {
+        return Some(text);
+    }
+    let first_line = text.lines().next().unwrap_or_default();
+    let (opening, _) = first_line.split_once('?')?;
+    if opening.chars().count() >= 160 || opening.contains('.') {
+        return None;
+    }
+    static ASKING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let asking = ASKING.get_or_init(|| regex::Regex::new(
+        r"^(which|what|who|where|when|how|do you|did you|should i|shall i|would you|can you|could you|is it|are you|want me|kaun|kaunsa|kya)\b").unwrap());
+    asking.is_match(&opening.trim().to_lowercase()).then_some(text)
+}
+
 fn result(call: &Call, content: &str) -> Turn {
     Turn::ToolResult { id: call.id.clone(), name: call.name.clone(), content: content.to_string() }
 }
@@ -864,10 +947,15 @@ mod tests {
         searched: Vec<String>,
         editable: bool,
         confirms: bool,
+        /// Stopped once this many tools have run.
+        stop_after: Option<usize>,
     }
 
     impl Host for Fake {
         fn log(&mut self, _line: &str) {}
+        fn stopped(&self) -> bool {
+            self.stop_after.is_some_and(|n| self.did.len() >= n)
+        }
         fn progress(&mut self, _text: &str) {}
         fn show_answer(&mut self, text: &str) {
             self.answers.push(text.into());
@@ -930,6 +1018,47 @@ mod tests {
         assert!(host.did[0].starts_with("open_app"));
         assert!(model.seen.borrow().is_empty());
         assert_eq!(memory.recent(5)[0].said, "open spotify");
+    }
+
+    #[test]
+    fn a_stopped_command_ends_after_the_step_its_on() {
+        let memory = Memory::open(None);
+        let model = Scripted::new(false, vec![
+            calls(&[("open_url", json!({"url": "youtube.com"}))]),
+            calls(&[("media_control", json!({"action": "play"})), ("done", json!({}))]),
+        ]);
+        let mut host = Fake { stop_after: Some(1), ..Fake::default() };
+        let mut agent = Agent::new(&mut host, &memory, &model, &model);
+        agent.run("go to youtube and play something calm for me please", &explicit());
+        assert!(agent.was_stopped());
+        drop(agent);
+        assert_eq!(host.did.len(), 1, "nothing after the stop: {:?}", host.did);
+        assert_eq!(model.seen.borrow().len(), 1, "the model isn't asked again");
+        assert!(host.answers.is_empty(), "no wrap-up answer once stopped");
+    }
+
+    #[test]
+    fn an_answer_carries_the_same_request_on() {
+        let memory = Memory::open(None);
+        let model = Scripted::new(false, vec![calls(&[("open_url", json!({"url": "example.com/resume-2026.pdf"})), ("done", json!({}))])]);
+        let mut host = Fake::default();
+        Agent::new(&mut host, &memory, &model, &model)
+            .run_answer("open my resume", "Which resume do you mean? Resume 2026.pdf or Resume (old).pdf?", "the latest one", &explicit());
+        let seen = model.seen.borrow();
+        let Turn::User(first) = &seen[0][0] else { panic!("a user turn first") };
+        assert!(first.contains("My request was: \"open my resume\""), "{first}");
+        assert!(first.contains("Which resume do you mean?") && first.contains("My answer: \"the latest one\""), "{first}");
+        assert_eq!(host.did.len(), 1);
+        assert_eq!(memory.recent(5)[0].said, "open my resume", "remembered as the request it finished");
+    }
+
+    #[test]
+    fn questions_a_command_ends_on() {
+        assert!(question_in("Which resume do you mean? I found two: Resume 2026.pdf and Resume (old).pdf.").is_some());
+        assert!(question_in("I found two files.\nShould I open the PDF or the Word file?").is_some());
+        assert!(question_in("kaunsa file kholu?").is_some());
+        assert!(question_in("Done. It's 4 pm in Tokyo.").is_none());
+        assert!(question_in("The page asks \"Are you sure?\" before it deletes anything. I didn't delete it.").is_none());
     }
 
     #[test]

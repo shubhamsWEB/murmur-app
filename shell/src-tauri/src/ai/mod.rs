@@ -271,12 +271,12 @@ impl Router {
         match self {
             Router::Ollama { model } => {
                 let mut body = ollama::body(model, system, turns, tools, if tools.is_empty() { Some(700) } else { None });
-                let mut parsed = ollama::parse(&post(OLLAMA_CHAT, &[], &body, timeout, "Ollama").await?);
+                let mut parsed = ollama::parse(&ollama_post(&mut body, timeout).await?);
                 // Only reasoning came back (the model ignored "think": false and ran out of room mid-thought): once
                 // more, with Qwen's own switch and more room.
                 if parsed.reply.text.is_empty() && parsed.reply.calls.is_empty() && parsed.reasoned {
                     ollama::no_think(&mut body, if tools.is_empty() { Some(1500) } else { None });
-                    parsed = ollama::parse(&post(OLLAMA_CHAT, &[], &body, timeout, "Ollama").await?);
+                    parsed = ollama::parse(&ollama_post(&mut body, timeout).await?);
                 }
                 Ok(parsed.reply)
             }
@@ -408,6 +408,29 @@ async fn post(url: &str, headers: &[(String, String)], body: &Value, timeout: Du
     Err(AiError::Http { provider, code, detail })
 }
 
+/// A chat with Ollama. Ollama rejects the whole reply when the model writes a tool call it can't read ("expected
+/// element type <function> but have <parameter>"); at temperature 0 asking again gives the same reply, so the retries
+/// sample a little (0.4, then 0.7): a different wording of the same step, nearly always well formed. As the Mac's
+/// OllamaClient.
+async fn ollama_post(body: &mut Value, timeout: Duration) -> Result<Value, AiError> {
+    let mut attempt = 0;
+    loop {
+        match post(OLLAMA_CHAT, &[], body, timeout, "Ollama").await {
+            Err(AiError::Http { detail, .. }) if attempt < 2 && is_malformed_tool_call(&detail) => {
+                attempt += 1;
+                body["options"]["temperature"] = json!([0.0, 0.4, 0.7][attempt]);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Ollama's error for a tool call it couldn't parse from the model's text.
+pub fn is_malformed_tool_call(detail: &str) -> bool {
+    let lower = detail.to_lowercase();
+    lower.contains("element type") || lower.contains("tool call") || lower.contains("parse")
+}
+
 /// Runs one of these async calls from a plain thread (dictation's), and waits for it. On one of the async runtime's
 /// own threads (a Tauri command), waiting there would abort Murmur ("Cannot start a runtime from within a runtime"):
 /// the thread is handed over to blocking work first.
@@ -445,6 +468,128 @@ pub async fn ollama_models() -> Option<Vec<String>> {
 pub async fn ollama_warm_up(model: &str) {
     let body = json!({"model": model, "keep_alive": "30m", "options": ollama::options(json!({}))});
     let _ = client().post(format!("{OLLAMA}/api/generate")).timeout(Duration::from_secs(60)).json(&body).send().await;
+}
+
+// MARK: Murmur's own models
+
+/// Murmur's cleanup model: Qwen3.5 0.8B trained only to tidy dictation by Murmur's rules (the same instructions as
+/// cleanup.rs). It answers in a fraction of a second and keeps your words, where a general model of a few billion
+/// parameters takes seconds and often writes its reasoning instead. The name Murmur asks Ollama for; a model built
+/// from a GGUF (`ollama create murmur-cleanup -f Modelfile`) counts too.
+pub const CLEANUP_MODEL: &str = "murmur-cleanup";
+/// Where it downloads from (ollama.com/shubhama664/murmur-cleanup), copied to `CLEANUP_MODEL` once in, so a new
+/// version is a new source and the same name. As the Mac's CleanupModel.
+pub const CLEANUP_SOURCE: &str = "shubhama664/murmur-cleanup:v1";
+pub const CLEANUP_SIZE: &str = "0.5 GB";
+
+/// Whether Ollama has this model ("murmur-cleanup" matches "murmur-cleanup:latest"). None when Ollama isn't running.
+pub async fn ollama_has(model: &str) -> Option<bool> {
+    let models = ollama_models().await?;
+    Some(models.iter().any(|name| same_model(name, model)))
+}
+
+fn same_model(installed: &str, wanted: &str) -> bool {
+    let bare = |name: &str| name.strip_suffix(":latest").unwrap_or(name).to_lowercase();
+    bare(installed) == bare(wanted)
+}
+
+/// Starts Ollama when it's installed and not running (its app on Windows), and waits up to 20 s for it to answer.
+pub async fn ollama_start() -> bool {
+    if ollama_models().await.is_some() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let app = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
+            .map(|folder| folder.join("Programs").join("Ollama").join("ollama app.exe"));
+        let started = match app.filter(|path| path.exists()) {
+            Some(path) => std::process::Command::new(path).spawn().is_ok(),
+            None => std::process::Command::new("ollama").arg("serve").creation_flags(0x0800_0000).spawn().is_ok(),
+        };
+        if !started {
+            return false;
+        }
+    }
+    for _ in 0..40 {
+        if ollama_models().await.is_some() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+/// Downloads a model from Ollama's library, telling `progress` how far it is (0 to 1). None when it's in, else what
+/// went wrong, in plain words.
+pub async fn ollama_pull(name: &str, progress: &(dyn Fn(f64) + Send + Sync)) -> Option<String> {
+    let body = json!({"model": name, "stream": true});
+    let response = match client().post(format!("{OLLAMA}/api/pull")).timeout(Duration::from_secs(3600)).json(&body).send().await {
+        Ok(response) => response,
+        Err(_) => return Some("Ollama isn't running. Open the Ollama app, then try again.".into()),
+    };
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        return Some(format!("Ollama couldn't download {name} ({code}): {}", cut(text.trim(), 160)));
+    }
+    let mut response = response;
+    let mut pending = String::new();
+    let mut ok = false;
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return Some("The download stopped. Check your internet connection and try again.".into()),
+        };
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = pending.find('\n') {
+            let line: String = pending.drain(..=end).collect();
+            match pull_line(&line) {
+                PullLine::Progress(part) => progress(part),
+                PullLine::Done => ok = true,
+                PullLine::Failed(error) => return Some(format!("Ollama couldn't download it: {error}")),
+                PullLine::Other => {}
+            }
+        }
+    }
+    if let PullLine::Done = pull_line(&pending) {
+        ok = true;
+    }
+    if ok { None } else { Some("The download didn't finish. Try again.".into()) }
+}
+
+#[derive(Debug, PartialEq)]
+enum PullLine {
+    Progress(f64),
+    Done,
+    Failed(String),
+    Other,
+}
+
+/// One line of Ollama's download progress ({"status": "pulling …", "total": …, "completed": …}).
+fn pull_line(line: &str) -> PullLine {
+    let Ok(json) = serde_json::from_str::<Value>(line.trim()) else { return PullLine::Other };
+    if let Some(error) = json["error"].as_str() {
+        return PullLine::Failed(error.to_string());
+    }
+    if json["status"] == "success" {
+        return PullLine::Done;
+    }
+    match (json["completed"].as_f64(), json["total"].as_f64()) {
+        (Some(done), Some(total)) if total > 0.0 => PullLine::Progress((done / total).clamp(0.0, 1.0)),
+        _ => PullLine::Other,
+    }
+}
+
+/// Copies a downloaded model to the name Murmur asks for. None when done.
+pub async fn ollama_copy(source: &str, destination: &str) -> Option<String> {
+    let body = json!({"source": source, "destination": destination});
+    match client().post(format!("{OLLAMA}/api/copy")).timeout(Duration::from_secs(60)).json(&body).send().await {
+        Ok(response) if response.status().is_success() => None,
+        Ok(response) => Some(format!("Ollama couldn't name the model {destination} ({}).", response.status().as_u16())),
+        Err(_) => Some("Ollama stopped answering. Open the Ollama app, then try again.".into()),
+    }
 }
 
 mod ollama {
@@ -868,6 +1013,30 @@ mod tests {
         assert_eq!(answer, 42);
         // And from a plain thread, as dictation's.
         assert_eq!(std::thread::spawn(|| blocking(async { 1 })).join().unwrap(), 1);
+    }
+
+    #[test]
+    fn malformed_tool_calls_are_retried() {
+        assert!(is_malformed_tool_call("expected element type <function> but have <parameter>"));
+        assert!(is_malformed_tool_call("error parsing tool call: raw='{'"));
+        assert!(!is_malformed_tool_call("model 'qwen3:4b' not found"));
+    }
+
+    #[test]
+    fn download_progress() {
+        assert_eq!(pull_line(r#"{"status":"pulling 1a2b","total":200,"completed":50}"#), PullLine::Progress(0.25));
+        assert_eq!(pull_line(r#"{"status":"success"}"#), PullLine::Done);
+        assert_eq!(pull_line(r#"{"error":"pull model manifest: file does not exist"}"#),
+                   PullLine::Failed("pull model manifest: file does not exist".into()));
+        assert_eq!(pull_line(r#"{"status":"verifying sha256 digest"}"#), PullLine::Other);
+        assert_eq!(pull_line("not json"), PullLine::Other);
+    }
+
+    #[test]
+    fn model_names_match_with_or_without_latest() {
+        assert!(same_model("murmur-cleanup:latest", CLEANUP_MODEL));
+        assert!(same_model("murmur-cleanup", "murmur-cleanup:latest"));
+        assert!(!same_model("murmur-cleanup:v2", CLEANUP_MODEL));
     }
 
     #[test]

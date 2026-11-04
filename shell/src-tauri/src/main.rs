@@ -681,7 +681,7 @@ fn main() {
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, dictation_info,
             set_dictation, download_speech_model, logo_clicked, logo_menu, dictation_action, assistant_info,
-            set_assistant, save_api_key, check_ai, ollama_models, forget_memory, answer_text, answer_fit, answer_close
+            set_assistant, save_api_key, check_ai, ollama_models, download_cleanup_model, forget_memory, answer_text, answer_fit, answer_close
         ])
         .build(tauri::generate_context!())
         .expect("Murmur couldn't start");
@@ -1733,6 +1733,7 @@ fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), Str
             "openaiModel" => settings.openai_model = text,
             "workspace" => settings.anthropic_workspace = text,
             "cleanup" => settings.ai_cleanup = value.as_bool().unwrap_or(false),
+            "cleanupModel" => settings.cleanup_model = if text == "commands" { text } else { String::new() },
             "detect" => settings.detect_commands_off = !value.as_bool().unwrap_or(true),
             "style" => {
                 let category = value["category"].as_str().unwrap_or_default().to_string();
@@ -1780,6 +1781,12 @@ async fn save_api_key(app: AppHandle, provider: String, key: String) -> Result<O
 async fn check_ai(app: AppHandle, provider: String) -> Option<String> {
     let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
     assistant.check(ai::Provider::from_name(&provider)).await
+}
+
+/// Downloads Murmur Cleanup through Ollama; Settings follows it in `assistant_info`'s "ownCleanup".
+#[tauri::command(async)]
+fn download_cleanup_model(app: AppHandle) {
+    app.state::<Arc<commands::Assistant>>().inner().clone().download_cleanup();
 }
 
 /// The models Ollama has (null: it isn't running).
@@ -1927,6 +1934,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Murmur", true, None::<&str>)?;
     let paste_last = MenuItem::with_id(app, "paste-last", "Paste Last Dictation", true, None::<&str>)?;
     let paste_heard = MenuItem::with_id(app, "paste-heard", "Paste Exactly What I Said", true, None::<&str>)?;
+    let stop_command = MenuItem::with_id(app, "stop-command", "Stop Command", true, None::<&str>)?;
     let folders = MenuItem::with_id(app, "folders", "Folders…", true, None::<&str>)?;
     let index = MenuItem::with_id(app, "index", "Index Now", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause Indexing", true, None::<&str>)?;
@@ -1936,7 +1944,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &separator, &search, &paste_last, &paste_heard, &open, &folders, &index, &pause, &settings, &check,
+        &[&status, &separator, &search, &paste_last, &paste_heard, &stop_command, &open, &folders, &index, &pause, &settings, &check,
           &PredefinedMenuItem::separator(app)?, &quit_item],
     )?;
     // Murmur's logo, in its colors (tray_icon.rs).
@@ -1952,6 +1960,12 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
             "open" => show_window_or_setup(app),
             "paste-last" => app.state::<dictation::Dictation>().paste_last(),
             "paste-heard" => app.state::<dictation::Dictation>().paste_heard(),
+            "stop-command" => {
+                let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
+                if !assistant.stop() {
+                    dictation::pill_flash(app, "No command is running", "info", 1.5);
+                }
+            }
             "folders" => later(app, |app| {
                 let set_up = app.state::<Arc<Shell>>().is_set_up();
                 let _ = if set_up { show_window_at(app, Some("folders")) } else { show_setup(app) };

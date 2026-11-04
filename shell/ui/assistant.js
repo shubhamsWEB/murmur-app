@@ -41,6 +41,9 @@ function render() {
   $("ai-detect").checked = info.detect;
   $("ai-cleanup").checked = info.cleanup;
 
+  // Clean-up's model: Murmur Cleanup (downloaded through Ollama), or the commands' model.
+  renderCleanupModel();
+
   // A style for each kind of app, while clean-up is on.
   const styles = $("ai-styles");
   styles.replaceChildren(...(info.cleanup ? info.categories : []).map((category) => {
@@ -129,6 +132,44 @@ function render() {
   $("ai-facts").hidden = facts.length === 0;
 }
 
+let following = null;     // a timer while Murmur Cleanup downloads
+
+function renderCleanupModel() {
+  const row = $("ai-cleanup-model-row");
+  row.hidden = !info.cleanup;
+  if (!info.cleanup) return;
+  const own = info.ownCleanup || { state: "missing" };
+  const murmur = info.cleanupModel !== "commands";
+  $("ai-cleanup-model").value = murmur ? "murmur" : "commands";
+  const fallback = info.using === "Local model" ? "the local model" : info.using;
+  const download = $("ai-cleanup-download");
+  download.hidden = !murmur || !["missing", "failed"].includes(own.state);
+  download.disabled = false;
+  download.textContent = `Download ${info.ownCleanupSize}`;
+  const problem = $("ai-cleanup-model-problem");
+  problem.hidden = own.state !== "failed";
+  problem.textContent = own.state === "failed" ? own.message : "";
+  const about = "Murmur's own small model, trained only to tidy dictation. It answers in a fraction of a second, " +
+    "keeps your words and runs on this PC.";
+  $("ai-cleanup-model-about").textContent = !murmur
+    ? `Clean-up uses ${fallback}, as commands do.`
+    : own.state === "ready" ? about
+    : own.state === "downloading" ? `Downloading… ${Math.round((own.progress || 0) * 100)}%`
+    : own.state === "noOllama" ? `${about} It needs Ollama (ollama.com). Until then, clean-up uses ${fallback}.`
+    : `${about} Download it (${info.ownCleanupSize}); until then, clean-up uses ${fallback}.`;
+  // While it downloads, the page follows it.
+  if (own.state === "downloading" && !following) {
+    following = setInterval(async () => {
+      info = await invoke("assistant_info").catch(() => info);
+      if (!info || !info.ownCleanup || info.ownCleanup.state !== "downloading") {
+        clearInterval(following);
+        following = null;
+      }
+      render();
+    }, 1000);
+  }
+}
+
 function showResult(problem, saved) {
   const result = $("ai-key-result");
   result.hidden = false;
@@ -148,6 +189,14 @@ async function loadModels() {
 
 $("ai-detect").addEventListener("change", () => set("detect", $("ai-detect").checked));
 $("ai-cleanup").addEventListener("change", () => set("cleanup", $("ai-cleanup").checked));
+$("ai-cleanup-model").addEventListener("change", () => set("cleanupModel", $("ai-cleanup-model").value));
+$("ai-cleanup-download").onclick = async () => {
+  const button = $("ai-cleanup-download");
+  button.disabled = true;
+  button.textContent = "Starting…";
+  await invoke("download_cleanup_model").catch(fail);
+  setTimeout(load, 300);
+};
 $("ai-provider").addEventListener("change", async () => {
   $("ai-key-result").hidden = true;
   $("ai-key").value = "";
