@@ -6,21 +6,19 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.5.0</title>
-      <pubDate>Mon, 02 Nov 2026 12:42:35 +0000</pubDate>
-      <sparkle:version>12</sparkle:version>
-      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+      <title>Murmur 1.5.1</title>
+      <pubDate>Wed, 04 Nov 2026 20:01:49 +0000</pubDate>
+      <sparkle:version>13</sparkle:version>
+      <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h3>What's new</h3>
-<p><b>Murmur's own models, on your Mac.</b> Two small models trained for Murmur, downloaded through Ollama and run entirely on your Mac:</p>
-<ul><li><b>Murmur Agent</b> carries out commands. Steps take a couple of seconds where the general model took half a minute, and it picks the right tool more often. Choose it in <b>Commands &amp; AI → Local model</b>; Murmur downloads it (2.8 GB). If you already use a local model, it stays as it is until you switch.</li><li><b>Murmur Cleanup</b> tidies dictation in a fraction of a second and keeps your words: fillers out, self-corrections applied, lists set out. Turn on <b>AI cleanup</b> in Settings and download it there (0.5 GB). From then on it's used for cleanup, or you can choose your commands' model instead.</li></ul>
-<p><b>Stop a command.</b> Press Esc, or choose <b>Stop Command</b> in the menu bar, and the command stops after what it's doing at that moment. If it had a to-do list, say "continue" to pick it up. A new command now stops the one before it, so two never run at once.</p>
-<p><b>Answer Murmur's questions.</b> When Murmur asks something partway through ("Which resume do you mean?"), just say the answer ("the latest one") and the same task carries on.</p>
-<p><b>Messages to anyone in your chats.</b> Murmur opens a WhatsApp, Telegram, Signal, Discord or Teams chat by the person's name, even when they have no phone number in Contacts, then sends your message or file.</p>
-<p><b>Quicker screen vision.</b> Murmur reads the text on screen with the Mac's own text recognition and asks the vision model only what the picture shows, so looking at an app takes seconds, not a minute. The default vision model is now Qwen3-VL 4B Instruct (3.3 GB). Until you download it, Murmur keeps using the one you have.</p>
+      <description><![CDATA[<h3>What's new on Windows</h3>
+<p><b>Murmur Cleanup on Windows.</b> AI cleanup can now use Murmur's own cleanup model on your PC, as it does on the Mac: it tidies dictation in a fraction of a second and keeps your words. Turn on <b>AI clean-up</b> in <b>Settings → Commands &amp; AI</b>, then choose <b>Download</b> next to <b>Clean-up model</b> (0.5 GB, through Ollama). Until it's downloaded, or with <b>Same as commands</b> chosen, clean-up uses the commands' model as before.</p>
+<p><b>Stop a command.</b> Press Esc, or choose <b>Stop Command</b> in the tray, and the command stops after what it's doing at that moment. A new command now stops the one before it, so two never run at once.</p>
+<p><b>Answer Murmur's questions.</b> When Murmur asks something partway through ("Which file do you mean?"), just say the answer and the same task carries on.</p>
 <h3>Fixes</h3>
-<ul><li>Murmur no longer asks for Screen Recording at every launch when it already has it.</li><li>"Message hi to Roma on WhatsApp" goes to Roma, not to someone called "Hi To Roma".</li><li>Murmur doesn't try AppleScript on apps that can't be scripted (WhatsApp, Slack and most chat apps), which used to send a command round in circles.</li><li>A command no longer stops with "expected element type" when the local model writes a tool call Ollama can't read. Murmur asks the model again.</li><li>AI cleanup no longer runs out of time while its model loads.</li><li>"Send my resume to Roma" sends it, instead of stopping at the search results.</li></ul>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.5.0/Murmur-1.5.0.dmg" type="application/octet-stream" sparkle:edSignature="5/UGl5YGOEHOPPYntM2CUmhS2uyVQwFOg1ELs2xTbZf9+m9trcaJ4raTOqCc+lHbivooBvkf/TinNDpZbF+8Aw==" length="13802722"/>
+<ul><li>Windows: a command no longer stops with "expected element type" when the local model writes a tool call Ollama can't read. Murmur asks the model again.</li><li>Windows: AI clean-up no longer runs out of time while its model loads: it loads while you speak.</li></ul>
+<p>On the Mac, nothing changes in this version.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.5.1/Murmur-1.5.1.dmg" type="application/octet-stream" sparkle:edSignature="xx6cCdetOqqYnPS1XpDyDpyS+QRCLT+Wlcv/qcJtVvkNgD1dO43DV8UXdJWwB8iP+Wptt8YGrcEQTt2RjczMAw==" length="13802872"/>
     </item>
   </channel>
 </rss>
