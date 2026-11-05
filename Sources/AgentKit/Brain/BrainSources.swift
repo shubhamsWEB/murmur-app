@@ -82,14 +82,7 @@ public enum BrainSources {
     }
 
     /// A short, stable fingerprint of what an item says.
-    static func hash(_ parts: [String?]) -> String {
-        var value: UInt64 = 0xcbf29ce484222325
-        for byte in parts.map({ $0 ?? "" }).joined(separator: "\u{1f}").utf8 {
-            value ^= UInt64(byte)
-            value = value &* 0x100000001b3
-        }
-        return String(value, radix: 16)
-    }
+    static func hash(_ parts: [String?]) -> String { BrainModel.fingerprint(parts) }
 
     private static func day(_ date: Date) -> String {
         date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))

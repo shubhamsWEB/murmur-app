@@ -33,6 +33,7 @@ scripts/build-llama.sh
 # Both executables: the app, and the `murmur-engine` CLI, which the app runs as its indexing helper and query encoder.
 swift build -c release --product MurmurApp
 swift build -c release --product murmur-engine
+swift build -c release --product murmur-memory
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
 # The app icon ("Voice", indigo; Resources/AppIcon/README.md): macOS 26 draws the layered AppIcon.icon (compiled into
@@ -53,6 +54,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 cp "$BIN_DIR/MurmurApp" "$APP/Contents/MacOS/$APP_NAME"
 # The indexing helper lives in Helpers/: next to Murmur in MacOS/ it would collide on a case-insensitive disk.
 cp "$BIN_DIR/murmur-engine" "$APP/Contents/Helpers/murmur-engine"
+# Screen memory's helper, started by the app when screen memory is on.
+cp "$BIN_DIR/murmur-memory" "$APP/Contents/Helpers/murmur-memory"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 xcrun actool --compile "$APP/Contents/Resources" --platform macosx --target-device mac --minimum-deployment-target 14.0 \
   --app-icon AppIcon --output-partial-info-plist "$(mktemp -d)/AppIcon.plist" --enable-on-demand-resources NO \
@@ -86,6 +89,7 @@ PLIST="$APP/Contents/Info.plist"
 IDENTITY="${SIGN_ID:-$( [[ -f .sign-id ]] && head -1 .sign-id || echo - )}"
 TIMESTAMP=$([[ "${RELEASE:-}" == 1 ]] && echo --timestamp || echo --timestamp=none)
 codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP "$APP/Contents/Helpers/murmur-engine"
+codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP "$APP/Contents/Helpers/murmur-memory"
 # Sparkle comes ad-hoc signed: its helpers, then the framework, with this identity (the app may only load code signed
 # by its own team).
 for code in "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app" "$FW"; do

@@ -8,8 +8,11 @@ public enum BrainDistiller {
     /// Ollama has, unless one was chosen (`defaults write com.copico.Murmur brainModel <name>`).
     static let readers = ["qwen3:4b", "qwen3:8b", "llama3.2:3b", "qwen3:1.7b", "gemma3:4b", "qwen2.5:7b"]
 
+    /// The model to read with: one chosen by hand (`defaults write com.copico.Murmur brainModel qwen3:8b`), else
+    /// Murmur's own (`LocalReader`, once downloaded: no Ollama needed), else a general model Ollama has.
     public static func model() async -> String? {
         if let chosen = UserDefaults.standard.string(forKey: "brainModel"), !chosen.isEmpty { return chosen }
+        if LocalReader.installed { return LocalReader.name }
         let installed = await installedModels()
         for name in readers where installed.contains(name) { return name }
         // Any general model at all, else nothing: Notes and Mail wait until there's one.
@@ -28,7 +31,7 @@ public enum BrainDistiller {
     static func system(today: Date = Date()) -> String {
         let day = today.formatted(.dateTime.weekday(.wide).day().month(.wide).year())
         return """
-            You read one item from the user's own Mac (a note or an email) and write down what's worth remembering \
+            You read one item from the user's own Mac (a note, an email, what an app like Linear or Notion shows, or the text of a window they worked in) and write down what's worth remembering \
             about the user's world, so their assistant knows it later. Today is \(day).
 
             Write only durable, useful things: who people are and how they relate to the user (role, company, team, \
@@ -41,7 +44,12 @@ public enum BrainDistiller {
             name; "me" for the user themselves), "about_kind" (person, organization, project, place, topic or me), \
             "text", "kind" (fact, relationship, preference, event, task or status), "slot" (for an attribute a \
             person or thing has one of: employer, role, phone, email, city, birthday, manager, status; else empty), \
-            and "expires" (YYYY-MM-DD when it stops being true, for an event or a task with a date; else empty).
+            "expires" (YYYY-MM-DD when it stops being true, for an event or a task with a date; else empty), and
+            "importance" (0 to 10): how much it matters to the user's own life and work. 9-10: the user's own \
+            commitments, decisions, deadlines, health of their projects; 7-8: people they work or live with and how \
+            they relate to the user, their own plans and preferences; 4-6: useful facts about their organizations, \
+            clients, tools; 1-3: things they only came across (a post in a feed, news, someone they don't know). \
+            Anything that names the user, their projects or people they know matters more than what doesn't.
 
             At most 6 memories. If nothing is worth remembering, return an empty list. JSON only.
             """
@@ -57,6 +65,7 @@ public enum BrainDistiller {
                     "properties": [
                         "about": ["type": "string"], "about_kind": ["type": "string"], "text": ["type": "string"],
                         "kind": ["type": "string"], "slot": ["type": "string"], "expires": ["type": "string"],
+                        "importance": ["type": "number"],
                     ],
                     "required": ["about", "about_kind", "text", "kind"],
                 ],
@@ -72,7 +81,18 @@ public enum BrainDistiller {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 180   // in the background, on a slow Mac: no hurry
-        let item = "\(origin == .mail ? "Email" : "Note"): \(title)\n\n\(text.prefix(6000))"
+        let kind: String
+        switch origin {
+        case .mail: kind = "Email"
+        case .apps: kind = "From a connected app"
+        case .screen: kind = "What the user worked on (text of their screen)"
+        default: kind = "Note"
+        }
+        let item = "\(kind): \(title)\n\n\(text.prefix(6000))"
+        if model == LocalReader.name {
+            guard let content = await LocalReader.ask(system: system(), user: item, json: true, maxTokens: 700) else { return [] }
+            return parse(content, origin: origin)
+        }
         let body: [String: Any] = [
             "model": model,
             "messages": [["role": "system", "content": system()], ["role": "user", "content": item]],
@@ -115,9 +135,12 @@ public enum BrainDistiller {
             // A date already past isn't worth keeping as what's coming up.
             if let date = expires, date < now.addingTimeInterval(-86400) { expires = nil; if slot == nil { return nil } }
             if let date = expires { expires = date.addingTimeInterval(86400) }   // true through that day
+            // 0 to 10 as the model wrote it (a string, a number); the source's own default when it didn't say.
+            let rated = (entry["importance"] as? NSNumber)?.doubleValue ?? Double(entry["importance"] as? String ?? "")
             return BrainModel.Candidate(about: about, aboutKind: kind, text: text,
                                         kind: BrainModel.Kind.read(entry["kind"] as? String ?? ""), slot: slot,
-                                        expires: expires, confidence: 0.6, origin: origin)
+                                        expires: expires, confidence: 0.6, origin: origin,
+                                        importance: rated.map { min(10, max(0, $0)) / 10 })
         }
     }
 }

@@ -77,6 +77,8 @@ public struct TaskTrace: Sendable, Equatable {
         case "remember": return "Remembered: \(arg("fact"))"
         case "recall": return "Looked back through earlier commands"
         case "ask_memory": return "Looked in your memory"
+        case "app_tools": return "Looked at what \(arg("app")) can do"
+        case "use_app": return "Used \(arg("app")): \(arg("tool").replacingOccurrences(of: "_", with: " "))"
         case "reply": return "Answered"
         case "ask_claude": return "Asked Claude Code"
         case "ask_codex": return "Asked Codex"

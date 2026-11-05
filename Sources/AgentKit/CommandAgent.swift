@@ -687,7 +687,7 @@ public final class CommandAgent {
         if let memory = CommandMemory.workingSet(for: utterance) {
             context += "\nMemory (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" refer to):\n\(memory)"
         }
-        if let known = Brain.shared.context(for: utterance) {
+        if let known = await Brain.shared.context(for: utterance) {
             context += "\nWhat Murmur knows about the people and things this may be about (from the user's Contacts, "
                 + "Calendar, Reminders, Notes and Mail; use it, but the user's words win):\n\(known)"
         }
@@ -1802,9 +1802,23 @@ public final class CommandAgent {
             return Outcome(result: result)
         case "forget_fact":
             return Outcome(result: CommandMemory.unremember(text("about")))
+        case "app_tools":
+            return Outcome(result: Connectors.shared.describe(text("app")))
+        case "use_app":
+            let app = text("app"), name = text("tool"), arguments = text("arguments")
+            // Reading runs at once; changing something in the app (create, update, delete, comment) asks first.
+            if !Connectors.shared.readsOnly(app, name) {
+                let what = arguments.count > 300 ? String(arguments.prefix(300)) + "…" : arguments
+                guard await host.confirm("Let Murmur \(name.replacingOccurrences(of: "_", with: " ")) in \(Connectors.shared.find(app)?.name ?? app)?",
+                                         what.isEmpty || what == "{}" ? "This changes something in the app." : what) else {
+                    return Outcome(result: "The user said no. Nothing was changed.")
+                }
+            }
+            host.progress("Working in \(Connectors.shared.find(app)?.name ?? app)…")
+            return Outcome(result: await Connectors.shared.call(app: app, tool: name, arguments: arguments))
         case "ask_memory":
             host.progress("Looking in your memory…")
-            return Outcome(result: Brain.shared.ask(text("query")))
+            return Outcome(result: await Brain.shared.ask(text("query")))
         case "recall":
             return Outcome(result: CommandMemory.recall(text("query"), kind: text("kind"), days: args["days"]?.number ?? 30))
         case "app_dictionary":
@@ -2742,10 +2756,19 @@ public final class CommandAgent {
                   "fact": ("string", "the fact in plain words, e.g. \"Mom is Roma, on WhatsApp\"")]),
             tool("forget_fact", "Forget a fact or preference the user told you before",
                  ["about": ("string", "its subject or words from it")]),
+            tool("app_tools", "List what a connected app can do (its tools and their arguments), before use_app. "
+                 + "Connected:\n" + (ConnectorTools.shared.summary.isEmpty ? "none yet" : ConnectorTools.shared.summary),
+                 ["app": ("string", "the app, e.g. linear, notion, atlassian")]),
+            tool("use_app", "Use a connected app's tool: read or change the user's issues, pages, tickets and docs in "
+                 + "Linear, Notion, Jira, Confluence and other apps they connected. Changes are confirmed with the user",
+                 ["app": ("string", "the app, e.g. linear"), "tool": ("string", "the tool's exact name from app_tools"),
+                  "arguments": ("string", "the tool's arguments as a JSON object, e.g. {\"query\": \"login bug\"}")],
+                 required: ["app", "tool"]),
             tool("ask_memory", "Look up what Murmur knows about the user's world: people (who they are, their work, "
                  + "numbers, birthdays, when the user last met them), organizations, projects, what's coming up and what "
                  + "the user has to do. Learned from Contacts, Calendar, Reminders, Notes and Mail. Use it for \"who is…\", "
-                 + "\"when did I…\", \"what do you know about…\", and before writing to someone",
+                 + "\"when did I…\", \"what do you know about…\", what the user promised or is waiting on, what they "
+                 + "worked on (by hour, day, month), and windows they saw, and before writing to someone",
                  ["query": ("string", "a name, project or topic, or the question in a few words")], required: ["query"]),
             tool("recall", "Look back through earlier commands and what they did (who was messaged and what, files and "
                  + "pages opened, answers given)",

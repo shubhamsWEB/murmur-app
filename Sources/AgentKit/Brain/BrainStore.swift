@@ -26,6 +26,7 @@ public final class BrainStore: @unchecked Sendable {
         var handle: OpaquePointer?
         guard sqlite3_open(url.path, &handle) == SQLITE_OK else { return }
         db = handle
+        sqlite3_busy_timeout(handle, 5000)   // the screen-memory helper writes to the same file
         for statement in [
             "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA foreign_keys = ON",
             """
@@ -38,7 +39,7 @@ public final class BrainStore: @unchecked Sendable {
               ON DELETE CASCADE, text TEXT NOT NULL, kind TEXT NOT NULL, slot TEXT, confidence REAL NOT NULL,
               created REAL NOT NULL, confirmed REAL NOT NULL, expires REAL, pinned INTEGER NOT NULL DEFAULT 0,
               origin TEXT NOT NULL, item TEXT, archived INTEGER NOT NULL DEFAULT 0, replaced_by INTEGER,
-              uses INTEGER NOT NULL DEFAULT 0, last_used REAL)
+              uses INTEGER NOT NULL DEFAULT 0, last_used REAL, importance REAL NOT NULL DEFAULT 0.5)
             """,
             "CREATE INDEX IF NOT EXISTS memory_entity ON memory(entity, archived)",
             "CREATE INDEX IF NOT EXISTS memory_item ON memory(item)",
@@ -70,6 +71,8 @@ public final class BrainStore: @unchecked Sendable {
             "CREATE TABLE IF NOT EXISTS change(id INTEGER PRIMARY KEY, at REAL NOT NULL, what TEXT NOT NULL, text TEXT NOT NULL, origin TEXT)",
             "CREATE INDEX IF NOT EXISTS change_at ON change(at)",
         ] { exec(statement) }
+        // Memories kept before importance existed get it (a no-op once the column is there).
+        exec("ALTER TABLE memory ADD COLUMN importance REAL NOT NULL DEFAULT 0.5")
         exec("DELETE FROM change WHERE at < ?", [Date().timeIntervalSince1970 - 30 * 86400])
     }
 
@@ -89,6 +92,13 @@ public final class BrainStore: @unchecked Sendable {
         let key = kind == .me ? "me" : BrainModel.nameKey(name)
         guard !key.isEmpty else { return nil }
         let at = now.timeIntervalSince1970
+        // The user, by their own name (from their Contacts card), before anyone else of that name: the user's own
+        // contact card and what the screen says about "Shubham Agrawal" are about the user, not someone else.
+        if kind != .me, let found = rows("SELECT id FROM entity WHERE kind = 'me' AND instr(aliases, ?) > 0 LIMIT 1",
+                                          ["\n\(key)\n"]).first?.first, let id = Int64(found) {
+            exec("UPDATE entity SET last_seen = ? WHERE id = ?", [at, id])
+            return id
+        }
         // By name or alias, in any kind first for people (a contact the model called an organization stays one entity).
         if let found = rows("SELECT id FROM entity WHERE kind = ? AND (key = ? OR instr(aliases, ?) > 0) LIMIT 1",
                             [kind.rawValue, key, "\n\(key)\n"]).first?.first, let id = Int64(found) {
@@ -186,9 +196,12 @@ public final class BrainStore: @unchecked Sendable {
                 // A fuller wording of the same thing ("works at Acme" → "works at Acme as a product manager") wins.
                 let fuller = BrainModel.keywords(text).isSuperset(of: BrainModel.keywords(old.text))
                     && text.count > old.text.count
-                exec("UPDATE memory SET confirmed = ?, confidence = ?, expires = coalesce(?, expires), text = ? WHERE id = ?",
-                     [at, BrainModel.confirmed(confidence: old.confidence, by: candidate.confidence),
-                      candidate.expires?.timeIntervalSince1970, fuller ? text : old.text, id])
+                // Seen again, it matters at least as much as the more important of the two said.
+                exec("""
+                    UPDATE memory SET confirmed = ?, confidence = ?, expires = coalesce(?, expires), text = ?,
+                      importance = max(importance, ?) WHERE id = ?
+                    """, [at, BrainModel.confirmed(confidence: old.confidence, by: candidate.confidence),
+                          candidate.expires?.timeIntervalSince1970, fuller ? text : old.text, candidate.importance, id])
                 applied.confirmed += 1
             case .replace(let id):
                 let new = insertMemory(candidate, text: text, entity: entity, item: item, at: at)
@@ -220,10 +233,11 @@ public final class BrainStore: @unchecked Sendable {
     private func insertMemory(_ candidate: BrainModel.Candidate, text: String, entity: Int64, item: String?,
                               at: Double) -> Int64 {
         insert("""
-            INSERT INTO memory(entity, text, kind, slot, confidence, created, confirmed, expires, pinned, origin, item)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO memory(entity, text, kind, slot, confidence, created, confirmed, expires, pinned, origin, item, importance)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             """, [entity, text, candidate.kind.rawValue, candidate.slot, candidate.confidence, at, at,
-                  candidate.expires?.timeIntervalSince1970, candidate.origin == .told ? 1 : 0, candidate.origin.rawValue, item])
+                  candidate.expires?.timeIntervalSince1970, candidate.origin == .told ? 1 : 0, candidate.origin.rawValue, item,
+                  candidate.importance])
     }
 
     private struct Kept {
@@ -235,22 +249,23 @@ public final class BrainStore: @unchecked Sendable {
     private func memoriesLocked(entity: Int64, includeArchived: Bool) -> [Kept] {
         rows("""
             SELECT id, entity, text, kind, slot, confidence, created, confirmed, expires, pinned, origin, archived,
-              replaced_by, uses FROM memory WHERE entity = ?\(includeArchived ? "" : " AND archived = 0")
+              replaced_by, uses, importance FROM memory WHERE entity = ?\(includeArchived ? "" : " AND archived = 0")
             """, [entity]).compactMap { row in
-            memoryRow(row, uses: row.count > 13 ? row[13] : "").map {
+            memoryRow(row, uses: row.count > 13 ? row[13] : "", importance: row.count > 14 ? row[14] : "").map {
                 Kept(memory: $0, archived: row[11] == "1", replaced: !row[12].isEmpty)
             }
         }
     }
 
-    private func memoryRow(_ row: [String], uses: String = "") -> BrainModel.Memory? {
+    private func memoryRow(_ row: [String], uses: String = "", importance: String = "") -> BrainModel.Memory? {
         guard row.count >= 11, let id = Int64(row[0]), let entity = Int64(row[1]) else { return nil }
         return BrainModel.Memory(
             id: id, entity: entity, text: row[2], kind: BrainModel.Kind.read(row[3]), slot: row[4].isEmpty ? nil : row[4],
             confidence: Double(row[5]) ?? 0.5, created: Date(timeIntervalSince1970: Double(row[6]) ?? 0),
             confirmed: Date(timeIntervalSince1970: Double(row[7]) ?? 0),
             expires: Double(row[8]).map { Date(timeIntervalSince1970: $0) }, pinned: row[9] == "1",
-            origin: BrainModel.Origin(rawValue: row[10]) ?? .commands, uses: Int(uses) ?? 0)
+            origin: BrainModel.Origin(rawValue: row[10]) ?? .commands, uses: Int(uses) ?? 0,
+            importance: Double(importance) ?? 0.5)
     }
 
     /// These memories were used in an answer: they fade more slowly from now on.
@@ -277,6 +292,100 @@ public final class BrainStore: @unchecked Sendable {
         public var id: Int64 { memory.id }
     }
 
+    /// The memories that matter most: about the user, or rated important. Their vectors make "what matters to you",
+    /// for triage by meaning.
+    public func importantMemoryIDs(limit: Int = 200) -> [Int64] {
+        lock.lock(); defer { lock.unlock() }
+        return rows("""
+            SELECT m.id FROM memory m JOIN entity e ON e.id = m.entity WHERE m.archived = 0
+              AND (m.importance >= 0.7 OR e.kind = 'me' OR m.origin IN ('told', 'reminders', 'calendar'))
+            ORDER BY m.importance DESC, m.confirmed DESC LIMIT ?
+            """, [limit]).compactMap { Int64($0[0]) }
+    }
+
+    /// Someone filed under the user's own name, as if they were someone else (the user's own contact card, read before
+    /// the user was known): their memories become the user's, and the duplicate goes. How many were merged.
+    @discardableResult
+    public func mergeMe() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard let row = rows("SELECT id, aliases FROM entity WHERE kind = 'me' LIMIT 1", []).first, let me = Int64(row[0]) else { return 0 }
+        let keys = row[1].split(separator: "\n").map(String.init).filter { !["", "me", "you"].contains($0) }
+        var merged = 0
+        for key in keys {
+            for found in rows("SELECT id FROM entity WHERE kind != 'me' AND key = ?", [key]) {
+                guard let id = Int64(found[0]) else { continue }
+                exec("UPDATE memory SET entity = ? WHERE entity = ?", [me, id])
+                exec("DELETE FROM entity WHERE id = ?", [id])
+                merged += 1
+            }
+        }
+        return merged
+    }
+
+    /// Memories made from the screen, newest first, with what each is about: what the Memory page shows of it.
+    public func fromScreen(limit: Int = 30) -> [Hit] {
+        lock.lock(); defer { lock.unlock() }
+        return rows("""
+            SELECT m.id, m.entity, m.text, m.kind, m.slot, m.confidence, m.created, m.confirmed, m.expires, m.pinned,
+                   m.origin, e.name, e.kind, m.uses, m.importance
+            FROM memory m JOIN entity e ON e.id = m.entity WHERE m.archived = 0 AND m.origin = 'screen'
+            ORDER BY m.confirmed DESC LIMIT ?
+            """, [limit]).compactMap { row in
+            guard let memory = memoryRow(Array(row.prefix(11)), uses: row[13], importance: row[14]) else { return nil }
+            return Hit(memory: memory, about: row[11], aboutKind: BrainModel.EntityKind(rawValue: row[12]) ?? .topic)
+        }
+    }
+
+    /// The same thing said again: the memory it repeats counts as seen again, now.
+    public func confirm(_ ids: [Int64], now: Date = Date()) {
+        guard !ids.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        exec("UPDATE memory SET confirmed = ? WHERE id IN (\(ids.map { _ in "?" }.joined(separator: ",")))",
+             [now.timeIntervalSince1970] + ids.map { $0 as Any? })
+    }
+
+    /// What a memory is about, by name ("You" for the user).
+    public func aboutName(memory id: Int64) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return rows("SELECT e.name FROM memory m JOIN entity e ON e.id = m.entity WHERE m.id = ?", [id]).first?.first
+    }
+
+    /// The user's own names, from their Contacts card ("Shubham Agrawal", "Shubham"): how text mentions them.
+    public func meNames() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let row = rows("SELECT aliases FROM entity WHERE kind = 'me' LIMIT 1", []).first?.first ?? ""
+        return row.split(separator: "\n").map(String.init).filter { !["me", "you", ""].contains($0) }
+            .map { $0.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ") }
+    }
+
+    /// People Murmur knows who this text names (by full name or another name they go by).
+    public func knownPeople(in text: String) -> [String] {
+        let ids = named(in: text)
+        guard !ids.isEmpty else { return [] }
+        lock.lock(); defer { lock.unlock() }
+        let marks = ids.map { _ in "?" }.joined(separator: ",")
+        return rows("SELECT name FROM entity WHERE kind = 'person' AND id IN (\(marks)) ORDER BY mentions DESC LIMIT 6",
+                    ids.map { $0 as Any? }).map { $0[0] }
+    }
+
+    /// These memories (current ones only), in the order asked, with what they're about.
+    public func hits(ids: [Int64], now: Date = Date()) -> [Hit] {
+        guard !ids.isEmpty else { return [] }
+        lock.lock(); defer { lock.unlock() }
+        let marks = ids.map { _ in "?" }.joined(separator: ",")
+        var found: [Int64: Hit] = [:]
+        for row in rows("""
+            SELECT m.id, m.entity, m.text, m.kind, m.slot, m.confidence, m.created, m.confirmed, m.expires, m.pinned,
+              m.origin, e.name, e.kind, m.uses, m.importance FROM memory m JOIN entity e ON e.id = m.entity
+            WHERE m.archived = 0 AND m.id IN (\(marks))
+            """, ids.map { $0 as Any? }) {
+            guard row.count >= 14, let memory = memoryRow(Array(row.prefix(11)), uses: row[13], importance: row.count > 14 ? row[14] : ""),
+                  BrainModel.strength(memory, now: now) > 0 else { continue }
+            found[memory.id] = Hit(memory: memory, about: row[11], aboutKind: BrainModel.EntityKind(rawValue: row[12]) ?? .topic)
+        }
+        return ids.compactMap { found[$0] }
+    }
+
     /// Memories that match the words, or are about someone or something the words name; the best first (how well
     /// they match, and how strong they still are).
     public func search(_ query: String, limit: Int = 12, now: Date = Date()) -> [Hit] {
@@ -284,7 +393,7 @@ public final class BrainStore: @unchecked Sendable {
         var scored: [Int64: (hit: Hit, score: Double)] = [:]
         func add(_ rows: [[String]], boost: Double) {
             for (rank, row) in rows.enumerated() {
-                guard row.count >= 14, let memory = memoryRow(Array(row.prefix(11)), uses: row[13]) else { continue }
+                guard row.count >= 14, let memory = memoryRow(Array(row.prefix(11)), uses: row[13], importance: row.count > 14 ? row[14] : "") else { continue }
                 let strength = BrainModel.strength(memory, now: now)
                 guard strength > 0 else { continue }
                 let score = boost / Double(rank + 2) + strength
@@ -293,7 +402,7 @@ public final class BrainStore: @unchecked Sendable {
                 else { scored[memory.id] = (hit, score) }
             }
         }
-        let columns = "m.id, m.entity, m.text, m.kind, m.slot, m.confidence, m.created, m.confirmed, m.expires, m.pinned, m.origin, e.name, e.kind, m.uses"
+        let columns = "m.id, m.entity, m.text, m.kind, m.slot, m.confidence, m.created, m.confirmed, m.expires, m.pinned, m.origin, e.name, e.kind, m.uses, m.importance"
         // Everything about an entity the question names.
         for entity in namedLocked(in: query) {
             add(rows("SELECT \(columns) FROM memory m JOIN entity e ON e.id = m.entity WHERE m.entity = ? AND m.archived = 0 LIMIT 40",
@@ -315,11 +424,11 @@ public final class BrainStore: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return rows("""
             SELECT m.id, m.entity, m.text, m.kind, m.slot, m.confidence, m.created, m.confirmed, m.expires, m.pinned,
-              m.origin, e.name, e.kind, m.uses FROM memory m JOIN entity e ON e.id = m.entity
+              m.origin, e.name, e.kind, m.uses, m.importance FROM memory m JOIN entity e ON e.id = m.entity
             WHERE m.archived = 0 AND m.kind IN ('event', 'task') AND e.kind = 'me' AND (m.expires IS NULL OR m.expires > ?)
             ORDER BY coalesce(m.expires, 9e12) LIMIT ?
             """, [now.timeIntervalSince1970, limit]).compactMap { row in
-            guard row.count >= 14, let memory = memoryRow(Array(row.prefix(11)), uses: row[13]) else { return nil }
+            guard row.count >= 14, let memory = memoryRow(Array(row.prefix(11)), uses: row[13], importance: row.count > 14 ? row[14] : "") else { return nil }
             return Hit(memory: memory, about: row[11], aboutKind: BrainModel.EntityKind(rawValue: row[12]) ?? .me)
         }
     }
@@ -373,6 +482,15 @@ public final class BrainStore: @unchecked Sendable {
         exec("DELETE FROM entity WHERE id NOT IN (SELECT entity FROM memory)")
     }
 
+    /// Forgets what came from items whose key starts so ("app.linear:" for everything Linear taught).
+    public func forget(itemPrefix prefix: String) {
+        lock.lock(); defer { lock.unlock() }
+        exec("DELETE FROM memory WHERE substr(item, 1, ?) = ?", [prefix.count, prefix])
+        let source = prefix.hasSuffix(":") ? String(prefix.dropLast()) : prefix
+        exec("DELETE FROM item WHERE source = ?", [source])
+        exec("DELETE FROM entity WHERE id NOT IN (SELECT entity FROM memory)")
+    }
+
     /// Forgets everything.
     public func forgetAll() {
         lock.lock(); defer { lock.unlock() }
@@ -390,10 +508,11 @@ public final class BrainStore: @unchecked Sendable {
         let at = now.timeIntervalSince1970
         var stale: [(Int64, String, String)] = []
         for row in rows("""
-            SELECT id, entity, text, kind, slot, confidence, created, confirmed, expires, pinned, origin FROM memory
-            WHERE archived = 0 AND pinned = 0
+            SELECT id, entity, text, kind, slot, confidence, created, confirmed, expires, pinned, origin, uses, importance
+            FROM memory WHERE archived = 0 AND pinned = 0
             """, []) {
-            guard let memory = memoryRow(row), BrainModel.isStale(memory, now: now) else { continue }
+            guard let memory = memoryRow(Array(row.prefix(11)), uses: row[11], importance: row[12]),
+                  BrainModel.isStale(memory, now: now) else { continue }
             stale.append((memory.id, memory.text, row[10]))
         }
         guard !stale.isEmpty else { return 0 }

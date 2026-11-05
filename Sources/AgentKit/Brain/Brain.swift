@@ -18,6 +18,11 @@ public final class Brain {
     public static let shared = Brain()
 
     public nonisolated let store: BrainStore
+    /// What screen memory saw: open loops, the chronicle, the time ledger (same file, its own connection).
+    public nonisolated let journal: Journal
+    /// Vectors for search by meaning (EmbeddingGemma 2, in the memory service).
+    public nonisolated let vectors: MemoryVectors
+    public nonisolated var search: MemorySearch { MemorySearch(store: store, journal: journal, vectors: vectors) }
 
     /// Bumped when what's known changes, so the Memory page reloads.
     public private(set) var revision = 0
@@ -32,6 +37,8 @@ public final class Brain {
 
     init(store: BrainStore = BrainStore()) {
         self.store = store
+        journal = Journal()
+        vectors = MemoryVectors()
     }
 
     // MARK: Running
@@ -74,12 +81,26 @@ public final class Brain {
         guard !running else { return }
         running = true
         defer { running = false; activity = nil; revision += 1 }
+        // Anything read by the model on: Murmur's own reading model comes down if it isn't here yet.
+        if !LocalReader.installed, BrainSource.allCases.contains(where: { $0.needsModel && state($0).enabled })
+            || ScreenMemory.shared.settings.enabled || !ConnectorTools.shared.names.isEmpty {
+            ReaderDownload.shared.ensure()
+        }
         reader = await BrainDistiller.model()
         for source in only.map({ [$0] }) ?? BrainSource.allCases where state(source).enabled {
             await sync(source, readNow: now || only != nil)
         }
+        if only == nil { await syncApps(readNow: now) }
+        // Everything new gets its vector, for search by meaning.
+        if LocalReader.embedderInstalled {
+            activity = "Indexing memories by meaning"
+            let search = self.search
+            await Task.detached(priority: .utility) {
+                await search.catchUp(batches: 40) { await LocalReader.embed($0, query: false) }
+            }.value
+        }
         if Date().timeIntervalSince(lastTidy) > 6 * 3600 {
-            store.tidy()
+            await off { $0.tidy() }
             lastTidy = Date()
         }
     }
@@ -94,19 +115,26 @@ public final class Brain {
         }
         var items: [String: (hash: String, title: String)] = [:]
         for entry in listing.entries where items[entry.key] == nil { items[entry.key] = (entry.hash, entry.title) }
-        let fresh = store.changed(source: source.rawValue, items: items, complete: listing.complete)
+        let name = source.rawValue, complete = listing.complete
+        let fresh = await off { $0.changed(source: name, items: items, complete: complete) }
         var learned = BrainStore.Applied()
 
         if !source.needsModel {
-            for entry in listing.entries where fresh.contains(entry.key) {
-                let item = "\(source.rawValue):\(entry.key)"
-                store.clear(item: item)   // what it says now replaces what it said
-                learned.add(store.apply(entry.candidates, item: item))
-                store.read(source: source.rawValue, key: entry.key, hash: entry.hash)
-                if source == .contacts, entry.key == "me", let me = store.entity(named: "me", kind: .me) {
-                    store.addAlias(entry.title, to: me)
-                    if let first = entry.title.split(separator: " ").first, first.count > 2 { store.addAlias(String(first), to: me) }
+            // Thousands of contacts or events: written on a background thread, never the main one.
+            let entries = listing.entries.filter { fresh.contains($0.key) }
+            learned = await off { store in
+                var learned = BrainStore.Applied()
+                for entry in entries {
+                    let item = "\(name):\(entry.key)"
+                    store.clear(item: item)   // what it says now replaces what it said
+                    learned.add(store.apply(entry.candidates, item: item))
+                    store.read(source: name, key: entry.key, hash: entry.hash)
+                    if name == BrainSource.contacts.rawValue, entry.key == "me", let me = store.entity(named: "me", kind: .me) {
+                        store.addAlias(entry.title, to: me)
+                        if let first = entry.title.split(separator: " ").first, first.count > 2 { store.addAlias(String(first), to: me) }
+                    }
                 }
+                return learned
             }
             store.synced(source.rawValue, status: summary(learned, items: listing.entries.count, source: source),
                          items: listing.entries.count, enabled: true)
@@ -150,6 +178,35 @@ public final class Brain {
                      items: listing.entries.count, enabled: true)
     }
 
+    /// What connected apps (Linear, Notion, Jira…) show now: read by the model when it changed.
+    private func syncApps(readNow: Bool) async {
+        guard let reader else { return }
+        let lessons = await Connectors.shared.lessons()
+        for (connector, lesson, raw) in lessons {
+            guard readNow || Self.idleSeconds() > 120 else { break }
+            let source = "app.\(connector.id)", hash = BrainSources.hash([raw])
+            let fresh = await off { $0.changed(source: source, items: [lesson.key: (hash, lesson.title)], complete: false) }
+            guard fresh.contains(lesson.key) else { continue }
+            activity = "Reading \(connector.name)"
+            let candidates = await BrainDistiller.distill(BrainModel.redact(raw), title: lesson.title, origin: .apps,
+                                                          model: reader)
+            let item = "\(source):\(lesson.key)"
+            _ = await off { store in
+                store.clear(item: item)
+                let applied = store.apply(candidates, item: item)
+                store.read(source: source, key: lesson.key, hash: hash)
+                return applied
+            }
+            revision += 1
+        }
+    }
+
+    /// Runs store work on a background thread (SQLite writes for a whole source can take a moment).
+    private func off<T: Sendable>(_ work: @escaping @Sendable (BrainStore) -> T) async -> T {
+        let store = self.store
+        return await Task.detached(priority: .utility) { work(store) }.value
+    }
+
     private func summary(_ applied: BrainStore.Applied, items: Int?, source: BrainSource) -> String {
         var parts: [String] = []
         if applied.added > 0 { parts.append("learned \(applied.added)") }
@@ -168,18 +225,38 @@ public final class Brain {
 
     /// What a command should know: who and what it names, what matches its words, and what's coming up when it's
     /// about time. At most ~1,200 characters. Nil when nothing applies. Used memories fade more slowly.
-    public nonisolated func context(for utterance: String, limit: Int = 1200) -> String? {
-        var hits = store.search(utterance, limit: 14).filter { $0.memory.origin != .told }   // told: already given
+    public nonisolated func context(for utterance: String, limit: Int = 1200) async -> String? {
+        // The command's meaning, for search by meaning; words and names alone when the model isn't there.
+        var vector: [Float]?
+        if LocalReader.embedderInstalled {
+            vector = await LocalReader.embed([utterance], query: true, start: false)?.first
+            if vector == nil { LocalReader.warm() }   // ready for the next command
+        }
+        let search = self.search
+        var hits = search.memories(utterance, vector: vector, limit: 14).filter { $0.memory.origin != .told }
         let lower = utterance.lowercased()
         if ["today", "tomorrow", "this week", "next week", "meeting", "schedule", "free", "busy", "remind", "to do",
             "todo", "agenda", "calendar"].contains(where: lower.contains) {
             let known = Set(hits.map(\.id))
             hits += store.upcoming(limit: 8).filter { !known.contains($0.id) }
         }
-        guard !hits.isEmpty else { return nil }
+        // What screen memory adds: open loops, what you did, what you saw (when the command is about them).
+        var extra = Recall.context(journal, for: utterance)
+        let related = search.related(vector)
+        extra += related.loops.prefix(3).map { "- Open loop (\($0.label.lowercased())): \(Nudges.describe($0, now: Date()))" }
+        extra += related.chronicle.map { "- \($0)" }
+        extra += related.seen.map(Recall.seen)
+        var unique: [String] = []
+        for line in extra where !unique.contains(line) { unique.append(line) }
+        extra = unique
+        guard !hits.isEmpty || !extra.isEmpty else { return nil }
         var lines: [String] = []
         var used: [Int64] = []
         var length = 0
+        for line in extra where length + line.count <= limit / 2 {
+            lines.append(line)
+            length += line.count + 1
+        }
         for hit in hits {
             let line = "- \(hit.memory.text)"
             guard length + line.count <= limit else { break }
@@ -193,16 +270,29 @@ public final class Brain {
 
     /// An answer to "what do you know about…": the memories that match, each with where it came from and how sure
     /// Murmur is, for the model to answer from.
-    public nonisolated func ask(_ query: String) -> String {
-        let hits = store.search(query, limit: 20)
-        guard !hits.isEmpty else { return "Nothing in Murmur's memory about \"\(query)\"." }
+    public nonisolated func ask(_ query: String) async -> String {
+        let vector = LocalReader.embedderInstalled ? await LocalReader.embed([query], query: true)?.first : nil
+        let search = self.search
+        let hits = search.memories(query, vector: vector, limit: 20)
+        var extra = Recall.answer(journal, for: query)
+        let related = search.related(vector)
+        extra += related.loops.map { "- \($0.label): \(Nudges.describe($0, now: Date())) [open loop]" }
+        extra += related.chronicle.map { "- \($0) [your summary]" }
+        extra += related.seen.map(Recall.seen)
+        var unique: [String] = []
+        for line in extra where !unique.contains(line) { unique.append(line) }
+        extra = unique
+        guard !hits.isEmpty || !extra.isEmpty else { return "Nothing in Murmur's memory about \"\(query)\"." }
         store.used(hits.map(\.id))
-        return hits.map { hit in
+        return (hits.map { hit in
             let sure = hit.memory.pinned ? "told by the user" : hit.memory.confidence >= 0.9 ? "certain" : "likely"
             let when = hit.memory.confirmed.formatted(.dateTime.day().month(.abbreviated).year())
             return "- \(hit.memory.text) [about \(hit.about); from \(hit.memory.origin.display), \(when); \(sure)]"
-        }.joined(separator: "\n")
+        } + extra).joined(separator: "\n")
     }
+
+    /// Screen memory's helper wrote something (a loop, a summary): the Memory page reloads.
+    public func journalChanged() { revision += 1 }
 
     /// Forgets one memory, everything about one entity, or everything.
     public func forget(memory id: Int64) { store.forget(memory: id); revision += 1 }

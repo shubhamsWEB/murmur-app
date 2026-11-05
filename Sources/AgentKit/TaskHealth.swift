@@ -73,7 +73,7 @@ public struct TaskHealth: Sendable {
     /// Tools that only look or keep notes: they neither make a step work nor fail.
     static let looking: Set<String> = [
         "plan", "note", "wait", "use_skill", "read_skill_file", "browser_read", "read_screen", "read_whole_page",
-        "browser_tabs", "app_dictionary", "recall", "ask_memory", "list_running_apps", "read_clipboard",
+        "browser_tabs", "app_dictionary", "recall", "ask_memory", "app_tools", "list_running_apps", "read_clipboard",
     ]
 
     /// The nudge for the same step twice with nothing to show for it.

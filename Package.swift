@@ -52,7 +52,8 @@ let portableTargets: [Target] = [
 #endif
 
 #if os(macOS)
-let appProducts: [Product] = [.executable(name: "MurmurApp", targets: ["MurmurApp"])]
+let appProducts: [Product] = [.executable(name: "MurmurApp", targets: ["MurmurApp"]),
+                              .executable(name: "murmur-memory", targets: ["MurmurMemory"])]
 let appDependencies: [Package.Dependency] = [
     // In-app updates (the app only). build.sh embeds the framework in Contents/Frameworks and signs it.
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
@@ -81,6 +82,8 @@ let appTargets: [Target] = [
         swiftSettings: [.defaultIsolation(MainActor.self)],
         linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
     ),
+    // Screen memory's helper (Contents/Helpers/murmur-memory): reads the windows you work in, in the background.
+    .executableTarget(name: "MurmurMemory", dependencies: ["AgentKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
     // Opening a file by what was said: real requests from the log, so a fix can't quietly come undone.
     .testTarget(name: "AgentKitTests", dependencies: ["AgentKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
 ]

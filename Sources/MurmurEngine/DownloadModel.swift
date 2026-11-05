@@ -21,6 +21,15 @@ func downloadModel(_ args: Arguments) throws -> Int32 {
     return try download(ModelFiles.missing(in: folder), total: ModelFiles.totalBytes, into: folder, useCache: true)
 }
 
+/// `murmur-engine download-reader-model [--to DIR]`: the model Murmur's memory reads with (`ReaderModelFiles`: Qwen3 4B,
+/// or 1.7B on a Mac with 8 GB or less), into DIR (default: Murmur's Models folder). The same events.
+func downloadReaderModel(_ args: Arguments) throws -> Int32 {
+    let folder = args.values["--to"].map(Arguments.folderURL) ?? ReaderModelFiles.folder
+    let file = ReaderModelFiles.chosen()
+    let missing = FileManager.default.fileExists(atPath: folder.appendingPathComponent(file.name).path) ? [] : [file]
+    return try download(missing, total: file.bytes, into: folder, useCache: false)
+}
+
 /// `murmur-engine download-speech-model [--model english|hinglish|multilingual] [--to DIR]`: the speech model the
 /// Windows and Linux app dictates with (`SpeechModelFiles`), into DIR (default: Murmur's Speech Models/<model>). The same
 /// events. Hinglish's files are listed in its release's manifest, read first.

@@ -64,7 +64,7 @@ public enum BrainModel {
 
     /// Where a memory came from, as the Memory page says it.
     public enum Origin: String, CaseIterable, Sendable, Codable {
-        case told, contacts, calendar, reminders, notes, mail, files, commands
+        case told, contacts, calendar, reminders, notes, mail, files, commands, apps, screen
 
         public var display: String {
             switch self {
@@ -76,6 +76,21 @@ public enum BrainModel {
             case .mail: return "Mail"
             case .files: return "Files"
             case .commands: return "Your commands"
+            case .apps: return "Connected apps"
+            case .screen: return "What you worked on"
+            }
+        }
+
+        /// How much a memory from here matters by default, when nothing says otherwise: what the user said most, what
+        /// they only saw least.
+        public var importance: Double {
+            switch self {
+            case .told: return 1
+            case .reminders: return 0.8
+            case .calendar: return 0.7
+            case .contacts, .commands: return 0.6
+            case .notes, .mail, .apps, .files: return 0.55
+            case .screen: return 0.45
             }
         }
     }
@@ -94,9 +109,13 @@ public enum BrainModel {
         /// 0 to 1: how sure the source is. Contacts and Calendar are certain; a model reading a note is less so.
         public var confidence: Double
         public var origin: Origin
+        /// 0 to 1: how much it matters to the user's own life and work (a promise they made, their manager, their
+        /// project) rather than something they only saw (a post in a feed). Important memories last longer and rank
+        /// higher; unimportant ones from the screen aren't kept as memories at all.
+        public var importance: Double
 
         public init(about: String, aboutKind: EntityKind, text: String, kind: Kind, slot: String? = nil,
-                    expires: Date? = nil, confidence: Double, origin: Origin) {
+                    expires: Date? = nil, confidence: Double, origin: Origin, importance: Double? = nil) {
             self.about = about
             self.aboutKind = aboutKind
             self.text = text
@@ -105,6 +124,7 @@ public enum BrainModel {
             self.expires = expires
             self.confidence = confidence
             self.origin = origin
+            self.importance = min(1, max(0, importance ?? origin.importance))
         }
     }
 
@@ -126,9 +146,10 @@ public enum BrainModel {
         /// How many times Murmur used it in an answer. A memory that keeps being used fades more slowly, the way
         /// recalling something keeps it.
         public var uses: Int
+        public var importance: Double
 
         public init(id: Int64, entity: Int64, text: String, kind: Kind, slot: String?, confidence: Double, created: Date,
-                    confirmed: Date, expires: Date?, pinned: Bool, origin: Origin, uses: Int = 0) {
+                    confirmed: Date, expires: Date?, pinned: Bool, origin: Origin, uses: Int = 0, importance: Double = 0.5) {
             self.id = id
             self.entity = entity
             self.text = text
@@ -141,6 +162,7 @@ public enum BrainModel {
             self.pinned = pinned
             self.origin = origin
             self.uses = uses
+            self.importance = importance
         }
     }
 
@@ -175,8 +197,21 @@ public enum BrainModel {
         if let expires = memory.expires, expires < now { return 0 }
         if memory.pinned { return 1 }
         let days = max(0, now.timeIntervalSince(memory.confirmed) / 86400)
-        let halfLife = memory.kind.halfLife * (1 + 0.25 * Double(min(max(memory.uses, 0), 8)))
+        // Importance stretches it (a commitment, a close colleague: up to 1.75 times) or shortens it (something only
+        // seen: down to 0.4 times); each use stretches it by a quarter more.
+        let halfLife = memory.kind.halfLife * (0.25 + 1.5 * min(1, max(0.1, memory.importance)))
+            * (1 + 0.25 * Double(min(max(memory.uses, 0), 8)))
         return memory.confidence * pow(0.5, days / halfLife)
+    }
+
+    /// A short, stable fingerprint of what something says (FNV-1a), to notice when it changed.
+    public static func fingerprint(_ parts: [String?]) -> String {
+        var value: UInt64 = 0xcbf29ce484222325
+        for byte in parts.map({ $0 ?? "" }).joined(separator: "\u{1f}").utf8 {
+            value ^= UInt64(byte)
+            value = value &* 0x100000001b3
+        }
+        return String(value, radix: 16)
     }
 
     // MARK: Secrets
