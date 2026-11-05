@@ -41,7 +41,7 @@ public enum ToolGroup: String, CaseIterable, Sendable, Comparable {
             return ["write_in_app", "insert_text", "read_clipboard", "copy_text", "paste_clipboard", "replace_selection"]
         case .appData: return ["calendar_events", "reminders_list", "run_applescript", "app_dictionary"]
         case .messages: return ["send_message"]
-        case .memory: return ["remember", "forget_fact", "recall"]
+        case .memory: return ["remember", "forget_fact", "recall", "ask_memory"]
         case .coding: return ["coding_followup", "build_with_agent"]
         case .skills: return ["use_skill", "read_skill_file"]
         }
@@ -56,7 +56,7 @@ public enum ToolGroup: String, CaseIterable, Sendable, Comparable {
         case .text: return "write in an app, paste where the user was typing, the clipboard, replace the selection"
         case .appData: return "calendar, reminders, AppleScript for Mail, Notes, Messages and other apps"
         case .messages: return "send a message on WhatsApp, Messages, Slack and other chat apps"
-        case .memory: return "remember a fact or preference, forget one, look back at earlier commands"
+        case .memory: return "remember a fact or preference, forget one, look back at earlier commands, look up what Murmur knows about people, projects and plans"
         case .coding: return "build software with Claude Code or Codex, and follow up on what they're building"
         case .skills: return "load one of the user's skills, read a skill's files"
         }
@@ -102,7 +102,7 @@ public enum ToolGroup: String, CaseIterable, Sendable, Comparable {
             groups.insert(.messages)
         }
         if mentionsMemory
-            || says(#"\b(remember|forget|recall|yaad|again|earlier|before|last time|yesterday|previous|from now on|call me|my name|did i|what did|which (file|video|page|song))\b"#) {
+            || says(#"\b(remember|forget|recall|yaad|again|earlier|before|last time|yesterday|previous|from now on|call me|my name|did i|what did|which (file|video|page|song)|who is|who's|kaun|what do you know|know about|birthday|works at|last met|second brain)\b"#) {
             groups.insert(.memory)
         }
         if codingSession

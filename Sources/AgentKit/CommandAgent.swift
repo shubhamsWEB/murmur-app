@@ -687,6 +687,10 @@ public final class CommandAgent {
         if let memory = CommandMemory.workingSet(for: utterance) {
             context += "\nMemory (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" refer to):\n\(memory)"
         }
+        if let known = Brain.shared.context(for: utterance) {
+            context += "\nWhat Murmur knows about the people and things this may be about (from the user's Contacts, "
+                + "Calendar, Reminders, Notes and Mail; use it, but the user's words win):\n\(known)"
+        }
         if let session = CodingSession.current {
             context += "\nCoding session: \(session.summary) Requests about that project (\"add a login page\", "
                 + "\"make it dark\", \"fix the error\", \"run it\", \"ask Claude to add tests\") go to it with "
@@ -1798,6 +1802,9 @@ public final class CommandAgent {
             return Outcome(result: result)
         case "forget_fact":
             return Outcome(result: CommandMemory.unremember(text("about")))
+        case "ask_memory":
+            host.progress("Looking in your memory…")
+            return Outcome(result: Brain.shared.ask(text("query")))
         case "recall":
             return Outcome(result: CommandMemory.recall(text("query"), kind: text("kind"), days: args["days"]?.number ?? 30))
         case "app_dictionary":
@@ -2735,6 +2742,11 @@ public final class CommandAgent {
                   "fact": ("string", "the fact in plain words, e.g. \"Mom is Roma, on WhatsApp\"")]),
             tool("forget_fact", "Forget a fact or preference the user told you before",
                  ["about": ("string", "its subject or words from it")]),
+            tool("ask_memory", "Look up what Murmur knows about the user's world: people (who they are, their work, "
+                 + "numbers, birthdays, when the user last met them), organizations, projects, what's coming up and what "
+                 + "the user has to do. Learned from Contacts, Calendar, Reminders, Notes and Mail. Use it for \"who is…\", "
+                 + "\"when did I…\", \"what do you know about…\", and before writing to someone",
+                 ["query": ("string", "a name, project or topic, or the question in a few words")], required: ["query"]),
             tool("recall", "Look back through earlier commands and what they did (who was messaged and what, files and "
                  + "pages opened, answers given)",
                  ["query": ("string", "words to find: a person, file, site or topic; empty for everything recent"),

@@ -152,7 +152,7 @@ private struct HomeView: View {
         case .search: EmptyView()   // drawn full-size above
         case .dictation: SettingsPage(app: app, state: state)
         case .commands: CommandsPage(dictation: app.dictation, state: state)
-        case .memory: MemoryPage(state: state)
+        case .memory: MemoryPage(app: app, state: state)
         case .folders: FoldersPage(app: app, state: state)
         case .about: AboutPage(app: app)
         }
@@ -1242,17 +1242,35 @@ private struct SkillsSettings: View {
 /// What Murmur remembers, in three short lists: what you told it, what it noticed, what you asked lately. Each line
 /// can be forgotten on its own; one switch stops remembering commands, one button forgets everything.
 private struct MemoryPage: View {
+    let app: AppController
     let state: HomeState
     @State private var confirmingClear = false
+    @State private var question = ""
+    @State private var answers: [BrainStore.Hit]?
+    @State private var kind: BrainModel.EntityKind = .person
+    @State private var open: Int64?
+
+    private var brain: Brain { Brain.shared }
 
     var body: some View {
         let _ = state.revision
+        let _ = brain.revision
         let told = CommandMemory.toldFacts()
         let noticed = CommandMemory.learned()
         let recent = CommandMemory.recentCommands(limit: 8)
+        let counts = brain.store.counts()
         VStack(alignment: .leading, spacing: 26) {
             PageHeader(title: "Memory",
-                       subtitle: "What Murmur remembers, so it works the way you do. It stays on this Mac.")
+                       subtitle: "Murmur’s second brain: who’s who, what’s coming up, and what you told it. It keeps "
+                           + "itself current, forgets what’s gone, and stays on this Mac.") {
+                Button(brain.activity == nil ? "Sync Now" : "Syncing…") { Task { await brain.sync(now: true) } }
+                    .buttonStyle(.murmurSecondary)
+                    .disabled(brain.activity != nil)
+            }
+            ask
+            sources
+            known(total: counts.entities)
+            lately
             list("You told Murmur", items: told,
                  empty: "Nothing yet. Say “remember that…” or “from now on…”, like “remember that Mom is Roma on WhatsApp”.")
             list("Murmur noticed", items: noticed,
@@ -1266,29 +1284,276 @@ private struct MemoryPage: View {
                 Spacer()
                 Button("Forget Everything…") { confirmingClear = true }
                     .buttonStyle(.murmurDestructive)
-                    .disabled(told.isEmpty && recent.isEmpty)
+                    .disabled(told.isEmpty && recent.isEmpty && counts.memories == 0)
             }
         }
         .alert("Forget everything?", isPresented: $confirmingClear) {
             Button("Forget Everything", role: .destructive) {
                 CommandMemory.forget(all: true, facts: true)
+                brain.forgetAll()
+                answers = nil
                 state.revision += 1
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Murmur forgets every command and everything you told it. This can't be undone.")
+            Text("Murmur forgets every command, everything you told it, and everything it learned from your apps. "
+                 + "Sources that are on teach it again at the next sync. This can't be undone.")
         }
     }
+
+    // MARK: Ask
+
+    private var ask: some View {
+        SettingsSection("Ask your memory") {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkle.magnifyingglass").foregroundStyle(Theme.ink3)
+                TextField("Who is Priya? When did I last meet Arjun? What’s coming up?", text: $question)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13.5))
+                    .onSubmit { search() }
+                if !question.isEmpty {
+                    Button("Ask") { search() }.buttonStyle(.murmurSecondaryCompact)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            if let answers {
+                RowDivider()
+                if answers.isEmpty {
+                    note("Nothing known about that yet.")
+                } else {
+                    ForEach(answers) { hit in
+                        memoryRow(hit.memory, about: hit.about)
+                    }
+                }
+            }
+        }
+    }
+
+    private func search() {
+        let query = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { answers = nil; return }
+        answers = brain.store.search(query, limit: 12)
+    }
+
+    // MARK: Sources
+
+    private var sources: some View {
+        SettingsSection("Where it learns from") {
+            if let activity = brain.activity {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(activity).font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                RowDivider()
+            }
+            ForEach(Array(BrainSource.allCases.enumerated()), id: \.element) { index, source in
+                if index > 0 { RowDivider() }
+                sourceRow(source)
+            }
+            RowDivider()
+            driveRow
+            if brain.reader == nil {
+                RowDivider()
+                note("Notes and Mail are read by a general model in Ollama, on this Mac. Install one with "
+                     + "“ollama pull qwen3:4b”, and Murmur starts reading them while you’re away.")
+            }
+        }
+    }
+
+    private func sourceRow(_ source: BrainSource) -> some View {
+        let current = brain.state(source)
+        var detail = source.about
+        if current.enabled, !current.status.isEmpty { detail += "\n" + current.status }
+        if current.enabled, let last = current.lastSync {
+            detail += " Checked \(last.formatted(.relative(presentation: .named)))."
+        }
+        return SettingRow(title: source.title, detail: detail) {
+            MurmurSwitch(label: source.title, isOn: Binding(
+                get: { _ = brain.revision; return current.enabled },
+                set: { on in Task { await brain.set(source, enabled: on); state.revision += 1 } }))
+        }
+    }
+
+    @ViewBuilder
+    private var driveRow: some View {
+        let drives = BrainSources.googleDriveFolders()
+        let roots = Set(app.model.settings.roots.map(\.standardizedFileURL.path))
+        let missing = drives.filter { !roots.contains($0.standardizedFileURL.path) }
+        SettingRow(title: "Google Drive",
+                   detail: drives.isEmpty
+                       ? "Install Google Drive for desktop and Murmur can search what’s in your Drive, on this Mac."
+                       : missing.isEmpty ? "Your Drive is in Murmur’s folders: its files are searchable."
+                       : "Add your Drive to Murmur’s folders, so what’s in its files can be found and asked about.") {
+            if drives.isEmpty {
+                Button("Get It") { NSWorkspace.shared.open(URL(string: "https://www.google.com/drive/download/")!) }
+                    .buttonStyle(.murmurSecondaryCompact)
+            } else if !missing.isEmpty {
+                Button("Add Drive") {
+                    app.applyFolders(app.model.settings.roots + missing)
+                    state.revision += 1
+                }
+                .buttonStyle(.murmurSecondaryCompact)
+            } else {
+                Pill(text: "Added", tone: .good)
+            }
+        }
+    }
+
+    // MARK: What it knows
+
+    private func known(total: Int) -> some View {
+        let kinds: [BrainModel.EntityKind] = [.person, .organization, .project, .topic, .place]
+        let entities = brain.store.entities(kind: kind, limit: 60)
+        let me = brain.store.entities(kind: .me, limit: 1).first
+        return SettingsSection("What Murmur knows") {
+            Picker("", selection: $kind) {
+                ForEach(kinds, id: \.self) { Text($0.display).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            if let me, kind == .person {
+                RowDivider()
+                entityRow(me, name: "You")
+            }
+            if entities.isEmpty {
+                RowDivider()
+                note(total == 0 ? "Nothing yet. Turn on a source above, and what Murmur learns shows up here."
+                     : "No \(kind.display.lowercased()) yet.")
+            }
+            ForEach(entities) { entity in
+                RowDivider()
+                entityRow(entity, name: entity.name)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func entityRow(_ entity: BrainStore.EntityRow, name: String) -> some View {
+        let expanded = open == entity.id
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { open = expanded ? nil : entity.id }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.ink3)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                Text(name).font(.system(size: 13.5, weight: .medium)).foregroundStyle(Theme.ink)
+                if !entity.aliases.isEmpty, entity.kind != .me {
+                    Text(entity.aliases.prefix(2).joined(separator: ", "))
+                        .font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text("\(entity.memories)").font(.system(size: 12)).foregroundStyle(Theme.ink3).monospacedDigit()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .accessibilityLabel("\(name), \(entity.memories) memories")
+        if expanded {
+            ForEach(brain.store.memories(of: entity.id)) { memory in
+                memoryRow(memory, about: nil)
+            }
+            HStack {
+                Spacer()
+                Button("Forget \(entity.kind == .me ? "What It Knows About You" : name)") {
+                    brain.forget(entity: entity.id)
+                    open = nil
+                }
+                .buttonStyle(.murmurDestructive)
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func memoryRow(_ memory: BrainModel.Memory, about: String?) -> some View {
+        let strength = BrainModel.strength(memory)
+        var detail = memory.origin.display
+        if let about, !memory.text.localizedCaseInsensitiveContains(about) { detail = about + ", " + detail }
+        detail += memory.pinned ? "" : ", " + memory.confirmed.formatted(.relative(presentation: .named))
+        if let expires = memory.expires { detail += ", until \(expires.formatted(.dateTime.day().month(.abbreviated)))" }
+        return HStack(alignment: .center, spacing: 12) {
+            Circle()
+                .fill(Theme.ink.opacity(0.15 + 0.7 * strength))
+                .frame(width: 6, height: 6)
+                .help(memory.pinned ? "You told Murmur: it never fades" : "How sure Murmur still is: \(Int(strength * 100))%")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(memory.text).font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(3)
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button {
+                brain.forget(memory: memory.id)
+                if answers != nil { search() }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.ink3)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Forget this")
+            .accessibilityLabel("Forget \(memory.text)")
+        }
+        .padding(.leading, 38)
+        .padding(.trailing, 18)
+        .padding(.vertical, 7)
+    }
+
+    // MARK: Lately
+
+    private var lately: some View {
+        let changes = brain.store.changes(limit: 12)
+        return SettingsSection("Lately") {
+            if changes.isEmpty {
+                note("What Murmur learns, updates and forgets shows up here.")
+            } else {
+                ForEach(Array(changes.enumerated()), id: \.element.id) { index, change in
+                    if index > 0 { RowDivider() }
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(change.what.prefix(1).uppercased() + change.what.dropFirst())
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(change.what == "learned" || change.what == "updated" ? Theme.ink2 : Theme.ink3)
+                            .frame(width: 62, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(change.text).font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(2)
+                            Text([change.origin?.display, change.at.formatted(.relative(presentation: .named))]
+                                .compactMap { $0 }.joined(separator: ", "))
+                                .font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                }
+            }
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundStyle(Theme.ink3)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+    }
+
+    // MARK: Commands and what you told it
 
     private func list(_ title: String, items: [CommandMemory.Item], empty: String) -> some View {
         SettingsSection(title) {
             if items.isEmpty {
-                Text(empty)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 14)
+                note(empty)
             } else {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     if index > 0 { RowDivider() }

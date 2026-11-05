@@ -128,6 +128,7 @@ final class AppController {
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
         download.onReady = { [weak self] in self?.engine.modelArrived() }
         engine.start()
+        Brain.shared.start()   // the living memory: syncs the sources you turned on, every half hour
         let settings = model.settings
         if !settings.onboarded, settings.roots.isEmpty {
             showOnboarding()

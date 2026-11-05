@@ -76,6 +76,7 @@ public struct TaskTrace: Sendable, Equatable {
         case "reminders_list": return "Read the reminders"
         case "remember": return "Remembered: \(arg("fact"))"
         case "recall": return "Looked back through earlier commands"
+        case "ask_memory": return "Looked in your memory"
         case "reply": return "Answered"
         case "ask_claude": return "Asked Claude Code"
         case "ask_codex": return "Asked Codex"
