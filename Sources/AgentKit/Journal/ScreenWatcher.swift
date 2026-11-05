@@ -221,13 +221,11 @@ public final class ScreenWatcher {
     private func soon(after delay: Double = 1.5) {
         pending?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            // Two statements, so the task's result is plainly Void (Xcode 26.0 can't choose between Task's
-            // initialisers for `await self?.capture()`, whose value is an optional Void).
+            // The watcher as a constant: Swift 6.2 (Xcode 26.0) won't send the weak, changeable `self` into a task, and
+            // says so as "ambiguous use of init(name:priority:operation:)".
             MainActor.assumeIsolated {
-                Task {
-                    guard let self else { return }
-                    await self.capture()
-                }
+                guard let watcher = self else { return }
+                Task { await watcher.capture() }
             }
         }
         pending = work
