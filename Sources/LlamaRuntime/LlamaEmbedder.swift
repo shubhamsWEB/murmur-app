@@ -331,7 +331,7 @@ public final class LlamaEmbedder: Embedder {
     }
 
     /// llama.cpp's process-wide setup, once.
-    private static let backend: Void = {
+    static let backend: Void = {
         llama_log_set(LlamaLog.callback, LlamaLog.userData)
         mtmd_helper_log_set(LlamaLog.callback, LlamaLog.userData)
         #if !os(macOS)

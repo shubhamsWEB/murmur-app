@@ -152,7 +152,7 @@ private struct HomeView: View {
         case .search: EmptyView()   // drawn full-size above
         case .dictation: SettingsPage(app: app, state: state)
         case .commands: CommandsPage(dictation: app.dictation, state: state)
-        case .memory: MemoryPage(state: state)
+        case .memory: MemoryPage(app: app, state: state)
         case .folders: FoldersPage(app: app, state: state)
         case .about: AboutPage(app: app)
         }
@@ -1242,17 +1242,40 @@ private struct SkillsSettings: View {
 /// What Murmur remembers, in three short lists: what you told it, what it noticed, what you asked lately. Each line
 /// can be forgotten on its own; one switch stops remembering commands, one button forgets everything.
 private struct MemoryPage: View {
+    let app: AppController
     let state: HomeState
     @State private var confirmingClear = false
+    @State private var question = ""
+    @State private var answers: [BrainStore.Hit]?
+    @State private var kind: BrainModel.EntityKind = .person
+    @State private var open: Int64?
+    @State private var showAllScreen = false
+
+    private var brain: Brain { Brain.shared }
 
     var body: some View {
         let _ = state.revision
+        let _ = brain.revision
         let told = CommandMemory.toldFacts()
         let noticed = CommandMemory.learned()
         let recent = CommandMemory.recentCommands(limit: 8)
+        let counts = brain.store.counts()
         VStack(alignment: .leading, spacing: 26) {
             PageHeader(title: "Memory",
-                       subtitle: "What Murmur remembers, so it works the way you do. It stays on this Mac.")
+                       subtitle: "Murmur’s second brain: who’s who, what’s coming up, and what you told it. It keeps "
+                           + "itself current, forgets what’s gone, and stays on this Mac.") {
+                Button(brain.activity == nil ? "Sync Now" : "Syncing…") { Task { await brain.sync(now: true) } }
+                    .buttonStyle(.murmurSecondary)
+                    .disabled(brain.activity != nil)
+            }
+            ask
+            sources
+            screen
+            if ScreenMemory.shared.settings.enabled { loopsAndToday }
+            apps
+            if ScreenMemory.shared.settings.enabled { fromScreen }
+            known(total: counts.entities)
+            lately
             list("You told Murmur", items: told,
                  empty: "Nothing yet. Say “remember that…” or “from now on…”, like “remember that Mom is Roma on WhatsApp”.")
             list("Murmur noticed", items: noticed,
@@ -1266,29 +1289,640 @@ private struct MemoryPage: View {
                 Spacer()
                 Button("Forget Everything…") { confirmingClear = true }
                     .buttonStyle(.murmurDestructive)
-                    .disabled(told.isEmpty && recent.isEmpty)
+                    .disabled(told.isEmpty && recent.isEmpty && counts.memories == 0)
             }
         }
         .alert("Forget everything?", isPresented: $confirmingClear) {
             Button("Forget Everything", role: .destructive) {
                 CommandMemory.forget(all: true, facts: true)
+                brain.forgetAll()
+                ScreenMemory.shared.forgetAll()
+                answers = nil
                 state.revision += 1
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Murmur forgets every command and everything you told it. This can't be undone.")
+            Text("Murmur forgets every command, everything you told it, and everything it learned from your apps. "
+                 + "Sources that are on teach it again at the next sync. This can't be undone.")
         }
     }
+
+    // MARK: Ask
+
+    private var ask: some View {
+        SettingsSection("Ask your memory") {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkle.magnifyingglass").foregroundStyle(Theme.ink3)
+                TextField("Who is Priya? When did I last meet Arjun? What’s coming up?", text: $question)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13.5))
+                    .onSubmit { search() }
+                if !question.isEmpty {
+                    Button("Ask") { search() }.buttonStyle(.murmurSecondaryCompact)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            if let answers {
+                RowDivider()
+                if answers.isEmpty {
+                    note("Nothing known about that yet.")
+                } else {
+                    ForEach(answers) { hit in
+                        memoryRow(hit.memory, about: hit.about)
+                    }
+                }
+            }
+        }
+    }
+
+    private func search() {
+        let query = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { answers = nil; return }
+        answers = brain.store.search(query, limit: 12)
+    }
+
+    // MARK: Sources
+
+    private var sources: some View {
+        SettingsSection("Where it learns from") {
+            if let activity = brain.activity {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(activity).font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                RowDivider()
+            }
+            ForEach(Array(BrainSource.allCases.enumerated()), id: \.element) { index, source in
+                if index > 0 { RowDivider() }
+                sourceRow(source)
+            }
+            RowDivider()
+            driveRow
+            if let download = ReaderDownload.shared.summary {
+                RowDivider()
+                note(download + " Notes, Mail, connected apps and what you work on are read with it, on this Mac.")
+            } else if brain.reader == nil {
+                RowDivider()
+                note("Notes, Mail, connected apps and what you work on are read by Murmur’s own model, on this Mac. "
+                     + "It downloads when you turn one of them on.")
+            }
+        }
+    }
+
+    private func sourceRow(_ source: BrainSource) -> some View {
+        let current = brain.state(source)
+        var detail = source.about
+        if current.enabled, !current.status.isEmpty { detail += "\n" + current.status }
+        if current.enabled, let last = current.lastSync {
+            detail += " Checked \(last.formatted(.relative(presentation: .named)))."
+        }
+        return SettingRow(title: source.title, detail: detail) {
+            MurmurSwitch(label: source.title, isOn: Binding(
+                get: { _ = brain.revision; return current.enabled },
+                set: { on in Task { await brain.set(source, enabled: on); state.revision += 1 } }))
+        }
+    }
+
+    @ViewBuilder
+    private var driveRow: some View {
+        let drives = BrainSources.googleDriveFolders()
+        let roots = Set(app.model.settings.roots.map(\.standardizedFileURL.path))
+        let missing = drives.filter { !roots.contains($0.standardizedFileURL.path) }
+        SettingRow(title: "Google Drive",
+                   detail: drives.isEmpty
+                       ? "Install Google Drive for desktop and Murmur can search what’s in your Drive, on this Mac."
+                       : missing.isEmpty ? "Your Drive is in Murmur’s folders: its files are searchable."
+                       : "Add your Drive to Murmur’s folders, so what’s in its files can be found and asked about.") {
+            if drives.isEmpty {
+                Button("Get It") { NSWorkspace.shared.open(URL(string: "https://www.google.com/drive/download/")!) }
+                    .buttonStyle(.murmurSecondaryCompact)
+            } else if !missing.isEmpty {
+                Button("Add Drive") {
+                    app.applyFolders(app.model.settings.roots + missing)
+                    state.revision += 1
+                }
+                .buttonStyle(.murmurSecondaryCompact)
+            } else {
+                Pill(text: "Added", tone: .good)
+            }
+        }
+    }
+
+    // MARK: Screen memory
+
+    @State private var confirmingScreenForget = false
+
+    private var screen: some View {
+        let memory = ScreenMemory.shared
+        let settings = memory.settings
+        var detail = "Murmur reads the window you’re working in when it changes (its text, or a picture of it when there’s "
+            + "little text), and while you’re away your local model turns it into memories, promises and a record of your "
+            + "days. Never password managers, private windows or password fields. Nothing leaves this Mac."
+        if let problem = memory.problem { detail += "\n" + problem }
+        else if settings.enabled {
+            let counts = memory.journal.counts()
+            detail += "\n\(memory.running ? "On" : "Starting"): \(counts.snapshots) windows kept, \(counts.openLoops) open loops."
+        }
+        return SettingsSection("Screen memory") {
+            SettingRow(title: "Remember what I work on", detail: detail) {
+                MurmurSwitch(label: "Screen memory", isOn: Binding(
+                    get: { _ = brain.revision; return memory.settings.enabled },
+                    set: { memory.set(enabled: $0); state.revision += 1 }))
+            }
+            if settings.enabled {
+                RowDivider()
+                SettingRow(title: "Only during work hours",
+                           detail: settings.always ? "Reads whenever you use the Mac."
+                               : "From \(settings.from):00 to \(settings.to):00\(settings.weekends ? ", every day" : ", weekdays").") {
+                    HStack(spacing: 8) {
+                        if !settings.always {
+                            Picker("From", selection: Binding(get: { memory.settings.from },
+                                                              set: { value in memory.update { $0.from = value } })) {
+                                ForEach(0..<24, id: \.self) { Text("\($0):00").tag($0) }
+                            }.labelsHidden().frame(width: 76)
+                            Picker("To", selection: Binding(get: { memory.settings.to },
+                                                            set: { value in memory.update { $0.to = value } })) {
+                                ForEach(0..<24, id: \.self) { Text("\($0):00").tag($0) }
+                            }.labelsHidden().frame(width: 76)
+                            MurmurSwitch(label: "Weekends", isOn: Binding(get: { memory.settings.weekends },
+                                                                          set: { value in memory.update { $0.weekends = value } }))
+                                .help("Weekends too")
+                        }
+                        MurmurSwitch(label: "Work hours", isOn: Binding(get: { !memory.settings.always },
+                                                                        set: { value in memory.update { $0.always = !value } }))
+                    }
+                }
+                RowDivider()
+                SettingRow(title: "Look at windows, not only read them",
+                           detail: "Apple Vision reads windows with little text. On Macs with Apple silicon and 16 GB or more, "
+                               + "the vision model also looks at a small picture of windows you stayed in, to tell your own "
+                               + "conversations and work from websites, demos and adverts. Only while plugged in, away and "
+                               + "quiet; each picture is deleted once seen. Needs Screen Recording.") {
+                    MurmurSwitch(label: "Pictures", isOn: Binding(get: { memory.settings.rules.pictures },
+                                                                  set: { value in memory.update { $0.rules.pictures = value } }))
+                }
+                RowDivider()
+                SettingRow(title: "Keep what you send",
+                           detail: "Messages you send in Slack, Mail, WhatsApp and other conversations are kept as yours: "
+                               + "the surest sign of what you promised. Password fields are never read.") {
+                    MurmurSwitch(label: "Keep what you send", isOn: Binding(get: { memory.settings.rules.authored },
+                                                                            set: { value in memory.update { $0.rules.authored = value } }))
+                }
+                RowDivider()
+                SettingRow(title: "Morning brief and evening wrap-up",
+                           detail: "What’s due and where you left off at 9:00, what you did and what’s still open at 18:30.") {
+                    MurmurSwitch(label: "Briefs", isOn: Binding(
+                        get: { !memory.settings.brief.isEmpty },
+                        set: { on in memory.update { $0.brief = on ? "09:00" : ""; $0.wrap = on ? "18:30" : "" } }))
+                }
+                RowDivider()
+                excludedRow(settings.rules.excluded)
+                RowDivider()
+                HStack {
+                    Spacer()
+                    Button("Forget What It Saw…") { confirmingScreenForget = true }.buttonStyle(.murmurDestructive)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+            }
+        }
+        .alert("Forget what screen memory saw?", isPresented: $confirmingScreenForget) {
+            Button("Forget", role: .destructive) { memory.forgetAll(); state.revision += 1 }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The windows it kept, your time, open loops, your daily summaries, and what it learned from them.")
+        }
+    }
+
+    private func excludedRow(_ excluded: [String]) -> some View {
+        let running = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+        func name(_ id: String) -> String {
+            NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.localizedName
+                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)?.deletingPathExtension().lastPathComponent ?? id
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Never read").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.ink)
+                Spacer()
+                Menu("Add App") {
+                    ForEach(running, id: \.processIdentifier) { app in
+                        Button(app.localizedName ?? app.bundleIdentifier!) {
+                            let id = app.bundleIdentifier!
+                            ScreenMemory.shared.update { if !$0.rules.excluded.contains(id) { $0.rules.excluded.append(id) } }
+                            state.revision += 1
+                        }
+                    }
+                }
+                .fixedSize()
+            }
+            HStack(spacing: 8) {
+                TextField("Or a site, like mybank.com", text: $excludedSite)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12.5))
+                    .onSubmit { excludeSite() }
+                Button("Add") { excludeSite() }.buttonStyle(.murmurSecondaryCompact).disabled(!excludedSite.contains("."))
+            }
+            if excluded.isEmpty {
+                Text("Password managers, private windows and password fields are never read.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.ink3)
+            } else {
+                ForEach(excluded, id: \.self) { id in
+                    HStack {
+                        Text(id.contains(".") && !id.contains("com.") && !id.contains("org.") ? id : name(id))
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                        Spacer()
+                        Button {
+                            ScreenMemory.shared.update { $0.rules.excluded.removeAll { $0 == id } }
+                            state.revision += 1
+                        } label: {
+                            Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.ink3)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Read \(id) again")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    @State private var excludedSite = ""
+
+    private func excludeSite() {
+        var site = excludedSite.lowercased().trimmingCharacters(in: .whitespaces)
+        if let host = URL(string: site.contains("://") ? site : "https://" + site)?.host { site = host }
+        if site.hasPrefix("www.") { site = String(site.dropFirst(4)) }
+        guard site.contains(".") else { return }
+        ScreenMemory.shared.update { if !$0.rules.excluded.contains(site) { $0.rules.excluded.append(site) } }
+        excludedSite = ""
+        state.revision += 1
+    }
+
+    @ViewBuilder
+    private var loopsAndToday: some View {
+        let journal = ScreenMemory.shared.journal
+        let loops = journal.loops(limit: 20)
+        SettingsSection("Open loops") {
+            if loops.isEmpty {
+                note("Promises you make or are owed (“I’ll send it Friday”) show up here, and close themselves when "
+                     + "Murmur sees they’re done.")
+            }
+            ForEach(Array(loops.enumerated()), id: \.element.id) { index, loop in
+                if index > 0 { RowDivider() }
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(loop.summary).font(.system(size: 13.5)).foregroundStyle(Theme.ink).lineLimit(2)
+                        Text([loop.label, loop.person.isEmpty ? nil : loop.person,
+                              loop.due.map { "due " + $0.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)) }]
+                            .compactMap { $0 }.joined(separator: ", "))
+                            .font(.system(size: 11.5)).foregroundStyle(loop.due.map { $0 < Date() } == true ? Theme.ink2 : Theme.ink3)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Done") { journal.set(loop: loop.id, status: "done"); state.revision += 1 }
+                        .buttonStyle(.murmurSecondaryCompact)
+                    Button {
+                        journal.set(loop: loop.id, status: "dropped")
+                        state.revision += 1
+                    } label: {
+                        Image(systemName: "xmark").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.ink3)
+                            .frame(width: 26, height: 26).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Not a promise")
+                    .accessibilityLabel("Not a promise: \(loop.summary)")
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 9)
+            }
+        }
+        waitingToBeRead
+        let today = Journal.Level.day.period(of: Date())
+        let hours = journal.chronicles(.hour, within: today)
+        let time = journal.time(from: Calendar.current.startOfDay(for: Date()), to: Date()).prefix(6)
+        SettingsSection("Today") {
+            if hours.isEmpty && time.isEmpty {
+                note("A few sentences for each hour you work, and where your time went, written while you’re away.")
+            }
+            if !time.isEmpty {
+                Text(time.map { "\($0.name) \(Int($0.seconds / 60)) min" }.joined(separator: ", "))
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+            }
+            ForEach(hours, id: \.period) { hour in
+                RowDivider()
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("\(hour.period.suffix(2)):00").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink3)
+                        .monospacedDigit().frame(width: 44, alignment: .leading)
+                    Text(hour.summary).font(.system(size: 13)).foregroundStyle(Theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 18).padding(.vertical, 9)
+            }
+        }
+    }
+
+    // MARK: Connected apps
+
+    @State private var address = ""
+    @State private var adding = false
+
+    private var apps: some View {
+        let connectors = Connectors.shared
+        return SettingsSection("Connected apps") {
+            ForEach(Array(connectors.all.enumerated()), id: \.element.id) { index, connector in
+                if index > 0 { RowDivider() }
+                appRow(connector, status: connectors.status[connector.id] ?? .off)
+            }
+            RowDivider()
+            HStack(spacing: 10) {
+                TextField("Add another app by its MCP server’s address, like mcp.sentry.dev/mcp", text: $address)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .onSubmit { addApp() }
+                Button(adding ? "Connecting…" : "Connect") { addApp() }
+                    .buttonStyle(.murmurSecondaryCompact)
+                    .disabled(adding || Connector.custom(address) == nil)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            note("You sign in on the app’s own page. Murmur keeps the sign-in in your Keychain, uses the app in commands "
+                 + "(it asks before changing anything), and learns from it with your local model.")
+            RowDivider()
+            SettingRow(title: "Use your memory in Claude Code",
+                       detail: "Claude Code, Claude Desktop and Cursor can ask Murmur what it knows (read-only, on this Mac). "
+                           + "Copies the command that adds it to Claude Code.") {
+                Button("Copy Command") {
+                    let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/murmur-memory").path
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("claude mcp add --scope user murmur -- \"\(helper)\" mcp", forType: .string)
+                }
+                .buttonStyle(.murmurSecondaryCompact)
+            }
+        }
+    }
+
+    private func addApp() {
+        let text = address
+        adding = true
+        Task {
+            if await Connectors.shared.add(text) != nil { address = "" }
+            adding = false
+        }
+    }
+
+    private func appRow(_ connector: Connector, status: Connectors.Status) -> some View {
+        var detail = connector.about
+        switch status {
+        case .connected(let tools): if tools > 0 { detail += "\nConnected: \(tools) tools." }
+        case .failed(let why): detail += "\n" + why
+        default: break
+        }
+        return SettingRow(title: connector.name, detail: detail) {
+            switch status {
+            case .connecting:
+                ProgressView().controlSize(.small)
+            case .connected:
+                HStack(spacing: 8) {
+                    Pill(text: "Connected", tone: .good)
+                    Button(connector.custom ? "Remove" : "Disconnect") {
+                        if connector.custom { Connectors.shared.remove(connector) } else { Connectors.shared.disconnect(connector) }
+                    }
+                    .buttonStyle(.murmurSecondaryCompact)
+                }
+            case .off, .failed:
+                Button("Connect") { Task { await Connectors.shared.connect(connector) } }
+                    .buttonStyle(.murmurSecondaryCompact)
+            }
+        }
+    }
+
+    // MARK: What it knows
+
+    private func known(total: Int) -> some View {
+        let kinds: [BrainModel.EntityKind] = [.person, .organization, .project, .topic, .place]
+        let entities = brain.store.entities(kind: kind, limit: 60)
+        let me = brain.store.entities(kind: .me, limit: 1).first
+        return SettingsSection("What Murmur knows") {
+            Picker("", selection: $kind) {
+                ForEach(kinds, id: \.self) { Text($0.display).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            if let me, kind == .person {
+                RowDivider()
+                entityRow(me, name: "You")
+            }
+            if entities.isEmpty {
+                RowDivider()
+                note(total == 0 ? "Nothing yet. Turn on a source above, and what Murmur learns shows up here."
+                     : "No \(kind.display.lowercased()) yet.")
+            }
+            ForEach(entities) { entity in
+                RowDivider()
+                entityRow(entity, name: entity.name)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func entityRow(_ entity: BrainStore.EntityRow, name: String) -> some View {
+        let expanded = open == entity.id
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { open = expanded ? nil : entity.id }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.ink3)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                Text(name).font(.system(size: 13.5, weight: .medium)).foregroundStyle(Theme.ink)
+                if !entity.aliases.isEmpty, entity.kind != .me {
+                    Text(entity.aliases.prefix(2).joined(separator: ", "))
+                        .font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text("\(entity.memories)").font(.system(size: 12)).foregroundStyle(Theme.ink3).monospacedDigit()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .accessibilityLabel("\(name), \(entity.memories) memories")
+        if expanded {
+            ForEach(brain.store.memories(of: entity.id)) { memory in
+                memoryRow(memory, about: nil)
+            }
+            HStack {
+                Spacer()
+                Button("Forget \(entity.kind == .me ? "What It Knows About You" : name)") {
+                    brain.forget(entity: entity.id)
+                    open = nil
+                }
+                .buttonStyle(.murmurDestructive)
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func memoryRow(_ memory: BrainModel.Memory, about: String?) -> some View {
+        let strength = BrainModel.strength(memory)
+        var detail = memory.origin.display
+        if let about, !memory.text.localizedCaseInsensitiveContains(about) { detail = about + ", " + detail }
+        detail += memory.pinned ? "" : ", " + memory.confirmed.formatted(.relative(presentation: .named))
+        if let expires = memory.expires { detail += ", until \(expires.formatted(.dateTime.day().month(.abbreviated)))" }
+        return HStack(alignment: .center, spacing: 12) {
+            Circle()
+                .fill(Theme.ink.opacity(0.15 + 0.7 * strength))
+                .frame(width: 6, height: 6)
+                .help(memory.pinned ? "You told Murmur: it never fades" : "How sure Murmur still is: \(Int(strength * 100))%")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(memory.text).font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(3)
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button {
+                brain.forget(memory: memory.id)
+                if answers != nil { search() }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.ink3)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Forget this")
+            .accessibilityLabel("Forget \(memory.text)")
+        }
+        .padding(.leading, 38)
+        .padding(.trailing, 18)
+        .padding(.vertical, 7)
+    }
+
+    // MARK: Lately
+
+    /// What's left to read: how many windows, what the reader is doing, and for the newest few, whether the model
+    /// will read them or they'll be kept only as seen (and why), with a way to read now.
+    @ViewBuilder
+    private var waitingToBeRead: some View {
+        let journal = ScreenMemory.shared.journal
+        let waiting = journal.waiting(limit: 8)
+        let store = brain.store
+        let plan = Triage.plan(waiting.windows, me: store.meNames(), known: { store.knownPeople(in: $0) })
+        let skipped = Dictionary(plan.skip.map { ($0.id, $0.why) }, uniquingKeysWith: { a, _ in a })
+        let status = MemoryLog.status()
+        SettingsSection("Waiting to be read") {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(waiting.count == 0 ? "Everything is read" : waiting.count == 1 ? "1 window" : "\(waiting.count) windows")
+                        .font(.system(size: 13.5, weight: .medium)).foregroundStyle(Theme.ink)
+                    if let status {
+                        Text(status.text + ", " + status.at.formatted(.relative(presentation: .named)))
+                            .font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 8)
+                Button("Read Now") { MemoryLog.requestReading(); state.revision += 1 }
+                    .buttonStyle(.murmurSecondaryCompact)
+                    .disabled(waiting.count == 0)
+                    .help("Read the waiting windows now instead of when you step away")
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            ForEach(waiting.windows) { window in
+                RowDivider()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(window.title.isEmpty ? window.app : window.title)
+                        .font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(1)
+                    Text([window.domain.isEmpty ? window.app : window.domain,
+                          window.last.formatted(.relative(presentation: .named)),
+                          skipped[window.id].map { "kept only as seen: \($0)" } ?? "will be read"]
+                        .joined(separator: ", "))
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(1)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 7)
+            }
+            if waiting.count > waiting.windows.count {
+                RowDivider()
+                note("And \(waiting.count - waiting.windows.count) more. Windows you only browsed are kept as seen without the model; "
+                     + "conversations and your work are read first.")
+            }
+        }
+    }
+
+    /// The newest memories made from what was on screen, so they can be seen (and forgotten) without opening people.
+    private var fromScreen: some View {
+        let hits = brain.store.fromScreen(limit: showAllScreen ? 60 : 8)
+        return SettingsSection("From your screen") {
+            if hits.isEmpty {
+                note("While you’re away, what you worked on turns into memories here: people, projects and decisions. Nothing yet.")
+            } else {
+                ForEach(hits) { hit in memoryRow(hit.memory, about: hit.about) }
+                if hits.count >= 8 {
+                    RowDivider()
+                    Button(showAllScreen ? "Show fewer" : "Show more") { showAllScreen.toggle() }
+                        .buttonStyle(.murmurSecondaryCompact)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 10)
+                }
+            }
+        }
+    }
+
+    private var lately: some View {
+        let changes = brain.store.changes(limit: 12)
+        return SettingsSection("Lately") {
+            if changes.isEmpty {
+                note("What Murmur learns, updates and forgets shows up here.")
+            } else {
+                ForEach(Array(changes.enumerated()), id: \.element.id) { index, change in
+                    if index > 0 { RowDivider() }
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(change.what.prefix(1).uppercased() + change.what.dropFirst())
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(change.what == "learned" || change.what == "updated" ? Theme.ink2 : Theme.ink3)
+                            .frame(width: 62, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(change.text).font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(2)
+                            Text([change.origin?.display, change.at.formatted(.relative(presentation: .named))]
+                                .compactMap { $0 }.joined(separator: ", "))
+                                .font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                }
+            }
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundStyle(Theme.ink3)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+    }
+
+    // MARK: Commands and what you told it
 
     private func list(_ title: String, items: [CommandMemory.Item], empty: String) -> some View {
         SettingsSection(title) {
             if items.isEmpty {
-                Text(empty)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 14)
+                note(empty)
             } else {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     if index > 0 { RowDivider() }

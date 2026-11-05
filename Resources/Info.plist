@@ -33,7 +33,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Murmur reads your calendar when you ask about it ("what's on my calendar tomorrow?"). Nothing leaves your Mac except what you send to a cloud model you chose.</string>
+	<string>Murmur reads your calendar when you ask about it ("what's on my calendar tomorrow?"), and remembers who you meet when you turn on Calendar in Memory. Nothing leaves your Mac except what you send to a cloud model you chose.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Murmur reads your calendar when you ask about it ("what's on my calendar tomorrow?").</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
@@ -41,7 +41,7 @@
 	<key>NSRemindersUsageDescription</key>
 	<string>Murmur reads your reminders when you ask about them.</string>
 	<key>NSContactsUsageDescription</key>
-	<string>Murmur looks up a person's number when you ask it to message them.</string>
+	<string>Murmur remembers who people are (their work, numbers and birthdays) when you turn on Contacts in Memory, and looks up a number when you ask it to message someone. It stays on your Mac.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Murmur turns Bluetooth on or off when you ask it to.</string>
 	<key>NSAppleEventsUsageDescription</key>

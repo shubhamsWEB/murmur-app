@@ -511,7 +511,7 @@ public enum CommandMemory {
 
     private static let looking: Set<String> = [
         "read_screen", "browser_read", "browser_scroll", "browser_tabs", "wait", "app_dictionary", "find_apps",
-        "list_running_apps", "list_shortcuts", "recall",
+        "list_running_apps", "list_shortcuts", "recall", "ask_memory",
     ]
 
     private static func kindOf(_ actions: [Action]) -> String {

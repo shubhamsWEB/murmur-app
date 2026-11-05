@@ -69,7 +69,8 @@ struct Arguments {
     var flags: Set<String> = []
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
-                                      "--memory-limit", "--time-limit", "--tries", "--when-quiet"]
+                                      "--memory-limit", "--time-limit", "--tries", "--when-quiet",
+                                      "--socket", "--idle"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude"]
 
     init(_ raw: ArraySlice<String>) throws {
@@ -723,7 +724,7 @@ do {
         exit(0)
     }
     let args = try Arguments(raw.dropFirst())
-    if ["index-service", "worker", "search-service", "download-model"].contains(command)
+    if ["index-service", "worker", "search-service", "download-model", "download-reader-model"].contains(command)
         || command == "estimate" && args.flags.contains("--json") {
         ParentWatch.start()   // an app's helper goes when the app does
     }
@@ -758,6 +759,10 @@ do {
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))
     case "download-speech-model": exit(try downloadSpeechModel(args))
+    case "download-reader-model": exit(try downloadReaderModel(args))
+    #if !os(Windows)
+    case "memory-service": exit(memoryService(args))
+    #endif
     default:
         print(usage)
         exit(2)

@@ -128,6 +128,9 @@ final class AppController {
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
         download.onReady = { [weak self] in self?.engine.modelArrived() }
         engine.start()
+        ScreenMemory.shared.start()   // screen memory's helper, when it's on; its briefs as notifications
+        Connectors.shared.start()   // the apps you connected: their tools, for commands and memory
+        Brain.shared.start()   // the living memory: syncs the sources you turned on, every half hour
         let settings = model.settings
         if !settings.onboarded, settings.roots.isEmpty {
             showOnboarding()

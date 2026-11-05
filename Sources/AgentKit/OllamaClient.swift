@@ -181,6 +181,10 @@ public enum JSONValue: Sendable, CustomStringConvertible {
         } else if let n = value as? NSNumber {
             // JSONSerialization gives NSNumber for both; only a real JSON true/false is a CFBoolean.
             self = CFGetTypeID(n) == CFBooleanGetTypeID() ? .bool(n.boolValue) : .number(n.doubleValue)
+        } else if JSONSerialization.isValidJSONObject(value),
+                  let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
+            // An object or a list (use_app's arguments): as JSON, so it can be read back.
+            self = .other(String(decoding: data, as: UTF8.self))
         } else {
             self = .other(String(describing: value))
         }
