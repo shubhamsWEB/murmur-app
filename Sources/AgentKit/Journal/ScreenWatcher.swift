@@ -221,7 +221,14 @@ public final class ScreenWatcher {
     private func soon(after delay: Double = 1.5) {
         pending?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { Task { await self?.capture() } }
+            // Two statements, so the task's result is plainly Void (Xcode 26.0 can't choose between Task's
+            // initialisers for `await self?.capture()`, whose value is an optional Void).
+            MainActor.assumeIsolated {
+                Task {
+                    guard let self else { return }
+                    await self.capture()
+                }
+            }
         }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
