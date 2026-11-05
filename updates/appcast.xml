@@ -6,19 +6,21 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.5.1</title>
-      <pubDate>Wed, 04 Nov 2026 20:01:49 +0000</pubDate>
-      <sparkle:version>13</sparkle:version>
-      <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
+      <title>Murmur 1.6.0</title>
+      <pubDate>Thu, 05 Nov 2026 22:47:48 +0000</pubDate>
+      <sparkle:version>15</sparkle:version>
+      <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h3>What's new on Windows</h3>
-<p><b>Murmur Cleanup on Windows.</b> AI cleanup can now use Murmur's own cleanup model on your PC, as it does on the Mac: it tidies dictation in a fraction of a second and keeps your words. Turn on <b>AI clean-up</b> in <b>Settings → Commands &amp; AI</b>, then choose <b>Download</b> next to <b>Clean-up model</b> (0.5 GB, through Ollama). Until it's downloaded, or with <b>Same as commands</b> chosen, clean-up uses the commands' model as before.</p>
-<p><b>Stop a command.</b> Press Esc, or choose <b>Stop Command</b> in the tray, and the command stops after what it's doing at that moment. A new command now stops the one before it, so two never run at once.</p>
-<p><b>Answer Murmur's questions.</b> When Murmur asks something partway through ("Which file do you mean?"), just say the answer and the same task carries on.</p>
-<h3>Fixes</h3>
-<ul><li>Windows: a command no longer stops with "expected element type" when the local model writes a tool call Ollama can't read. Murmur asks the model again.</li><li>Windows: AI clean-up no longer runs out of time while its model loads: it loads while you speak.</li></ul>
-<p>On the Mac, nothing changes in this version.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.5.1/Murmur-1.5.1.dmg" type="application/octet-stream" sparkle:edSignature="xx6cCdetOqqYnPS1XpDyDpyS+QRCLT+Wlcv/qcJtVvkNgD1dO43DV8UXdJWwB8iP+Wptt8YGrcEQTt2RjczMAw==" length="13802872"/>
+      <description><![CDATA[<h3>What's new on the Mac</h3>
+<p><b>Memory: Murmur's second brain.</b> Murmur now remembers who's who, what's coming up and what you told it, and uses it in every command. "Text Priya I'm running late" knows which Priya, and "when's my flight?" has an answer. Turn on what it may learn from in the new <b>Memory</b> page: Contacts, Calendar, Reminders, Notes, Mail and what you tell it ("remember that Mom is Roma on WhatsApp"). It keeps itself current, forgets what's gone stale, and everything stays on your Mac.</p>
+<p><b>Remember what you work on.</b> Turn it on in <b>Memory</b>, and Murmur reads the window you're working in (its text, or a picture of it when there's little text). While you're away, it turns that into memories, promises and a short record of your day. It keeps what's about you and the people you know, leaves feeds and adverts as only seen, and never reads password managers, private windows or password fields. Pictures are deleted once they've been read.</p>
+<p><b>Promises and plans.</b> "Can you send the deck by Friday?" in Slack, "I'll call you after the meeting" on WhatsApp, a flight you booked: they show up as <b>Open loops</b> and <b>Coming up</b>, close themselves when Murmur sees they're done, and remind you before they're due.</p>
+<p><b>Morning brief and evening wrap-up.</b> At 9:00, what's due today and where you left off. At 18:30, what you did and what's still open.</p>
+<p><b>Your apps, connected.</b> Connect Linear, Notion, or Jira and Confluence from <b>Memory → Connected apps</b>: you sign in on the app's own page, and Murmur can ask them and update them by voice. Claude Code, Claude Desktop and Cursor can also ask Murmur what it knows (<b>Use your memory in Claude Code</b>).</p>
+<p><b>A reader built in.</b> Memory runs on a small model Murmur downloads for you (2.5 GB) and runs itself, so it doesn't need Ollama. It reads only when the Mac can spare it: while you're away, or a little at a time while it's plugged in and quiet. It never reads in Low Power Mode or when the Mac is hot.</p>
+<h3>On Windows</h3>
+<p>Nothing changes in this version.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.6.0/Murmur-1.6.0.dmg" type="application/octet-stream" sparkle:edSignature="v86B6UuYS3tiEcuzUR8EXIxnRkAKsw8sA1fOZo1AFxQaAfJIpQIntQRpa9rzdIiTtSEh7tFc/tbcV19K/3sABg==" length="16394969"/>
     </item>
   </channel>
 </rss>
