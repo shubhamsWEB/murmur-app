@@ -47,8 +47,7 @@ public enum ScreenText {
     }
 
     /// The file a window shows, from its Accessibility "document" (a file:// address, percent-encoded): Cocoa document
-    /// apps (TextEdit, Pages, Preview, Xcode) say it; browsers' is a web page's address, not a file. The approach is
-    /// screenpipe's (MIT-licensed version; see THIRD_PARTY_NOTICES.md).
+    /// apps (TextEdit, Pages, Preview, Xcode) say it; browsers' is a web page's address, not a file.
     public static func documentPath(_ raw: String) -> String? {
         guard raw.hasPrefix("file://") else { return nil }
         if let url = URL(string: raw), url.isFileURL, !url.path.isEmpty { return url.path }
