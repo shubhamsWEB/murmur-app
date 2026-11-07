@@ -6,20 +6,17 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.7.0</title>
-      <pubDate>Sat, 07 Nov 2026 09:27:56 +0000</pubDate>
-      <sparkle:version>16</sparkle:version>
-      <sparkle:shortVersionString>1.7.0</sparkle:shortVersionString>
+      <title>Murmur 1.7.1</title>
+      <pubDate>Sat, 07 Nov 2026 17:36:08 +0000</pubDate>
+      <sparkle:version>18</sparkle:version>
+      <sparkle:shortVersionString>1.7.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new on the Mac</h3>
-<p><b>Memory that keeps the details.</b> Murmur now follows your conversations as threads: who you wrote to, what about, and whose turn it is. Emails you send are remembered with their recipient and what you said. The morning brief tells you who's waiting on a reply, who to follow up with, and where you left off. "Did Tanay reply?" and "What's on my plate today?" are answered straight away.</p>
-<p><b>Remembers what you work on, as you work.</b> Murmur groups what it sees into pieces of work (a project, a release, a booking) and reads them while you're still working, a little at a time, when the Mac is plugged in and quiet. It no longer waits for you to step away. Flights, bookings and releases are read exactly as the page shows them.</p>
-<p><b>Read with Claude or OpenAI, if you choose.</b> In <b>Memory</b>, you can have your own Claude or OpenAI key read what Murmur saw, for faster and sharper memories. Sensitive windows (banks, health, passwords, private messages) are always read on your Mac, and email addresses, phone and account numbers are taken out before anything is sent. It's off unless you turn it on.</p>
-<p><b>Short-lived things fade.</b> A status or a one-off reminder fades within days; a flight stays until it's flown.</p>
-<p><b>Dictation works when another app holds Secure Input.</b> Password managers, Terminal and browsers can leave macOS's Secure Input on, and Murmur took every text box for a password field. Now only a real password field stops it.</p>
-<h3>On Windows</h3>
-<p><b>The dictation key works from the start.</b> It could do nothing just after Murmur started (and on some PCs, at all) until Murmur was restarted. Murmur now hears the key from the moment it opens, keeps trying if Windows doesn't let it watch the key at first, and hears keys sent by remote desktops and virtual machines.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.0/Murmur-1.7.0.dmg" type="application/octet-stream" sparkle:edSignature="JzOt0ivBkRxlCmpY0elp9j0MWCzKz6fTM1Vk3mcgVGT7u+67UYw+A7VhM/5Yg4XhP8VEAfPOvKgumAUd4ErkAQ==" length="17191461"/>
+<p><b>Questions about your own work are answered from memory.</b> "What did we release, and have we posted it on LinkedIn and WhatsApp?" is answered from what Murmur saw you do, instead of searching the web for it. A question with two parts gets both answered; if Murmur has seen one part and not the other, it says which, and offers to check. It no longer finishes a question with nothing to say.</p>
+<p><b>One memory, searched as one.</b> What you did, what you sent and posted, your conversations, what you promised and what Murmur learned about your world now sit in a single index, searched at once by words, by meaning, by the people and places named, by the time asked about and by what's still owed. "The release" finds "Releasing Murmur 1.7.0", "yesterday" finds yesterday, and "what do I need to do?" finds your open promises. Every task, whichever model plans it, local or cloud, starts with what memory knows about it.</p>
+<p><b>Hears names the way you say them.</b> When speech to text mishears a name, Murmur reads it as the name your memory knows: "Thanai" and "Tana" are Tanay, "Herschel" is Harshal. Versions said aloud become numbers ("one point seven" is 1.7). Real words are left alone.</p>
+<p><b>Remembers what you post and send.</b> Your LinkedIn posts, WhatsApp messages (groups included) and release tags pushed from Terminal or GitHub are kept as things you did. After the update, Murmur reads the windows it already kept once more, so posts from before it are found too.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.1/Murmur-1.7.1.dmg" type="application/octet-stream" sparkle:edSignature="3ZW+tHi8FnqiGdZd5xuOUOX/gilhucUAjdS0E6qQpdyiztn3qulbRaRMIzp5tk29hbFVpyIIkL+qn2YNSmgECQ==" length="17566211"/>
     </item>
   </channel>
 </rss>
