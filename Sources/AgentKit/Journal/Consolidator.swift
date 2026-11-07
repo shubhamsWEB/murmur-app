@@ -195,6 +195,19 @@ public enum Consolidator {
                                             "phone", "email", "birthday", "manager", "team", "school", "partner",
                                             "spouse", "address", "timezone", "name", "nickname"]
 
+    /// Build, test, CI and pull-request states, commit hashes and memory gauges: true for minutes, not facts to keep.
+    static func isPassingState(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let states = ["build failed", "build succeeded", "build passed", "builds failed", "the build is", "build is running",
+                      "workflow run", "github actions", "run is in progress", "build is in progress", "ci run", "ci is", "checks are",
+                      "tests passed", "tests failed", "test run", "needs merging", "is open and", "pull request #",
+                      "merge pull request", "latest commit", "high memory usage", "memory usage", "is loading",
+                      "is downloading", "is uploading", "is compiling", "exit code", "error:", "stack trace"]
+        if states.contains(where: lower.contains) { return true }
+        // "commit 660411d", "a93f56b": a hash is never the fact.
+        return lower.range(of: #"\b(commit|sha)\s+[0-9a-f]{7,40}\b"#, options: .regularExpression) != nil
+    }
+
     /// "Viewed…", "Visited…", "Browsed…": what was looked at, not what's true.
     static func isActivity(_ text: String) -> Bool {
         let lower = text.lowercased().trimmingCharacters(in: .whitespaces)
@@ -282,6 +295,9 @@ public enum Consolidator {
             // What the user looked at isn't a fact about their world ("Viewed LinkedIn profile of…"): the day's
             // record already has it.
             if isActivity(text) { return nil }
+            // A state that's over in minutes ("Build failed on GitHub Actions", "the workflow run is in progress",
+            // "PR #7 is open", "latest commit is 660411d"): the record of the day has it; memory keeps what lasts.
+            if isPassingState(text) { return nil }
             // Someone whose "name" is an ordinary word ("Voice", "Press", "Information": a page's buttons and
             // headings), unless the user knows them.
             if memory.aboutKind == .person, isCommonWord(about), known(memory.about).isEmpty, !mine.contains(about) { return nil }
@@ -356,11 +372,22 @@ public enum Consolidator {
             Never write what the user looked at or visited ("Viewed X's profile", "Visited a page"): only what is \
             true. Never a person whose name is a word on the page ("Voice", "Press"). Say each thing once.
 
+            What the user ships matters most of their work: when they release, publish, launch or merge something of \
+            theirs, keep what it is and what's in it ("Murmur 1.6.0, released 6 Nov: memory of your apps and screen, \
+            promises and plans, morning brief"), under the project's plain name ("Murmur", not "Murmur 1.6.0" or \
+            "owner/repo"). Never a build, test, CI or pull-request state, a commit hash, or memory use: those are true \
+            for minutes.
+
             "plans" go in "promises" too, with kind "plan": the user's own bookings and appointments, seen on a page \
             that is theirs (it names them: their itinerary, order, ticket or appointment): a flight, train, hotel, \
             doctor, delivery, event. Summary with what and where ("Flight 6E 537 Bengaluru to Raipur, T1"), due as \
             "YYYY-MM-DD HH:mm" (when it happens), and one more plan for each deadline before it ("Web check-in opens \
             for 6E 537", "Check-in closes for 6E 537"). Never from offers, adverts or search results.
+
+            When the user ships something (release notes, a changelog, a published release, a launch post of \
+            theirs), keep one memory about the product itself: the version, the date if shown, and what it brought, \
+            in a sentence ("Murmur 1.6.0 (6 Nov 2026): memory of people, promises and plans; screen memory; morning \
+            brief"). Never builds, tests, CI runs, pull requests or commits as memories: the day's record has them.
 
             Skip ads, menus, code listings, boilerplate, and anything you'd have to guess. Nothing from passwords or \
             codes. At most 5 memories and 4 promises, each text at most 15 words; empty lists when nothing is worth \
@@ -527,7 +554,13 @@ public enum Consolidator {
 
     /// Writes the summaries still missing: the last day's finished hours, then yesterday, last month and last year
     /// once their parts exist.
-    static func chronicle(journal: Journal, model: String, now: Date, keepGoing: () -> Bool) async {
+    static func chronicle(journal: Journal, model: String, now: Date, keepGoing: () -> Bool, graph: MemoryGraph? = nil,
+                          ask: EpisodeReader.Ask? = nil) async {
+        // The local model, or Claude/OpenAI when the user reads with them.
+        func write(_ system: String, _ text: String) async -> String? {
+            if let ask { return await ask(system, text) }
+            return await chat(system, text, schema: nil, model: model)
+        }
         let calendar = Calendar.current
         // Hours: each finished hour of the last 24 with something seen in it.
         for back in (1...24).reversed() {
@@ -537,8 +570,22 @@ public enum Consolidator {
             guard journal.chronicle(.hour, period) == nil else { continue }
             let seen = journal.snapshots(from: start.start, to: start.end, limit: 80)
             guard seen.reduce(0, { $0 + $1.seconds }) >= 120 || seen.count >= 3 else { continue }
-            let text = batches(seen, budget: 6000).first?.text ?? ""
-            if let summary = await chat(chronicleSystem(.hour), text, schema: nil, model: model) {
+            // The hour's episodes, once they're read, say it better than its windows: what each was, for how long, how
+            // it ended. An hour whose episodes are still being read waits for them.
+            var text = batches(seen, budget: 6000).first?.text ?? ""
+            if let graph {
+                let episodes = graph.episodes(from: start.start, to: start.end).filter { $0.seconds >= 60 }
+                if episodes.contains(where: { $0.final && !$0.read }) { continue }
+                // Claude or OpenAI writing it: only the episodes' names and summaries go, never windows, and nothing of
+                // what stays on this Mac.
+                let read = episodes.filter { !$0.title.isEmpty && (ask == nil || !graph.isPrivate($0.id)) }
+                if !read.isEmpty { text = read.map { MemoryRecall.line($0) }.joined(separator: "\n") }
+                else if ask != nil { continue }
+                if ask != nil { text = CloudPrivacy.scrub(text) }
+            } else if ask != nil {
+                continue
+            }
+            if let summary = await write(chronicleSystem(.hour), text) {
                 journal.setChronicle(.hour, period, clean(summary), now: now)
                 MemoryLog.write("wrote the summary of \(period)")
             }
@@ -553,17 +600,33 @@ public enum Consolidator {
             guard keepGoing(), let below = level.below else { return }
             let period = level.period(of: date)
             guard journal.chronicle(level, period) == nil else { continue }
-            let parts = journal.chronicles(below, within: period)
+            // Hours that say the same (a window seen across several of them): once.
+            var parts: [(period: String, summary: String)] = []
+            for part in journal.chronicles(below, within: period) {
+                let words = BrainModel.keywords(part.summary)
+                if parts.contains(where: { BrainModel.similarity(BrainModel.keywords($0.summary), words) >= 0.6 }) { continue }
+                parts.append((part.period, part.summary))
+            }
             guard !parts.isEmpty else { continue }
             let text = parts.map { "\($0.period): \($0.summary)" }.joined(separator: "\n").prefix(7000)
-            if let summary = await chat(chronicleSystem(level), String(text), schema: nil, model: model) {
+            if let summary = await write(chronicleSystem(level), String(text)) {
                 journal.setChronicle(level, period, clean(summary), now: now)
             }
         }
     }
 
+    /// A summary as kept: secrets out, and at most five sentences (a small model sometimes repeats its input back).
     static func clean(_ text: String) -> String {
-        BrainModel.redact(ModelOutput.answer(text)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let answer = BrainModel.redact(ModelOutput.answer(text)).trimmingCharacters(in: .whitespacesAndNewlines)
+        var sentences: [String] = []
+        let marked = answer.replacingOccurrences(of: #"([.!?])\s+"#, with: "$1\u{1}", options: .regularExpression)
+        for part in marked.split(separator: "\u{1}") {
+            let sentence = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sentence.isEmpty, !sentences.contains(sentence) else { continue }
+            sentences.append(sentence)
+            if sentences.count >= 5 { break }
+        }
+        return sentences.isEmpty ? String(answer.prefix(900)) : String(sentences.joined(separator: " ").prefix(900))
     }
 
     /// One local-model call: its answer, or nil when Ollama couldn't be asked.

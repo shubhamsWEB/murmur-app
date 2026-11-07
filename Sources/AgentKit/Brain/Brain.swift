@@ -23,6 +23,8 @@ public final class Brain {
     /// Vectors for search by meaning (EmbeddingGemma 2, in the memory service).
     public nonisolated let vectors: MemoryVectors
     public nonisolated var search: MemorySearch { MemorySearch(store: store, journal: journal, vectors: vectors) }
+    /// The timeline under screen memory: items read from windows, episodes of work, how entities connect.
+    public nonisolated let graph: MemoryGraph
 
     /// Bumped when what's known changes, so the Memory page reloads.
     public private(set) var revision = 0
@@ -39,6 +41,7 @@ public final class Brain {
         self.store = store
         journal = Journal()
         vectors = MemoryVectors()
+        graph = MemoryGraph()
     }
 
     // MARK: Running
@@ -240,8 +243,11 @@ public final class Brain {
             let known = Set(hits.map(\.id))
             hits += store.upcoming(limit: 8).filter { !known.contains($0.id) }
         }
-        // What screen memory adds: open loops, what you did, what you saw (when the command is about them).
-        var extra = Recall.context(journal, for: utterance)
+        // What screen memory adds: what's certain (a flight, a release) and what you did, then open loops, what you
+        // did, what you saw (when the command is about them).
+        var extra = MemoryRecall.isAboutTheUsersWork(utterance)
+            ? MemoryRecall.lines(for: utterance, graph: graph, brain: store, vectors: vectors, vector: vector, limit: 6) : []
+        extra += Recall.context(journal, for: utterance)
         let related = search.related(vector)
         extra += related.loops.prefix(3).map { "- Open loop (\($0.label.lowercased())): \(Nudges.describe($0, now: Date()))" }
         extra += related.chronicle.map { "- \($0)" }
@@ -274,6 +280,9 @@ public final class Brain {
         let vector = LocalReader.embedderInstalled ? await LocalReader.embed([query], query: true)?.first : nil
         let search = self.search
         let hits = search.memories(query, vector: vector, limit: 20)
+        // From the top down: what's certain from the windows, the episodes of work, how things connect; then promises,
+        // summaries and windows.
+        let structure = MemoryRecall.lines(for: query, graph: graph, brain: store, vectors: vectors, vector: vector)
         var extra = Recall.answer(journal, for: query)
         let related = search.related(vector)
         extra += related.loops.map { "- \($0.label): \(Nudges.describe($0, now: Date())) [open loop]" }
@@ -282,9 +291,9 @@ public final class Brain {
         var unique: [String] = []
         for line in extra where !unique.contains(line) { unique.append(line) }
         extra = unique
-        guard !hits.isEmpty || !extra.isEmpty else { return "Nothing in Murmur's memory about \"\(query)\"." }
+        guard !hits.isEmpty || !extra.isEmpty || !structure.isEmpty else { return "Nothing in Murmur's memory about \"\(query)\"." }
         store.used(hits.map(\.id))
-        return (hits.map { hit in
+        return (structure + hits.map { hit in
             let sure = hit.memory.pinned ? "told by the user" : hit.memory.confidence >= 0.9 ? "certain" : "likely"
             let when = hit.memory.confirmed.formatted(.dateTime.day().month(.abbreviated).year())
             return "- \(hit.memory.text) [about \(hit.about); from \(hit.memory.origin.display), \(when); \(sure)]"

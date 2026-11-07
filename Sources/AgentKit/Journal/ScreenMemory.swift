@@ -23,8 +23,15 @@ public final class ScreenMemory {
 
     init() {}
 
+    /// Whether macOS lets Murmur show notifications (nil until it's known). Off, the brief still shows in Memory.
+    public private(set) var notificationsAllowed: Bool?
+
     public func start() {
-        if settings.enabled { launch() }
+        if settings.enabled {
+            launch()
+            // Asked once; nothing happens if it was answered before.
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         poll?.invalidate()
         poll = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.showNudges() }
@@ -52,14 +59,21 @@ public final class ScreenMemory {
         var next = settings
         change(&next)
         let newlyExcluded = Set(next.rules.excluded).subtracting(settings.rules.excluded)
+        let readerChanged = next.cloudReader != settings.cloudReader
         settings = next
         settings.save()   // the helper reads it within a minute
-        for app in newlyExcluded { journal.forget(app: app) }
+        // Reading with Claude or OpenAI turned on or off: the helper starts again with (or without) the key.
+        if readerChanged, settings.enabled, helper != nil { restart() }
+        for app in newlyExcluded {
+            journal.forget(app: app)
+            Brain.shared.graph.forget(app: app)
+        }
     }
 
     /// Forgets everything screen memory kept (snapshots, time, loops, chronicle) and what it taught the memory.
     public func forgetAll() {
         journal.forgetAll()
+        Brain.shared.graph.forgetAll()
         Brain.shared.store.forget(origin: .screen)
     }
 
@@ -76,12 +90,32 @@ public final class ScreenMemory {
         process.executableURL = url
         process.qualityOfService = .background
         process.standardOutput = FileHandle.nullDevice
+        // Reading with Claude or OpenAI: the helper gets the key on its standard input (it can't read Murmur's
+        // Keychain items itself), never in its arguments or environment.
+        var handoff: String?
+        if let provider = settings.cloudReader, let choice = RouterChoice(rawValue: provider), let account = choice.keyAccount,
+           let key = Keychain.get(account) {
+            handoff = CloudReader.handoff(anthropic: choice == .anthropic ? key : nil, anthropicModel: AnthropicRouter.model,
+                                          workspace: AnthropicWorkspace.id, openai: choice == .openai ? key : nil,
+                                          openaiModel: OpenAIRouter.model)
+        }
+        let input = Pipe()
+        if handoff != nil {
+            var environment = ProcessInfo.processInfo.environment
+            environment["MURMUR_KEYS_ON_STDIN"] = "1"
+            process.environment = environment
+            process.standardInput = input
+        }
         process.terminationHandler = { [weak self] ended in
-            let status = ended.terminationStatus
-            Task { @MainActor in self?.ended(status) }
+            let status = ended.terminationStatus, pid = ended.processIdentifier
+            Task { @MainActor in self?.ended(status, pid: pid) }
         }
         do {
             try process.run()
+            if let handoff {
+                input.fileHandleForWriting.write(Data((handoff + "\n").utf8))
+                try? input.fileHandleForWriting.close()
+            }
             helper = process
             running = true
             stopping = false
@@ -97,7 +131,19 @@ public final class ScreenMemory {
         running = false
     }
 
-    private func ended(_ status: Int32) {
+    /// The helper again, now (its settings changed in a way it reads only when it starts).
+    private func restart() {
+        let old = helper
+        stopping = true
+        helper = nil
+        old?.terminate()
+        stopping = false
+        launch()
+    }
+
+    private func ended(_ status: Int32, pid: Int32) {
+        // One that was replaced (restarted) ending: the new one carries on.
+        if let helper, helper.processIdentifier != pid { return }
         running = false
         helper = nil
         guard !stopping, settings.enabled else { return }
@@ -116,15 +162,25 @@ public final class ScreenMemory {
 
     // MARK: Nudges
 
+    /// Shows what the helper wrote as notifications, once macOS allows them. Until then they stay unseen (and the
+    /// Memory page shows today's brief), so turning notifications on later still brings the next one.
     private func showNudges() {
-        for nudge in journal.unseenNudges() {
-            let content = UNMutableNotificationContent()
-            content.title = nudge.title
-            content.body = nudge.body
-            content.threadIdentifier = "murmur.\(nudge.kind)"
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: nudge.key, content: content, trigger: nil))
-            journal.seen(nudge: nudge.key)
-        }
         Brain.shared.journalChanged()
+        let waiting = journal.unseenNudges()
+        let journal = self.journal
+        let memory = self
+        UNUserNotificationCenter.current().getNotificationSettings { notifications in
+            let allowed = notifications.authorizationStatus == .authorized || notifications.authorizationStatus == .provisional
+            Task { @MainActor in memory.notificationsAllowed = allowed }
+            guard allowed else { return }
+            for nudge in waiting {
+                let content = UNMutableNotificationContent()
+                content.title = nudge.title
+                content.body = nudge.body
+                content.threadIdentifier = "murmur.\(nudge.kind)"
+                UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: nudge.key, content: content, trigger: nil))
+                journal.seen(nudge: nudge.key)
+            }
+        }
     }
 }

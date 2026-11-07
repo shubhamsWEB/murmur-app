@@ -5,7 +5,7 @@ import Foundation
 /// within the next few hours. Written by the screen-memory helper; shown by the app as notifications.
 public enum Nudges {
     /// The facts a brief is made of, gathered without the model.
-    public static func briefFacts(journal: Journal, brain: BrainStore, now: Date = Date(),
+    public static func briefFacts(journal: Journal, brain: BrainStore, graph: MemoryGraph? = nil, now: Date = Date(),
                                   calendar: Calendar = .current) -> String {
         var lines: [String] = []
         let endOfDay = calendar.dateInterval(of: .day, for: now)?.end ?? now.addingTimeInterval(86400)
@@ -18,18 +18,50 @@ public enum Nudges {
         if !waiting.isEmpty { lines.append("Waiting on others: " + waiting.map(\.summary).joined(separator: "; ")) }
         let coming = brain.upcoming(limit: 12, now: now).filter { ($0.memory.expires ?? .distantFuture) < endOfDay.addingTimeInterval(3600) }
         if !coming.isEmpty { lines.append("Today: " + coming.map(\.memory.text).joined(separator: "; ")) }
+        // Flights and bookings today, exactly as their pages had them.
+        if let graph {
+            let today = graph.upcoming(now: now).filter { ($0.item.when ?? .distantFuture) < endOfDay.addingTimeInterval(6 * 3600) }
+            if !today.isEmpty { lines.append("Travel: " + today.map { $0.item.body.replacingOccurrences(of: "\n", with: ", ") }.joined(separator: "; ")) }
+        }
         let yesterday = Journal.Level.day.period(of: now.addingTimeInterval(-86400), calendar: calendar)
-        if let summary = journal.chronicle(.day, yesterday) { lines.append("Yesterday: \(summary)") }
+        if let summary = journal.chronicle(.day, yesterday) { lines.append("Yesterday: \(Consolidator.clean(summary))") }
+        // People: whose turn it is, who to follow up with, who you're waiting on (the most important first).
+        if let graph {
+            let open = graph.openThreads(now: now, limit: 8)
+            func who(_ thread: MemoryThread) -> String { thread.person + (thread.organization.isEmpty ? "" : " (\(thread.organization))") }
+            let turn = open.filter { $0.status == .yourTurn }.map { "\(who($0)): \($0.title)" }
+            let nudge = open.filter { $0.status == .nudge }.map { "\(who($0)): \($0.title), no reply since \($0.lastAt.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))" }
+            let waiting = open.filter { $0.status == .waiting }.prefix(4).map { "\(who($0)): \($0.title)" }
+            if !turn.isEmpty { lines.append("Your turn to reply: " + turn.joined(separator: "; ")) }
+            if !nudge.isEmpty { lines.append("Follow up today: " + nudge.joined(separator: "; ")) }
+            if !waiting.isEmpty { lines.append("Waiting on: " + waiting.joined(separator: "; ")) }
+        }
+        // Where you left off: the last real stretch of work before today.
+        if let graph, let last = graph.episodes(from: calendar.startOfDay(for: now).addingTimeInterval(-3 * 86400),
+                                                to: calendar.startOfDay(for: now))
+            .filter({ $0.seconds >= 10 * 60 && !$0.title.isEmpty }).last {
+            lines.append("Where you left off: \(last.title)" + (last.outcome.isEmpty ? "" : " (\(last.outcome))"))
+        }
         return lines.joined(separator: "\n")
     }
 
-    public static func wrapFacts(journal: Journal, now: Date = Date(), calendar: Calendar = .current) -> String {
+    public static func wrapFacts(journal: Journal, graph: MemoryGraph? = nil, now: Date = Date(),
+                                 calendar: Calendar = .current) -> String {
         var lines: [String] = []
         let today = Journal.Level.day.period(of: now, calendar: calendar)
-        let hours = journal.chronicles(.hour, within: today)
-        if !hours.isEmpty { lines.append("Your day: " + hours.map(\.summary).joined(separator: " ")) }
         let start = calendar.startOfDay(for: now)
-        let time = journal.time(from: start, to: now).prefix(5)
+        // What you did, a stretch of work at a time (five minutes or more), else the hours' summaries.
+        let worked = graph?.episodes(from: start, to: now).filter { $0.seconds >= 5 * 60 } ?? []
+        if !worked.isEmpty {
+            lines.append("What you did: " + worked.map { episode in
+                episode.name + " (\(minutes(episode.seconds))" + (episode.outcome.isEmpty ? "" : ", \(episode.outcome)") + ")"
+            }.joined(separator: "; "))
+        } else {
+            let hours = journal.chronicles(.hour, within: today)
+            if !hours.isEmpty { lines.append("Your day: " + hours.map(\.summary).joined(separator: " ")) }
+        }
+        // Apps and sites used for a minute or more (a glance at Finder isn't "time").
+        let time = journal.time(from: start, to: now).filter { $0.seconds >= 60 }.prefix(5)
         if !time.isEmpty {
             lines.append("Time: " + time.map { "\($0.name) \(minutes($0.seconds))" }.joined(separator: ", "))
         }
@@ -60,22 +92,32 @@ public enum Nudges {
     }
 
     /// Makes whichever nudges are due now. Without a model the brief is the facts themselves.
-    public static func make(journal: Journal, brain: BrainStore, settings: ScreenMemorySettings, model: String?,
-                            now: Date = Date(), calendar: Calendar = .current) async {
+    public static func make(journal: Journal, brain: BrainStore, graph: MemoryGraph? = nil, settings: ScreenMemorySettings,
+                            model: String?, now: Date = Date(), calendar: Calendar = .current) async {
         let day = Journal.Level.day.period(of: now, calendar: calendar)
-        // A brief only within three hours of its time: a Mac opened at night doesn't get the morning's.
+        // The brief from its time until the wrap-up's (or 17:00): a Mac first opened at noon still gets the day's,
+        // and one opened at night doesn't get the morning's.
+        let briefEnds = settings.wrap.isEmpty ? "17:00" : settings.wrap
         if !settings.brief.isEmpty, past(settings.brief, now: now, calendar: calendar),
-           !past(shifted(settings.brief, hours: 3), now: now, calendar: calendar), !journal.nudged("brief:\(day)") {
-            let facts = briefFacts(journal: journal, brain: brain, now: now, calendar: calendar)
+           !past(briefEnds, now: now, calendar: calendar), !journal.nudged("brief:\(day)") {
+            let facts = briefFacts(journal: journal, brain: brain, graph: graph, now: now, calendar: calendar)
             if !facts.isEmpty {
-                let body = await written(facts, "a morning brief: what's due today, what's on, and where they left off yesterday",
+                let morning = calendar.component(.hour, from: now) < 12
+                let body = await written(facts, "a brief for the day: what's due today, what's on, and where they left off yesterday",
                                          model: model)
-                journal.nudge("brief:\(day)", kind: "brief", title: "Your morning", body: body, now: now)
-                MemoryLog.write("wrote the morning brief")
+                journal.nudge("brief:\(day)", kind: "brief", title: morning ? "Your morning" : "Your day", body: body, now: now)
+                MemoryLog.write("wrote the brief for the day" + (model == nil ? " (from the facts, without the model)" : ""))
+            } else {
+                MemoryLog.write("no brief today: nothing due, nothing on, and no summary of yesterday yet")
+                journal.nudge("brief:\(day)", kind: "none", title: "", body: "", now: now)
+                journal.seen(nudge: "brief:\(day)", now: now)
             }
         }
         if !settings.wrap.isEmpty, past(settings.wrap, now: now, calendar: calendar), !journal.nudged("wrap:\(day)") {
-            let facts = wrapFacts(journal: journal, now: now, calendar: calendar)
+            let facts = wrapFacts(journal: journal, graph: graph, now: now, calendar: calendar)
+            if facts.isEmpty {
+                MemoryLog.write("no wrap-up today: nothing from today to sum up")
+            }
             if !facts.isEmpty {
                 let body = await written(facts, "an evening wrap-up: what they did today and what's still open for tomorrow",
                                          model: model)
@@ -109,7 +151,8 @@ public enum Nudges {
         guard let model else { return facts }
         let system = """
             Write \(what), for the user, from these facts. Three to five short sentences in the second person, warm and \
-            plain, the most important first. Use only the facts given. No headings or lists.
+            plain, the most important first. Use only the facts given: say what's there, never what isn't ("you didn't \
+            finish anything"), and never judge the day. Fewer facts, fewer sentences. No headings or lists.
             """
         let text = await Consolidator.chat(system, facts, schema: nil, model: model).map(Consolidator.clean) ?? ""
         return text.isEmpty ? facts : text

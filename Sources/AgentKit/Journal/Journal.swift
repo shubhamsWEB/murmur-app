@@ -13,8 +13,11 @@ import SQLite3
 /// - nudge: a brief or reminder Murmur showed, so each is shown once.
 public final class Journal: @unchecked Sendable {
     private let db: SQLiteConnection
+    /// The file it's kept in (brain.sqlite, with the living memory).
+    public let url: URL
 
     public init(url: URL = BrainStore.defaultURL) {
+        self.url = url
         db = SQLiteConnection(url: url)
         for statement in [
             """
@@ -65,7 +68,7 @@ public final class Journal: @unchecked Sendable {
         ] { db.exec(statement) }
         // Added later: each fails harmlessly once the column is there.
         for column in ["kind TEXT NOT NULL DEFAULT ''", "authored TEXT NOT NULL DEFAULT ''", "seen_as TEXT NOT NULL DEFAULT ''",
-                       "picture TEXT", "read_text TEXT NOT NULL DEFAULT ''"] {
+                       "picture TEXT", "read_text TEXT NOT NULL DEFAULT ''", "document TEXT"] {
             db.exec("ALTER TABLE snapshot ADD COLUMN \(column)")
         }
         db.exec("ALTER TABLE loop ADD COLUMN kind TEXT NOT NULL DEFAULT 'promised'")
@@ -86,9 +89,12 @@ public final class Journal: @unchecked Sendable {
         public var kind: String
         /// What the user sent from it since it was last read.
         public var authored: String
+        /// The file it shows, when the app says (a document, a source file).
+        public var document: String?
 
         public init(app: String, bundle: String, title: String, url: String? = nil, text: String, via: String = "text",
-                    labels: String = "", kind: String = "", authored: String = "") {
+                    labels: String = "", kind: String = "", authored: String = "", document: String? = nil) {
+            self.document = document
             self.app = app
             self.bundle = bundle
             self.title = title
@@ -128,6 +134,8 @@ public final class Journal: @unchecked Sendable {
         public var seenAs: String = ""
         /// Its text when the model last read it: next time only what's new is read.
         public var readText: String = ""
+        /// The file it shows, when the app says (a document, a source file).
+        public var document: String? = nil
     }
 
     /// Keeps what a window showed. The same content seen again (even after looking elsewhere) only counts the time;
@@ -162,10 +170,10 @@ public final class Journal: @unchecked Sendable {
             return (id, false)
         }
         let id = db.insert("""
-            INSERT INTO snapshot(app, bundle, title, url, domain, text, hash, via, labels, first, last, seconds, kind, authored)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO snapshot(app, bundle, title, url, domain, text, hash, via, labels, first, last, seconds, kind, authored, document)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [capture.app, capture.bundle, capture.title, capture.url, capture.domain, capture.text, hash, capture.via,
-                  capture.labels, at, at, seconds, capture.kind, capture.authored])
+                  capture.labels, at, at, seconds, capture.kind, capture.authored, capture.document])
         return (id, true)
     }
 
@@ -195,7 +203,7 @@ public final class Journal: @unchecked Sendable {
     public func waiting(limit: Int = 8) -> (count: Int, windows: [Snapshot]) {
         let count = Int(db.rows("SELECT count(*) FROM snapshot WHERE consolidated = 0", []).first?.first ?? "") ?? 0
         let windows = db.rows("""
-            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text FROM snapshot
+            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text, document FROM snapshot
             WHERE consolidated = 0 ORDER BY last DESC LIMIT ?
             """, [limit]).compactMap(snapshot)
         return (count, windows)
@@ -204,7 +212,7 @@ public final class Journal: @unchecked Sendable {
     /// Snapshots not yet read into memories, settled (not seen for `settled` seconds), oldest first.
     public func pending(limit: Int = 40, settled: Double = 90, now: Date = Date()) -> [Snapshot] {
         db.rows("""
-            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text FROM snapshot
+            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text, document FROM snapshot
             WHERE consolidated = 0 AND last < ? AND (picture IS NULL OR seen_as != '' OR first < ?) ORDER BY first LIMIT ?
             """, [now.timeIntervalSince1970 - settled, now.timeIntervalSince1970 - 6 * 3600, limit]).compactMap(snapshot)
     }
@@ -229,9 +237,9 @@ public final class Journal: @unchecked Sendable {
     /// Windows with a picture the vision model hasn't seen, those you spent longest in first.
     public func waitingPictures(limit: Int = 10) -> [(snapshot: Snapshot, path: String)] {
         db.rows("""
-            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text, picture
+            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text, document, picture
             FROM snapshot WHERE picture IS NOT NULL AND seen_as = '' ORDER BY seconds DESC LIMIT ?
-            """, [limit]).compactMap { row in snapshot(row).map { ($0, row[14]) } }
+            """, [limit]).compactMap { row in snapshot(row).map { ($0, row[15]) } }
     }
 
     /// What the vision model made of a window; its picture goes.
@@ -270,6 +278,14 @@ public final class Journal: @unchecked Sendable {
         }
     }
 
+    /// Open loops that match, gone. How many.
+    @discardableResult
+    public func forgetLoops(where matches: (Loop) -> Bool) -> Int {
+        let gone = loops(status: "open", limit: 1000).filter(matches)
+        for loop in gone { db.exec("DELETE FROM loop WHERE id = ?", [loop.id]) }
+        return gone.count
+    }
+
     public func forgetScreenLoops() {
         db.exec("DELETE FROM loop WHERE origin = 'screen'")
         db.exec("DELETE FROM vector WHERE kind = 'loop' AND ref NOT IN (SELECT id FROM loop)")
@@ -295,7 +311,7 @@ public final class Journal: @unchecked Sendable {
 
     public func snapshots(from: Date, to: Date, limit: Int = 400) -> [Snapshot] {
         db.rows("""
-            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text FROM snapshot
+            SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text, document FROM snapshot
             WHERE last >= ? AND first < ? ORDER BY first LIMIT ?
             """, [from.timeIntervalSince1970, to.timeIntervalSince1970, limit]).compactMap(snapshot)
     }
@@ -305,7 +321,7 @@ public final class Journal: @unchecked Sendable {
         let words = BrainModel.keywords(query).filter { $0.count > 2 }.map { "\"\($0.replacingOccurrences(of: "\"", with: ""))\"*" }
         guard !words.isEmpty else { return [] }
         return db.rows("""
-            SELECT s.id, s.app, s.title, s.url, s.domain, s.text, s.first, s.last, s.seconds, s.sightings, s.kind, s.authored, s.seen_as, s.read_text
+            SELECT s.id, s.app, s.title, s.url, s.domain, s.text, s.first, s.last, s.seconds, s.sightings, s.kind, s.authored, s.seen_as, s.read_text, s.document
             FROM snapshot_fts f JOIN snapshot s ON s.id = f.rowid WHERE snapshot_fts MATCH ?
             ORDER BY bm25(snapshot_fts) LIMIT ?
             """, [words.joined(separator: " OR "), limit]).compactMap(snapshot)
@@ -318,7 +334,8 @@ public final class Journal: @unchecked Sendable {
                         last: Date(timeIntervalSince1970: Double(row[7]) ?? 0), seconds: Double(row[8]) ?? 0,
                         sightings: Int(row[9]) ?? 1, kind: row.count > 10 ? row[10] : "",
                         authored: row.count > 11 ? row[11] : "", seenAs: row.count > 12 ? row[12] : "",
-                        readText: row.count > 13 ? row[13] : "")
+                        readText: row.count > 13 ? row[13] : "",
+                        document: row.count > 14 && !row[14].isEmpty ? row[14] : nil)
     }
 
     /// Forgets snapshots older than `days` (their memories, loops and chronicle stay), and the ledger after a year.
@@ -535,7 +552,7 @@ public final class Journal: @unchecked Sendable {
     }
 
     public func snapshot(id: Int64) -> Snapshot? {
-        db.rows("SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text FROM snapshot WHERE id = ?", [id])
+        db.rows("SELECT id, app, title, url, domain, text, first, last, seconds, sightings, kind, authored, seen_as, read_text, document FROM snapshot WHERE id = ?", [id])
             .first.flatMap(snapshot)
     }
 
@@ -560,7 +577,8 @@ public final class Journal: @unchecked Sendable {
 
     /// Nudges not shown yet (the app shows them, then marks them seen).
     public func unseenNudges() -> [(key: String, kind: String, title: String, body: String)] {
-        db.rows("SELECT key, kind, title, body FROM nudge WHERE seen IS NULL ORDER BY created", []).map { ($0[0], $0[1], $0[2], $0[3]) }
+        db.rows("SELECT key, kind, title, body FROM nudge WHERE seen IS NULL AND kind != 'none' ORDER BY created", [])
+            .map { ($0[0], $0[1], $0[2], $0[3]) }
     }
 
     public func seen(nudge key: String, now: Date = Date()) {
@@ -568,7 +586,7 @@ public final class Journal: @unchecked Sendable {
     }
 
     public func latestNudges(limit: Int = 10) -> [(kind: String, title: String, body: String, created: Date)] {
-        db.rows("SELECT kind, title, body, created FROM nudge ORDER BY created DESC LIMIT ?", [limit]).map {
+        db.rows("SELECT kind, title, body, created FROM nudge WHERE kind != 'none' ORDER BY created DESC LIMIT ?", [limit]).map {
             ($0[0], $0[1], $0[2], Date(timeIntervalSince1970: Double($0[3]) ?? 0))
         }
     }

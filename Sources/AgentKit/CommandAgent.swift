@@ -436,6 +436,12 @@ public final class CommandAgent {
             host.progress(summary)
             return
         }
+        // A question about the user's own world, "forget …", or the brief: from memory, before the agent and its
+        // tools (MemoryRoute). What memory can't answer goes on to the agent as before.
+        if selection?.isEmpty ?? true, let memoryRoute = MemoryRoute.classify(utterance), await fromMemory(memoryRoute) {
+            host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
+            return
+        }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
         clearIfFinished()
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
@@ -670,6 +676,69 @@ public final class CommandAgent {
         }
     }
 
+    // MARK: - From memory
+
+    /// MemoryRoute's requests. False: memory can't do it, and the agent takes the request as before.
+    private func fromMemory(_ kind: MemoryRoute) async -> Bool {
+        let brain = Brain.shared
+        switch kind {
+        case .forget:
+            let named = brain.store.entities(namedIn: utterance)
+            guard !named.isEmpty else { return false }
+            for row in named { brain.forget(entity: row.id) }
+            let names = named.map(\.name)
+            host.log("command: memory route → forgot \(names.joined(separator: ", "))")
+            let list = names.count == 1 ? names[0] : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+            host.showAnswer("Forgot \(list), and everything Murmur knew about \(names.count == 1 ? "it" : "them").")
+            return true
+        case .brief(let evening):
+            let journal = ScreenMemory.shared.journal
+            let facts = evening ? Nudges.wrapFacts(journal: journal, graph: brain.graph)
+                : Nudges.briefFacts(journal: journal, brain: brain.store, graph: brain.graph)
+            host.log("command: memory route → the \(evening ? "wrap-up" : "brief") (\(facts.split(separator: "\n").count) facts)")
+            guard !facts.isEmpty else {
+                host.showAnswer(evening ? "Nothing from today to sum up yet."
+                                : "Nothing due today, nothing on your calendar, and no summary of yesterday yet.")
+                return true
+            }
+            host.progress(evening ? "Writing your wrap-up…" : "Writing your brief…")
+            let text = await Nudges.written(facts, evening
+                ? "an evening wrap-up: what they did today and what's still open for tomorrow"
+                : "a brief for the day: what's due today, what's on, and where they left off yesterday",
+                model: await BrainDistiller.model())
+            host.showAnswer(text)
+            return true
+        case .question:
+            // What was seen answers it exactly (a flight, a release, a day's work): at once, no model.
+            let started = Date()
+            if let direct = MemoryRecall.directAnswer(utterance, graph: brain.graph) {
+                host.log("command: memory route → answered from what was seen, no model, in "
+                         + String(format: "%.0f ms", Date().timeIntervalSince(started) * 1000))
+                host.showAnswer(direct)
+                return true
+            }
+            host.progress("Looking in your memory…")
+            let found = await brain.ask(utterance)
+            let looked = Date()
+            guard !found.hasPrefix("Nothing in Murmur's memory") else {
+                host.log("command: memory route → nothing in memory; the agent takes it")
+                return false
+            }
+            let router = currentRouter()
+            let reply = try? await router.chat(system: MemoryRoute.answerPrompt(user: brain.store.meNames()),
+                                               turns: [.user(MemoryRoute.answerRequest(utterance, memory: String(found.prefix(6000))))],
+                                               tools: [])
+            guard let answer = reply.flatMap({ MemoryRoute.answer(from: $0.text) }) else {
+                host.log("command: memory route → memory doesn't cover it; the agent takes it")
+                return false
+            }
+            host.log("command: memory route → answered from \(found.split(separator: "\n").count) notes in memory (looking "
+                     + String(format: "%.1f s, answering %.1f s)", looked.timeIntervalSince(started), Date().timeIntervalSince(looked)))
+            host.showAnswer(answer)
+            return true
+        }
+    }
+
     // MARK: - Router loop
 
     /// The router for this command: the cloud model you chose, else the local one.
@@ -755,6 +824,7 @@ public final class CommandAgent {
         var didMoreThanOpen = false
         var checksBeforeDone = 0
         var planChecks = 0
+        var failedReplyChecks = 0
         var nudgedForTools = false
         let hasMoreSteps = Self.hasMoreThanOneStep(utterance)
         let wantsAnswer = Self.asksForInformation(utterance)
@@ -927,6 +997,17 @@ public final class CommandAgent {
                     }
                     turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
                     finishedNow = true
+                    continue
+                }
+                // A reply after a step that failed in this same response ("Unknown tool", "Couldn't…") would report
+                // it as done: the model sees the failure first.
+                if call.name == "reply", failedReplyChecks < 2,
+                   let failed = stepLog.last(where: { TaskHealth.isFailure($0.result) }) {
+                    failedReplyChecks += 1
+                    host.log("command: reply right after \(failed.tool) failed; showing the model the failure first")
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Not shown: \(failed.tool) didn't work (\(failed.result.prefix(200))). Do it another way, or "
+                        + "reply saying plainly that it didn't work. Never say it was done."))
                     continue
                 }
                 // reply ends the command, so a reply with more steps after it in the same response is a progress
@@ -1948,7 +2029,7 @@ public final class CommandAgent {
             host.log("command: read_skill_file \(text("name"))/\(text("file"))")
             return Outcome(result: SkillLibrary.shared.read(text("name"), file: text("file")))
         default:
-            return Outcome(result: "Unknown tool \(tool).")
+            return Outcome(result: Self.unknown(tool, arguments: args.mapValues(\.description)))
         }
     }
 
@@ -2541,8 +2622,13 @@ public final class CommandAgent {
             (nil, "- The user's own documents (\"my resume\", \"my Aadhaar card\", \"my PAN card\", \"my passport\"): open_file "
                 + "with what the document is (\"Aadhaar card\", \"PAN card\"), not the user's name: a name matches every "
                 + "file about them. When the matches come back, pick the user's own one (their name in it helps tell)."),
-            (.memory, "- Memory: the latest commands and what's in play are below. For anything further back (\"what did I send "
-                + "Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall."),
+            (.memory, "- The user's own world (their work, projects, releases, people, plans, promises, what they did: \"what did "
+                + "we ship in the last release\", \"when is my flight\", \"who is Arjun\", \"what did I promise Priya\"): "
+                + "call ask_memory and answer from what it returns. Never web_search or open a browser for these: what "
+                + "the web says about a name isn't the user's project. If ask_memory has nothing, say so."),
+            (.memory, "- Memory: the latest commands and what's in play are below. For an earlier command to Murmur (\"what did I "
+                + "send Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall. "
+                + "recall is only Murmur's own past commands; everything else the user knows is ask_memory."),
             (nil, "- Follow-ups: a request that continues an earlier command (listed below) uses its person, app, file or "
                 + "page. \"And also ask when she's coming back\" after messaging Roma on WhatsApp → send_message to Roma "
                 + "on WhatsApp with that question; \"play it\" after opening a video → play that video; \"do it again\" → "
@@ -2612,6 +2698,24 @@ public final class CommandAgent {
     }
 
     /// The first message to Murmur's own model: the request's context, then what was said.
+    /// "Unknown tool memory": with the tools it probably meant, so the next step uses one ("memory" with "forget" in
+    /// it was forget_fact).
+    static func unknown(_ tool: String, arguments: [String: String]) -> String {
+        let said = (tool + " " + arguments.values.joined(separator: " ")).lowercased()
+        var meant: [String] = []
+        if said.contains("forget") || said.contains("delete") || said.contains("remove") { meant.append("forget_fact") }
+        if said.contains("remember") || said.contains("save") { meant.append("remember") }
+        if tool.lowercased().contains("memory") || said.contains("know") { meant.append("ask_memory") }
+        let names = tools(helpers: []).map(\.name)
+        meant += names.filter { name in
+            let a = tool.lowercased(), b = name.lowercased()
+            return a.count >= 4 && (b.contains(a) || a.contains(b))
+        }
+        var unique: [String] = []
+        for name in meant where !unique.contains(name) && names.contains(name) { unique.append(name) }
+        return "Unknown tool \(tool): nothing was done." + (unique.isEmpty ? "" : " Did you mean \(unique.prefix(3).joined(separator: " or "))?")
+    }
+
     static func compactRequest(_ utterance: String, context: String) -> String {
         "\(context)\n\nCommand: \(utterance)"
     }
@@ -2768,10 +2872,11 @@ public final class CommandAgent {
                  + "numbers, birthdays, when the user last met them), organizations, projects, what's coming up and what "
                  + "the user has to do. Learned from Contacts, Calendar, Reminders, Notes and Mail. Use it for \"who is…\", "
                  + "\"when did I…\", \"what do you know about…\", what the user promised or is waiting on, what they "
-                 + "worked on (by hour, day, month), and windows they saw, and before writing to someone",
+                 + "worked on (by hour, day, month), what they built, released or shipped, and windows they saw, and "
+                 + "before writing to someone. Learned also from the windows the user works in",
                  ["query": ("string", "a name, project or topic, or the question in a few words")], required: ["query"]),
-            tool("recall", "Look back through earlier commands and what they did (who was messaged and what, files and "
-                 + "pages opened, answers given)",
+            tool("recall", "Look back through earlier commands the user gave Murmur and what they did (who was messaged "
+                 + "and what, files and pages opened, answers given). Not the user's work or projects: that's ask_memory",
                  ["query": ("string", "words to find: a person, file, site or topic; empty for everything recent"),
                   "kind": ("string", "message, file, web, media, calendar, write, code, app, setting, answer, or any"),
                   "days": ("number", "how far back, in days (default 30)")], required: ["query"]),

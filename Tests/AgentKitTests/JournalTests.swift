@@ -191,6 +191,39 @@ struct NudgeTests {
         #expect(!journal.nudged("brief:2026-11-06"))
     }
 
+    /// 2026-11-06: the Mac first used at 12:45, and no brief, because it only went out until noon.
+    @Test func aMacFirstUsedAfterNoonStillGetsTheDaysBrief() async {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("nudge-\(UUID().uuidString).sqlite")
+        let journal = Journal(url: file), brain = BrainStore(url: file)
+        var parts = DateComponents()
+        (parts.year, parts.month, parts.day, parts.hour, parts.minute) = (2026, 11, 6, 12, 45)
+        let noon = Calendar.current.date(from: parts)!
+        journal.take([Journal.Promise(summary: "Web check-in opens for the Raipur flight", due: noon.addingTimeInterval(3600 * 30),
+                                      kind: "plan")], evidence: [], now: noon)
+        journal.setChronicle(.day, Journal.Level.day.period(of: noon.addingTimeInterval(-86400)),
+                          "Shipped Murmur 1.6 and booked the Raipur flight.", now: noon)
+        var settings = ScreenMemorySettings()
+        settings.enabled = true
+        await Nudges.make(journal: journal, brain: brain, settings: settings, model: nil, now: noon)
+        let brief = journal.unseenNudges().first { $0.kind == "brief" }
+        #expect(brief?.title == "Your day")
+        #expect(brief?.body.contains("Shipped Murmur 1.6") == true)
+        // Nothing to say at all is noted, so it isn't tried every minute, and isn't shown.
+        let empty = Journal(url: FileManager.default.temporaryDirectory.appendingPathComponent("nudge-\(UUID().uuidString).sqlite"))
+        await Nudges.make(journal: empty, brain: brain, settings: settings, model: nil, now: noon)
+        #expect(empty.nudged("brief:2026-11-06") && empty.unseenNudges().isEmpty && empty.latestNudges().isEmpty)
+    }
+
+    /// 2026-11-05's wrap-up: "You didn't complete anything today since Finder shows 0 minutes."
+    @Test func aGlanceIsNotTime() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("nudge-\(UUID().uuidString).sqlite")
+        let journal = Journal(url: file)
+        let now = Date()
+        _ = journal.record(Journal.Capture(app: "Finder", bundle: "com.apple.finder", title: "Downloads", url: nil,
+                                           text: "Downloads"), now: now.addingTimeInterval(-20))
+        #expect(!Nudges.wrapFacts(journal: journal, now: now).contains("Finder"))
+    }
+
     @Test func readingHours() {
         var settings = ScreenMemorySettings()
         settings.enabled = true
@@ -236,7 +269,7 @@ struct MemoryServerTests {
         #expect((hello?["result"] as? [String: Any])?["protocolVersion"] as? String == "2025-06-18")
         #expect(server.handle(["jsonrpc": "2.0", "method": "notifications/initialized"]) == nil)
         let list = server.handle(["jsonrpc": "2.0", "id": 2, "method": "tools/list"])
-        #expect(((list?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.count == 6)
+        #expect(((list?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.count == 7)
         func call(_ name: String, _ arguments: [String: Any]) -> String {
             let reply = server.handle(["jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["name": name, "arguments": arguments]])
             return (((reply?["result"] as? [String: Any])?["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""

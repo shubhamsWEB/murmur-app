@@ -89,6 +89,9 @@ final class AppController {
         dictation.onOpenModelSettings = { [weak self] in self?.showHome(.commands) }
         dictation.onOpenSpeechSettings = { [weak self] in self?.showHome(.dictation) }
         dictation.onOpenApp = { [weak self] in self?.showHome() }
+        // While you speak, Murmur's memory search wakes up (it sleeps after five minutes with nothing to do), so a
+        // command's memory is looked up by meaning and not only by its words.
+        dictation.onListening = { LocalReader.warm() }
         // One download at a time, the speech model first: together both crawled.
         // A speech download reports "preparing" between its files for a moment: the search model resumes only after
         // three quiet seconds, so it doesn't stop and start with every file.

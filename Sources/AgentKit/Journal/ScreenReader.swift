@@ -36,7 +36,7 @@ public enum ScreenReader {
         }
         let lower = title.lowercased()
         if privateWindow.contains(where: lower.contains) { return "private window" }
-        if IsSecureEventInputEnabled() { return "a password is being typed" }
+        if SecureInput.passwordFocused() { return "a password is being typed" }
         return nil
     }
 
@@ -51,10 +51,13 @@ public enum ScreenReader {
         guard let window: AXUIElement = attribute(element, kAXFocusedWindowAttribute) else { return nil }
         let title: String = attribute(window, kAXTitleAttribute) ?? ""
         let url = browsers.contains(bundle) ? pageAddress(in: window) : nil
+        // The file it shows, when the app says (a document, a source file): what it's part of comes from its folder.
+        let document = browsers.contains(bundle) ? nil
+            : (attribute(window, kAXDocumentAttribute) as String?).flatMap(ScreenText.documentPath)
         let domain = Journal.Capture(app: "", bundle: "", title: "", url: url, text: "").domain
         guard skip(bundle: bundle, title: title, domain: domain, rules: rules) == nil else { return nil }
         let name = app.localizedName ?? bundle
-        var text = Self.text(of: window)
+        var text = ScreenText.clean(Self.text(of: window))
         var via = "text", labels = ""
         // Little text to go on: a picture of the window, read on this Mac.
         if words(text) < 25, rules.pictures, let read = await picture(of: app, accurate: plugged) {
@@ -67,7 +70,7 @@ public enum ScreenReader {
         guard words(text) >= 5 || !labels.isEmpty else { return nil }
         let kind = WindowKind.of(app: name, domain: domain, url: url, title: title, text: text)
         let capture = Journal.Capture(app: name, bundle: bundle, title: title, url: url, text: String(text.prefix(16_000)),
-                                      via: via, labels: labels, kind: kind.rawValue)
+                                      via: via, labels: labels, kind: kind.rawValue, document: document)
         return (capture, rules.authored ? draft(in: element) : "")
     }
 
@@ -97,6 +100,18 @@ public enum ScreenReader {
         guard let image = try? await SCScreenshotManager.captureImage(
             contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration) else { return nil }
         return NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.6])
+    }
+
+    /// Whether an app still has a window of this title ("Mail|Re: the deck"): a compose window that's gone was sent.
+    @MainActor
+    static func windowExists(_ key: String) -> Bool {
+        let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == parts[0] }) else { return false }
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.3)
+        let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
+        return windows.contains { (attribute($0, kAXTitleAttribute) as String?) == parts[1] }
     }
 
     /// What's in the focused text box of the front app, alone (a glance, not a read of the window).

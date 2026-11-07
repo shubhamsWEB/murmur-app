@@ -86,6 +86,7 @@ let appTargets: [Target] = [
     .executableTarget(name: "MurmurMemory", dependencies: ["AgentKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
     // Opening a file by what was said: real requests from the log, so a fix can't quietly come undone.
     .testTarget(name: "AgentKitTests", dependencies: ["AgentKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
+    .testTarget(name: "VoiceKitTests", dependencies: ["VoiceKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
 ]
 #else
 let appProducts: [Product] = []

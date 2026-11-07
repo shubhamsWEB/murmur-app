@@ -12,6 +12,11 @@ import MurmurObjC
 /// before. Another microphone gets a fresh engine pointed at it before anything reads its format, the tap uses the
 /// format the hardware reports, and if AVFoundation still objects (it raises an Objective-C exception, which would
 /// quit the app) the recording falls back to the default microphone.
+///
+/// Clear voice (on unless turned off): the microphone goes through macOS's voice processing, as FaceTime's does. It
+/// takes out steady background noise and the Mac's own speakers' sound, and evens out the level, before Murmur hears
+/// anything. Other sound playing on the Mac is turned down as little as macOS allows. If a microphone can't do it,
+/// that recording (and the rest of the session, for that microphone) is made without it, as before.
 public final class MicRecorder: @unchecked Sendable {
     private var engine = AVAudioEngine()
     /// The microphone the engine was pointed at (nil: the system default, nothing set).
@@ -32,7 +37,17 @@ public final class MicRecorder: @unchecked Sendable {
     /// here, off the main thread, and stopping waits for it in order.
     private let queue = DispatchQueue(label: "murmur.microphone", qos: .userInteractive)
 
-    private var settings = (chosenUID: String?.none, preferBuiltIn: true)
+    private var settings = (chosenUID: String?.none, preferBuiltIn: true, clearVoice: true)
+    /// Microphones voice processing didn't work with this session (their UID, or "default").
+    private var clearVoiceFailed: Set<String> = []
+    /// Whether the last recording went through voice processing.
+    public var cleaned: Bool { lock.withLock { lastCleaned } }
+    private var lastCleaned = false
+    /// macOS's voice processing on the microphone (noise, echo and level), when it works.
+    public var clearVoice: Bool {
+        get { lock.withLock { settings.clearVoice } }
+        set { lock.withLock { settings.clearVoice = newValue } }
+    }
     /// The microphone picked in Settings (its Core Audio UID); nil chooses automatically.
     public var chosenUID: String? {
         get { lock.withLock { settings.chosenUID } }
@@ -73,6 +88,12 @@ public final class MicRecorder: @unchecked Sendable {
         public let device: AudioDevices.Input?
         /// The chosen microphone couldn't be used, so the default one was.
         public let fellBack: String?
+        /// The sound went through macOS's voice processing (Clear voice).
+        public var cleaned = false
+        /// Why Clear voice couldn't be used with this microphone, the first time it couldn't.
+        public var clearVoiceProblem: String?
+        /// The microphone's input level in System Settings › Sound, 0…1, when it has one.
+        public var inputVolume: Float?
     }
 
     /// Starts recording without holding up the caller. `done` runs on the main thread once audio is coming in, or
@@ -82,9 +103,13 @@ public final class MicRecorder: @unchecked Sendable {
             let started = Date()
             var failure: String?
             var fellBack: String?
+            clearVoiceProblem = nil
             do { fellBack = try startNow() } catch { failure = error.localizedDescription }
-            let result = Start(error: failure, took: Date().timeIntervalSince(started), device: device,
+            var result = Start(error: failure, took: Date().timeIntervalSince(started), device: device,
                                fellBack: fellBack)
+            result.cleaned = cleaned
+            result.clearVoiceProblem = clearVoiceProblem
+            result.inputVolume = device.flatMap { AudioDevices.inputVolume($0.id) }
             Task { @MainActor in done(result) }
         }
     }
@@ -103,21 +128,68 @@ public final class MicRecorder: @unchecked Sendable {
         if let wanted {
             do {
                 if engineUID == nil { try point(at: wanted) }
-                try startEngine(hardwareFormat: true)
+                try begin(hardwareFormat: true, key: wanted.uid, device: wanted)
                 lock.withLock { lastDevice = wanted }
                 return nil
             } catch {
                 // Back to the default microphone on a fresh engine, exactly as Murmur always recorded.
                 engine = AVAudioEngine()
                 engineUID = nil
-                try startEngine(hardwareFormat: false)
+                try begin(hardwareFormat: false, key: "default", device: nil)
                 lock.withLock { lastDevice = systemDefault }
                 return "\(wanted.name): \(error.localizedDescription)"
             }
         }
-        try startEngine(hardwareFormat: false)
+        try begin(hardwareFormat: false, key: "default", device: nil)
         lock.withLock { lastDevice = systemDefault }
         return nil
+    }
+
+    /// Why Clear voice didn't work this time (for the log), set by `begin`.
+    private var clearVoiceProblem: String?
+
+    /// Starts the engine with Clear voice when it's on and this microphone can do it; otherwise, or if it fails, on a
+    /// fresh engine without it.
+    private func begin(hardwareFormat: Bool, key: String, device: AudioDevices.Input?) throws {
+        let wanted = lock.withLock { settings.clearVoice && !clearVoiceFailed.contains(key) }
+        if wanted {
+            do {
+                try startEngine(hardwareFormat: hardwareFormat, voiceProcessing: true)
+                // Voice processing can move to the system's microphone: only kept when it's still the one chosen.
+                if let device, currentDevice() != device.id {
+                    _ = MurmurCatchException { [engine] in
+                        engine.inputNode.removeTap(onBus: 0)
+                        engine.stop()
+                    }
+                    running = false
+                    throw VoiceError.cantUse("\(device.name) with voice processing")
+                }
+                lock.withLock { lastCleaned = true }
+                return
+            } catch {
+                lock.withLock { _ = clearVoiceFailed.insert(key) }
+                clearVoiceProblem = error.localizedDescription
+                engine = AVAudioEngine()
+                engineUID = nil
+                if let device { try point(at: device) }
+            }
+        } else if engine.inputNode.isVoiceProcessingEnabled {
+            // Turned off since the engine was made: a fresh one, without it.
+            engine = AVAudioEngine()
+            engineUID = nil
+            if let device { try point(at: device) }
+        }
+        try startEngine(hardwareFormat: hardwareFormat, voiceProcessing: false)
+        lock.withLock { lastCleaned = false }
+    }
+
+    /// The microphone the engine's input is using now.
+    private func currentDevice() -> AudioDeviceID? {
+        guard let unit = engine.inputNode.audioUnit else { return nil }
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &id, &size)
+        return status == noErr ? id : nil
     }
 
     /// Points a fresh engine's input at a microphone, before anything reads its format.
@@ -133,14 +205,28 @@ public final class MicRecorder: @unchecked Sendable {
     /// `hardwareFormat`: tap in the format the microphone itself reports (after pointing the engine at another
     /// microphone, the node's output format can still be the old one's, and a mismatch is what AVFoundation objects
     /// to).
-    private func startEngine(hardwareFormat: Bool) throws {
+    private func startEngine(hardwareFormat: Bool, voiceProcessing: Bool) throws {
         let input = engine.inputNode
-        let format = hardwareFormat ? input.inputFormat(forBus: 0) : input.outputFormat(forBus: 0)
+        if voiceProcessing, !input.isVoiceProcessingEnabled {
+            var failure: Error?
+            let exception = MurmurCatchException {
+                do { try input.setVoiceProcessingEnabled(true) } catch { failure = error }
+            }
+            if let failure { throw failure }
+            if let exception { throw VoiceError.audioEngine(exception.reason ?? "voice processing") }
+            input.isVoiceProcessingAGCEnabled = true
+            // Music and calls playing on the Mac are turned down as little as macOS allows while you speak.
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+        }
+        // With voice processing the format is the processed one (the hardware's own would mismatch).
+        let format = hardwareFormat && !voiceProcessing ? input.inputFormat(forBus: 0) : input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw VoiceError.noMicrophone }
         lock.lock()
         samples.removeAll(keepingCapacity: true)
         sampleRate = format.sampleRate
-        channel = format.channelCount > 1 ? nil : -1
+        // Voice processing's voice is its first channel (it can report more, which are empty or unprocessed).
+        channel = voiceProcessing ? 0 : format.channelCount > 1 ? nil : -1
         lock.unlock()
         var tapError: NSException?
         tapError = MurmurCatchException {

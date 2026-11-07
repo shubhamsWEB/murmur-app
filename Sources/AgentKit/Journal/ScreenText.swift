@@ -45,4 +45,61 @@ public enum ScreenText {
         guard let line = text.split(separator: "\n").last(where: { $0.contains(start) }) else { return nil }
         return String(line.count >= draft.count ? line : Substring(draft)).trimmingCharacters(in: .whitespaces)
     }
+
+    /// The file a window shows, from its Accessibility "document" (a file:// address, percent-encoded): Cocoa document
+    /// apps (TextEdit, Pages, Preview, Xcode) say it; browsers' is a web page's address, not a file. The approach is
+    /// screenpipe's (MIT-licensed version; see THIRD_PARTY_NOTICES.md).
+    public static func documentPath(_ raw: String) -> String? {
+        guard raw.hasPrefix("file://") else { return nil }
+        if let url = URL(string: raw), url.isFileURL, !url.path.isEmpty { return url.path }
+        var rest = String(raw.dropFirst("file://".count))
+        if rest.hasPrefix("localhost/") { rest = String(rest.dropFirst("localhost".count)) }
+        return rest.removingPercentEncoding ?? rest
+    }
+
+    /// A browser's and a web app's own words, not the page's: Chrome's tab list ("Murmur - Memory usage - 378 MB"),
+    /// its buttons, Gmail's toolbar ("Reply", "Not starred", "Print all"), JSON a page leaves in its tree.
+    static let interfaceLines: Set<String> = [
+        "new tab", "tab search", "open gemini in chrome", "close", "none selected", "of", "print all", "in new window",
+        "not important", "important", "reply", "reply all", "forward", "add reaction", "not starred", "starred",
+        "show details", "hide details", "more", "archive", "delete", "report spam", "mark as unread", "snooze",
+        "move to", "labels", "older", "newer", "back to inbox", "select", "refresh", "more options", "settings",
+        "support", "google apps", "search mail", "show search options", "main menu", "compose", "inbox",
+        "snoozed", "sent", "drafts", "more labels", "expand all", "collapse all", "unread", "attachment",
+    ]
+
+    /// The window's text without what belongs to the browser or the app around the content, and with Google's redirect
+    /// addresses back to where they lead.
+    public static func clean(_ text: String) -> String {
+        var lines: [String] = []
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            let lower = line.lowercased()
+            if interfaceLines.contains(lower) { continue }
+            // Chrome's tab list and its memory badges.
+            if lower.range(of: #" - (high )?memory usage - [\d.,]+ ?[kmg]b$"#, options: .regularExpression) != nil { continue }
+            // JSON a page left in its accessibility tree; a link's tracking tail broken over lines.
+            if line.hasPrefix("{"), line.hasSuffix("}"), line.contains("\":") { continue }
+            if lower.range(of: #"^[\w./-]*&(source|ust|sa|usg)="#, options: .regularExpression) != nil
+                || lower.range(of: #"^\d{10,}&sa=e$"#, options: .regularExpression) != nil { continue }
+            lines.append(String(raw))
+        }
+        var result = lines.joined(separator: "\n")
+        // "https://www.google.com/url?q= http://thetrost.com&source= gmail&ust=…&sa= E" is thetrost.com.
+        result = result.replacingOccurrences(of: #"https?://www\.google\.com/url\?q=\s*(\S+?)&source=\s*\S+(?:&ust=\S*)?(?:&sa=\s*\S)?"#,
+                                             with: "$1", options: .regularExpression)
+        return result
+    }
+
+    /// A window's title without what the browser adds: "(6711) How to build… - YouTube – Audio playing - High memory
+    /// usage - 952 MB - Google Chrome – Shubham" is "How to build… - YouTube".
+    public static func cleanTitle(_ title: String) -> String {
+        var text = title
+        for pattern in [#"\s[-–]\s(Google Chrome|Brave|Microsoft Edge|Chromium|Arc|Safari|Firefox|Vivaldi|Opera)(\s[-–]\s.*)?$"#,
+                        #"\s[-–]\s(High )?[Mm]emory usage\s[-–]\s[\d.,]+\s?[KMG]B"#, #"\s[-–]\sAudio playing"#,
+                        #"\s[-–]\sCamera or microphone recording"#, #"^\(\d[\d,]*\)\s"#] {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        return text.trimmingCharacters(in: .whitespaces)
+    }
 }

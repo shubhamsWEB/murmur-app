@@ -946,7 +946,14 @@ private struct SettingsPage: View {
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
                 RowDivider()
-                SettingRow(title: "Quiet voice", detail: "Boosts soft speech, for open offices and late nights. Still on this Mac.") {
+                SettingRow(title: "Clear voice",
+                           detail: "Takes out background noise and echo at the microphone, as FaceTime does, and evens out your level. "
+                               + "Music playing on the Mac is barely turned down while you speak. Turn it off if a microphone sounds worse with it.") {
+                    MurmurSwitch(label: "Clear voice",
+                                 isOn: state.bind(get: { dictation.clearVoice }, set: { dictation.clearVoice = $0 }))
+                }
+                RowDivider()
+                SettingRow(title: "Quiet voice", detail: "Boosts soft speech more, for open offices and late nights. Still on this Mac.") {
                     MurmurSwitch(label: "Quiet voice",
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
@@ -1273,7 +1280,11 @@ private struct MemoryPage: View {
             screen
             if ScreenMemory.shared.settings.enabled { loopsAndToday }
             apps
-            if ScreenMemory.shared.settings.enabled { fromScreen }
+            if ScreenMemory.shared.settings.enabled {
+                threadsSection
+                workedOn
+                fromScreen
+            }
             known(total: counts.entities)
             lately
             list("You told Murmur", items: told,
@@ -1464,6 +1475,18 @@ private struct MemoryPage: View {
                     MurmurSwitch(label: "Pictures", isOn: Binding(get: { memory.settings.rules.pictures },
                                                                   set: { value in memory.update { $0.rules.pictures = value } }))
                 }
+                if let cloud = cloudReaderChoice {
+                    let name = cloud == .anthropic ? "Claude" : "OpenAI"
+                    RowDivider()
+                    SettingRow(title: "Read with \(name)",
+                               detail: "Faster, and while you work: each finished stretch of your work is read by \(name) with "
+                                   + "your API key, in seconds, instead of by the model on this Mac. Only the text of those "
+                                   + "windows goes, with passwords and codes taken out. Off, everything stays on this Mac.") {
+                        MurmurSwitch(label: "Read with \(name)",
+                                     isOn: Binding(get: { memory.settings.cloudReader == cloud.rawValue },
+                                                   set: { value in memory.update { $0.cloudReader = value ? cloud.rawValue : nil } }))
+                    }
+                }
                 RowDivider()
                 SettingRow(title: "Keep what you send",
                            detail: "Messages you send in Slack, Mail, WhatsApp and other conversations are kept as yours: "
@@ -1568,6 +1591,36 @@ private struct MemoryPage: View {
     private var loopsAndToday: some View {
         let journal = ScreenMemory.shared.journal
         let loops = journal.loops(limit: 20)
+        let start = Calendar.current.startOfDay(for: Date())
+        let todays = journal.latestNudges(limit: 12).filter { ($0.kind == "brief" || $0.kind == "wrap") && $0.created >= start }
+        if !todays.isEmpty || ScreenMemory.shared.notificationsAllowed == false {
+            SettingsSection("Your day") {
+                ForEach(Array(todays.reversed().enumerated()), id: \.offset) { index, nudge in
+                    if index > 0 { RowDivider() }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(nudge.title + " · " + nudge.created.formatted(date: .omitted, time: .shortened))
+                            .font(.system(size: 13.5, weight: .medium)).foregroundStyle(Theme.ink)
+                        Text(nudge.body).font(.system(size: 13)).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                }
+                if ScreenMemory.shared.notificationsAllowed == false {
+                    if !todays.isEmpty { RowDivider() }
+                    SettingRow(title: "Notifications are off for Murmur",
+                               detail: "The morning brief, the evening wrap-up and reminders show here until you allow them.") {
+                        Button("Open Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(.murmurSecondaryCompact)
+                    }
+                }
+            }
+        }
         SettingsSection("Open loops") {
             if loops.isEmpty {
                 note("Promises you make or are owed (“I’ll send it Friday”) show up here, and close themselves when "
@@ -1811,20 +1864,24 @@ private struct MemoryPage: View {
 
     // MARK: Lately
 
-    /// What's left to read: how many windows, what the reader is doing, and for the newest few, whether the model
-    /// will read them or they'll be kept only as seen (and why), with a way to read now.
+    /// Which cloud model could read screen memory: the one picked for commands when it has a key, else whichever has one.
+    private var cloudReaderChoice: RouterChoice? {
+        if RouterChoice.current != .local, RouterChoice.current.hasKey { return RouterChoice.current }
+        return [RouterChoice.anthropic, .openai].first { $0.hasKey }
+    }
+
+    /// What's left to read: how many episodes of work (each read once, as a whole), what the reader is doing, the
+    /// next few, and a way to read now.
     @ViewBuilder
     private var waitingToBeRead: some View {
-        let journal = ScreenMemory.shared.journal
-        let waiting = journal.waiting(limit: 8)
-        let store = brain.store
-        let plan = Triage.plan(waiting.windows, me: store.meNames(), known: { store.knownPeople(in: $0) })
-        let skipped = Dictionary(plan.skip.map { ($0.id, $0.why) }, uniquingKeysWith: { a, _ in a })
+        let graph = brain.graph
+        let count = graph.unreadCount()
+        let next = graph.unread(limit: 6)
         let status = MemoryLog.status()
         SettingsSection("Waiting to be read") {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(waiting.count == 0 ? "Everything is read" : waiting.count == 1 ? "1 window" : "\(waiting.count) windows")
+                    Text(count == 0 ? "Everything is read" : count == 1 ? "1 episode of your work" : "\(count) episodes of your work")
                         .font(.system(size: 13.5, weight: .medium)).foregroundStyle(Theme.ink)
                     if let status {
                         Text(status.text + ", " + status.at.formatted(.relative(presentation: .named)))
@@ -1834,31 +1891,100 @@ private struct MemoryPage: View {
                 Spacer(minLength: 8)
                 Button("Read Now") { MemoryLog.requestReading(); state.revision += 1 }
                     .buttonStyle(.murmurSecondaryCompact)
-                    .disabled(waiting.count == 0)
-                    .help("Read the waiting windows now instead of when you step away")
+                    .disabled(count == 0)
+                    .help("Read what you did now instead of when you step away")
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
-            ForEach(waiting.windows) { window in
+            ForEach(next) { episode in
                 RowDivider()
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(window.title.isEmpty ? window.app : window.title)
-                        .font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(1)
-                    Text([window.domain.isEmpty ? window.app : window.domain,
-                          window.last.formatted(.relative(presentation: .named)),
-                          skipped[window.id].map { "kept only as seen: \($0)" } ?? "will be read"]
-                        .joined(separator: ", "))
-                        .font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(1)
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 7)
+                episodeRow(episode)
             }
-            if waiting.count > waiting.windows.count {
+            if count > next.count {
                 RowDivider()
-                note("And \(waiting.count - waiting.windows.count) more. Windows you only browsed are kept as seen without the model; "
-                     + "conversations and your work are read first.")
+                note("And \(count - next.count) more. Each stretch of work is read once, as a whole, oldest first.")
             }
         }
+    }
+
+    /// Open business with people: whose turn it is, who to follow up with, who you're waiting on, most needed first.
+    private var threadsSection: some View {
+        let threads = brain.graph.openThreads(limit: 8)
+        return SettingsSection("People and replies") {
+            if threads.isEmpty {
+                note("Emails and messages you send show up here as threads: who it's with, what you asked, whose turn it is, "
+                     + "and when to follow up.")
+            } else {
+                ForEach(Array(threads.enumerated()), id: \.element.id) { index, thread in
+                    if index > 0 { RowDivider() }
+                    threadRow(thread)
+                }
+            }
+        }
+    }
+
+    private func threadRow(_ thread: MemoryThread) -> some View {
+        let who: String = thread.person + (thread.organization.isEmpty ? "" : ", \(thread.organization)")
+        let when: String = thread.lastAt.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+        let standing: String = thread.whose
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(who): \(thread.title)")
+                    .font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(1)
+                Text("\(standing), since \(when)")
+                    .font(.system(size: 11.5)).foregroundStyle(thread.status == .waiting ? Theme.ink3 : Theme.ink2).lineLimit(1)
+                if !thread.ask.isEmpty {
+                    Text(thread.ask)
+                        .font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 8)
+            Button("Done") { brain.graph.closeThread(thread.id); state.revision += 1 }
+                .buttonStyle(.murmurSecondaryCompact)
+                .help("Nothing more to do with this one")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+    }
+
+    /// What you did, an episode at a time: the latest ones, as the reader named them.
+    private var workedOn: some View {
+        let episodes = brain.graph.recentEpisodes(limit: showAllScreen ? 30 : 8)
+        return SettingsSection("What you worked on") {
+            if episodes.isEmpty {
+                note("Each stretch of your work (a project, a conversation, a booking) shows up here, with how long it took and how it ended.")
+            } else {
+                ForEach(Array(episodes.enumerated()), id: \.element.id) { index, episode in
+                    if index > 0 { RowDivider() }
+                    episodeRow(episode)
+                }
+            }
+        }
+    }
+
+    private func episodeRow(_ episode: MemoryGraph.StoredEpisode) -> some View {
+        let minutes = max(1, Int((episode.seconds / 60).rounded()))
+        let length = minutes < 60 ? "\(minutes) min" : "\(minutes / 60) h \(minutes % 60) min"
+        let when: String = episode.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        let apps: String = episode.apps.prefix(3).joined(separator: ", ")
+        var parts: [String] = [when, length, apps]
+        if !episode.outcome.isEmpty { parts.append(episode.outcome) }
+        let detail = parts.filter { !$0.isEmpty }.joined(separator: ", ")
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(episode.name)
+                .font(.system(size: 13)).foregroundStyle(Theme.ink).lineLimit(1)
+            Text(detail)
+                .font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(1)
+            if !episode.summary.isEmpty {
+                Text(episode.summary)
+                    .font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 7)
     }
 
     /// The newest memories made from what was on screen, so they can be seen (and forgotten) without opening people.

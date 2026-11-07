@@ -5,19 +5,28 @@ import Foundation
 /// arrives 20–30 dB quieter and is mostly lost.
 ///
 /// Steps: remove DC offset → high-pass at 80 Hz (rumble and fan hum, which would otherwise be boosted too) → measure
-/// the speech level (the loudest 5 % of 20 ms frames) and the noise floor (the quietest 10 %) → apply one gain that
-/// brings speech to about −20 dBFS, capped at `maxGainDB` and never more than keeps speech clearly above the noise →
-/// lift words said more quietly than the rest (trailing off, turning away from the mic) toward the same level, a few
-/// dB at a time and never in the pauses → soft-limit peaks so nothing clips.
+/// the speech level (the loudest 5 % of 20 ms frames) and the noise floor (the quietest 10 %) → when there's
+/// background noise and macOS hasn't already cleaned the sound, take it out (NoiseReduction) and measure again → apply
+/// one gain that brings speech to about −20 dBFS, capped at `maxGainDB` → lift words said more quietly than the rest
+/// (trailing off, turning away from the mic) toward the same level, a few dB at a time and never in the pauses →
+/// soft-limit peaks so nothing clips.
+///
+/// Soft speech in a noisy room is the case this is for: a voice only a few dB above a fan used to get no more than
+/// +6 dB, as if it were only noise, and reached the model too faint to be heard. Now the noise goes first, and only a
+/// recording with nothing above the noise at all (under 3 dB) is held back.
 enum AudioLevel {
     struct Result {
         let samples: [Float]
         let speechDB: Float
         let noiseDB: Float
         let gainDB: Float
+        /// How much quieter the background was made, in dB (0 when it wasn't touched).
+        var noiseReducedDB: Float = 0
     }
 
-    static func normalize(_ input: [Float], sampleRate: Float = 16_000, maxGainDB: Float) -> Result {
+    /// `cleaned`: macOS's voice processing already took the noise out (and set the level), so only the level is
+    /// checked here.
+    static func normalize(_ input: [Float], sampleRate: Float = 16_000, maxGainDB: Float, cleaned: Bool = false) -> Result {
         guard input.count > 320 else { return Result(samples: input, speechDB: -120, noiseDB: -120, gainDB: 0) }
         var samples = input
 
@@ -40,28 +49,48 @@ enum AudioLevel {
             previousOut = y
         }
 
-        // Frame loudness (20 ms frames).
+        // Frame loudness (20 ms frames), and the speech and noise levels from them.
         let frame = Int(sampleRate / 50)
-        var levels: [Float] = []
-        levels.reserveCapacity(samples.count / frame + 1)
-        var start = 0
-        while start + frame <= samples.count {
-            var sum: Float = 0
-            for i in start..<(start + frame) { sum += samples[i] * samples[i] }
-            levels.append((sum / Float(frame)).squareRoot())
-            start += frame
+        func measure(_ samples: [Float]) -> (levels: [Float], speech: Float, noise: Float) {
+            var levels: [Float] = []
+            levels.reserveCapacity(samples.count / frame + 1)
+            var start = 0
+            while start + frame <= samples.count {
+                var sum: Float = 0
+                for i in start..<(start + frame) { sum += samples[i] * samples[i] }
+                levels.append((sum / Float(frame)).squareRoot())
+                start += frame
+            }
+            guard !levels.isEmpty else { return ([], 1e-6, 1e-6) }
+            let sorted = levels.sorted()
+            return (levels, max(sorted[min(sorted.count - 1, Int(Float(sorted.count) * 0.95))], 1e-6),
+                    max(sorted[Int(Float(sorted.count) * 0.10)], 1e-6))
         }
+        var (levels, speech, noise) = measure(samples)
         guard !levels.isEmpty else { return Result(samples: samples, speechDB: -120, noiseDB: -120, gainDB: 0) }
-        let sorted = levels.sorted()
-        let speech = max(sorted[min(sorted.count - 1, Int(Float(sorted.count) * 0.95))], 1e-6)
-        let noise = max(sorted[Int(Float(sorted.count) * 0.10)], 1e-6)
         let speechDB = 20 * log10(speech)
         let noiseDB = 20 * log10(noise)
 
-        // Gain toward −20 dBFS speech, capped, and only boosting when there is speech above the noise.
+        // Background noise worth taking out: what the boost would bring up to where it's heard (above −55 dBFS
+        // afterwards), when it's within 30 dB of the speech. Out first, and the levels again.
+        var reducedDB: Float = 0
+        let boost = min(maxGainDB, max(0, -20 - speechDB))
+        if !cleaned, noiseDB + boost > -55, speechDB - noiseDB < 30 {
+            let reduced = NoiseReduction.reduce(samples)
+            if reduced.reducedDB > 1 {
+                samples = reduced.samples
+                reducedDB = reduced.reducedDB
+                (levels, speech, noise) = measure(samples)
+            }
+        }
+        let cleanSpeechDB = 20 * log10(speech)
+        let cleanNoiseDB = 20 * log10(noise)
+
+        // Gain toward −20 dBFS speech, capped. Held to +6 dB only when nothing at all stands above the noise (under
+        // 3 dB, after the noise was taken out): that's a room, not a voice, and isn't worth turning into a roar.
         let targetDB: Float = -20
-        var gainDB = min(maxGainDB, max(0, targetDB - speechDB))
-        if speechDB - noiseDB < 6 { gainDB = min(gainDB, 6) }   // nothing but noise: don't turn it into a roar
+        var gainDB = min(maxGainDB, max(0, targetDB - cleanSpeechDB))
+        if cleanSpeechDB - cleanNoiseDB < 3 { gainDB = min(gainDB, 6) }
         let gain = powf(10, gainDB / 20)
 
         // Word by word: a 20 ms frame of speech (well above the noise) that's quieter than the target gets up to
@@ -95,6 +124,6 @@ enum AudioLevel {
                 samples[i] = v
             }
         }
-        return Result(samples: samples, speechDB: speechDB, noiseDB: noiseDB, gainDB: gainDB)
+        return Result(samples: samples, speechDB: speechDB, noiseDB: noiseDB, gainDB: gainDB, noiseReducedDB: reducedDB)
     }
 }

@@ -34,6 +34,8 @@ public struct ScreenMemorySettings: Codable, Sendable, Equatable {
     /// A morning brief and an evening wrap-up, at these times ("09:00", "18:30"); empty for none.
     public var brief = "09:00"
     public var wrap = "18:30"
+    /// Read episodes with "anthropic" or "openai" (the user's own key) instead of the local model; nil: local only.
+    public var cloudReader: String?
 
     public init() {}
 

@@ -9,7 +9,13 @@ import AppKit
 if CommandLine.arguments.dropFirst().first == "mcp" {
     MemoryServer().serve()
 }
+// `murmur-memory report`, `murmur-memory ask "when is my flight?"`: what screen memory made of your work, from Terminal.
+if let command = CommandLine.arguments.dropFirst().first, ["report", "ask"].contains(command) {
+    MemoryReport.run(Array(CommandLine.arguments.dropFirst()))
+}
 
+// The key for reading with Claude or OpenAI, when the user chose that: one line from Murmur, on standard input.
+CloudReader.takeKeysFromStandardInput()
 setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
 _ = NSApplication.shared
 NSApp.setActivationPolicy(.prohibited)
