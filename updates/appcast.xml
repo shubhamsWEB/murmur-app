@@ -6,21 +6,20 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.6.0</title>
-      <pubDate>Thu, 05 Nov 2026 22:47:48 +0000</pubDate>
-      <sparkle:version>15</sparkle:version>
-      <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
+      <title>Murmur 1.7.0</title>
+      <pubDate>Sat, 07 Nov 2026 09:27:56 +0000</pubDate>
+      <sparkle:version>16</sparkle:version>
+      <sparkle:shortVersionString>1.7.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new on the Mac</h3>
-<p><b>Memory: Murmur's second brain.</b> Murmur now remembers who's who, what's coming up and what you told it, and uses it in every command. "Text Priya I'm running late" knows which Priya, and "when's my flight?" has an answer. Turn on what it may learn from in the new <b>Memory</b> page: Contacts, Calendar, Reminders, Notes, Mail and what you tell it ("remember that Mom is Roma on WhatsApp"). It keeps itself current, forgets what's gone stale, and everything stays on your Mac.</p>
-<p><b>Remember what you work on.</b> Turn it on in <b>Memory</b>, and Murmur reads the window you're working in (its text, or a picture of it when there's little text). While you're away, it turns that into memories, promises and a short record of your day. It keeps what's about you and the people you know, leaves feeds and adverts as only seen, and never reads password managers, private windows or password fields. Pictures are deleted once they've been read.</p>
-<p><b>Promises and plans.</b> "Can you send the deck by Friday?" in Slack, "I'll call you after the meeting" on WhatsApp, a flight you booked: they show up as <b>Open loops</b> and <b>Coming up</b>, close themselves when Murmur sees they're done, and remind you before they're due.</p>
-<p><b>Morning brief and evening wrap-up.</b> At 9:00, what's due today and where you left off. At 18:30, what you did and what's still open.</p>
-<p><b>Your apps, connected.</b> Connect Linear, Notion, or Jira and Confluence from <b>Memory → Connected apps</b>: you sign in on the app's own page, and Murmur can ask them and update them by voice. Claude Code, Claude Desktop and Cursor can also ask Murmur what it knows (<b>Use your memory in Claude Code</b>).</p>
-<p><b>A reader built in.</b> Memory runs on a small model Murmur downloads for you (2.5 GB) and runs itself, so it doesn't need Ollama. It reads only when the Mac can spare it: while you're away, or a little at a time while it's plugged in and quiet. It never reads in Low Power Mode or when the Mac is hot.</p>
+<p><b>Memory that keeps the details.</b> Murmur now follows your conversations as threads: who you wrote to, what about, and whose turn it is. Emails you send are remembered with their recipient and what you said. The morning brief tells you who's waiting on a reply, who to follow up with, and where you left off. "Did Tanay reply?" and "What's on my plate today?" are answered straight away.</p>
+<p><b>Remembers what you work on, as you work.</b> Murmur groups what it sees into pieces of work (a project, a release, a booking) and reads them while you're still working, a little at a time, when the Mac is plugged in and quiet. It no longer waits for you to step away. Flights, bookings and releases are read exactly as the page shows them.</p>
+<p><b>Read with Claude or OpenAI, if you choose.</b> In <b>Memory</b>, you can have your own Claude or OpenAI key read what Murmur saw, for faster and sharper memories. Sensitive windows (banks, health, passwords, private messages) are always read on your Mac, and email addresses, phone and account numbers are taken out before anything is sent. It's off unless you turn it on.</p>
+<p><b>Short-lived things fade.</b> A status or a one-off reminder fades within days; a flight stays until it's flown.</p>
+<p><b>Dictation works when another app holds Secure Input.</b> Password managers, Terminal and browsers can leave macOS's Secure Input on, and Murmur took every text box for a password field. Now only a real password field stops it.</p>
 <h3>On Windows</h3>
-<p>Nothing changes in this version.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.6.0/Murmur-1.6.0.dmg" type="application/octet-stream" sparkle:edSignature="v86B6UuYS3tiEcuzUR8EXIxnRkAKsw8sA1fOZo1AFxQaAfJIpQIntQRpa9rzdIiTtSEh7tFc/tbcV19K/3sABg==" length="16394969"/>
+<p><b>The dictation key works from the start.</b> It could do nothing just after Murmur started (and on some PCs, at all) until Murmur was restarted. Murmur now hears the key from the moment it opens, keeps trying if Windows doesn't let it watch the key at first, and hears keys sent by remote desktops and virtual machines.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.0/Murmur-1.7.0.dmg" type="application/octet-stream" sparkle:edSignature="JzOt0ivBkRxlCmpY0elp9j0MWCzKz6fTM1Vk3mcgVGT7u+67UYw+A7VhM/5Yg4XhP8VEAfPOvKgumAUd4ErkAQ==" length="17191461"/>
     </item>
   </channel>
 </rss>
