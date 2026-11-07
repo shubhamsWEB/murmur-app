@@ -149,7 +149,8 @@ mod windows {
         let key = |code: u16, up: bool| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: 0 },
+                ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0,
+                                 dwExtraInfo: super::super::keys::OWN_INPUT },
             },
         };
         let inputs = [key(VK_CONTROL, false), key(letter, false), key(letter, true), key(VK_CONTROL, true)];

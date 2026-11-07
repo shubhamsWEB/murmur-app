@@ -4,7 +4,9 @@
 //! A low-level keyboard hook (on a thread of its own, with the message loop it needs) sees every key going down and
 //! up. The combination held means Down; letting go of it means Up. Another key pressed while it's held means the
 //! person was using a shortcut (Ctrl + Windows + D, Ctrl + Windows + →), so that's Cancel. Keys Murmur sends itself
-//! (the paste) are passed over. Nothing is swallowed: other apps see every key as before.
+//! (the paste, a command's keys: marked `OWN_INPUT`) are passed over; keys other programs send (a remote desktop, a
+//! virtual machine's tools, the on-screen keyboard) count, as typed ones do. Nothing is swallowed: other apps see every
+//! key as before.
 //!
 //! Windows removes a low-level hook, silently, if it ever answers too slowly (LowLevelHooksTimeout): after Murmur has
 //! sat idle for hours its memory is paged out, and the first key press can take that long. Nothing says so; the key
@@ -12,6 +14,12 @@
 //! second, what the hook has heard with the keyboard as it really is: the combination held but never heard means the
 //! hook is gone, and it's put back at once and that press goes ahead; a release never heard ends the dictation rather
 //! than leaving it listening. The hook is also renewed every few minutes while nothing is held.
+//!
+//! The keyboard as it really is (GetAsyncKeyState) is trusted only once it has been seen to work: once it has said a
+//! key the hook heard is held. Where it says nothing is ever held (it can, for a program started before the desktop
+//! was ready, or when the keys come from another program), using it would forget the Ctrl of Ctrl + Windows before
+//! Windows went down, and end every dictation a moment after it began: the key would seem not to work at all. Until
+//! then the hook's own account is used alone.
 
 // The hook is Windows' only, for now: elsewhere the tracking is there (and tested) but nothing calls it.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -33,7 +41,12 @@ pub enum Press {
     Command,
     /// Shift with the dictation key: what's said is typed, never taken for a command, as ⇧ with Fn on the Mac.
     Typing,
+    /// The key watcher is on (at start, or once Windows let it be set after refusing): for the log.
+    Ready,
 }
+
+/// Marks the keys Murmur sends itself (SendInput's `dwExtraInfo`), so the key watcher passes over them and only them.
+pub const OWN_INPUT: usize = 0x4D52_4D52; // "MRMR"
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Combo {
@@ -133,19 +146,27 @@ pub struct Tracker {
     moded: bool,
     /// Said right after a Down: Alt or Shift was already held when the combination went down.
     pending: Option<Press>,
+    /// The keyboard's real state (`still_down`, the watchdog's `is_down`) has been seen to say a key is held: until
+    /// then it's not used to forget keys or end a dictation.
+    trusted: bool,
 }
 
 impl Tracker {
     pub fn new() -> Tracker {
-        Tracker { down: HashSet::new(), active: false, moded: false, pending: None }
+        Tracker { down: HashSet::new(), active: false, moded: false, pending: None, trusted: false }
     }
 
-    /// A key went down (`pressed`) or up. Returns what that means for dictation, if anything.
-    /// A key went down (`pressed`) or up. `still_down` says whether another key is really held now: a key let go
-    /// while an administrator's window or a Windows prompt (UAC, the lock screen) had the keyboard is never seen going
-    /// up, and remembered as held it blocked dictation, with any key, until Murmur restarted.
+    /// A key went down (`pressed`) or up. Returns what that means for dictation, if anything. `still_down` says
+    /// whether another key is really held now: a key let go while an administrator's window or a Windows prompt (UAC,
+    /// the lock screen) had the keyboard is never seen going up, and remembered as held it blocked dictation, with any
+    /// key, until Murmur restarted. It's used once it has been seen to work (`trusted`).
     pub fn key(&mut self, combo: Combo, key: u32, pressed: bool, still_down: impl Fn(u32) -> bool) -> Option<Press> {
-        self.down.retain(|k| *k == key || still_down(*k));
+        if !self.trusted && self.down.iter().any(|k| *k != key && still_down(*k)) {
+            self.trusted = true;
+        }
+        if self.trusted {
+            self.down.retain(|k| *k == key || still_down(*k));
+        }
         let repeat = pressed && self.down.contains(&key);
         if pressed { self.down.insert(key); } else { self.down.remove(&key); }
         if repeat {
@@ -233,8 +254,17 @@ impl Watch {
     /// One look. `is_down`: whether a key is held right now (GetAsyncKeyState); `others`: whether any key outside the
     /// combination is held. Updates `tracker` to match what it decides.
     pub fn look(&mut self, tracker: &mut Tracker, combo: Combo, is_down: impl Fn(u32) -> bool, others: bool) -> Fix {
-        tracker.down.retain(|k| is_down(*k));
         let held = combo.groups().iter().all(|group| group.iter().any(|k| is_down(*k)));
+        if !tracker.trusted && (held || tracker.down.iter().any(|k| is_down(*k))) {
+            tracker.trusted = true;
+        }
+        if !tracker.trusted {
+            // Nothing says the keyboard's state can be believed yet: the hook's account stands.
+            self.held = 0;
+            self.free = 0;
+            return Fix::Fine;
+        }
+        tracker.down.retain(|k| is_down(*k));
         if tracker.active {
             self.held = 0;
             if held {
@@ -285,7 +315,7 @@ pub fn listen(_combo: Arc<Mutex<Combo>>, _on: impl Fn(Press) + Send + Sync + 'st
 
 #[cfg(windows)]
 mod hook {
-    use super::{Combo, Fix, Press, Tracker, Watch, ESCAPE};
+    use super::{Combo, Fix, Press, Tracker, Watch, ESCAPE, OWN_INPUT};
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
@@ -296,7 +326,7 @@ mod hook {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
-        UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+        UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
         WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
     };
 
@@ -304,6 +334,8 @@ mod hook {
     const LOOK_EVERY_MS: u32 = 150;
     /// The hook is renewed this often while nothing is held, before Windows has a chance to have dropped it.
     const RENEW_EVERY: Duration = Duration::from_secs(5 * 60);
+    /// When Windows won't let the hook be set (just after signing in, say), it's tried again this often.
+    const RETRY_EVERY: Duration = Duration::from_secs(2);
 
     struct Hooked {
         combo: Arc<Mutex<Combo>>,
@@ -327,9 +359,16 @@ mod hook {
             .spawn(move || unsafe {
                 // Answering Windows quickly is this thread's whole job.
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-                let _ = ready.send(install());
-                if HOOK.load(Ordering::SeqCst).is_null() {
-                    return;
+                let mut set = install();
+                let _ = ready.send(set);
+                // Refused: tried again until Windows lets it be set, rather than leaving the key dead until Murmur
+                // restarts.
+                while !set {
+                    std::thread::sleep(RETRY_EVERY);
+                    set = install();
+                }
+                if let Some(hooked) = HOOKED.get() {
+                    (hooked.on)(Press::Ready);
                 }
                 SetTimer(std::ptr::null_mut(), 0, LOOK_EVERY_MS, None);
                 let mut watch = Watch::new();
@@ -349,7 +388,7 @@ mod hook {
             .map_err(|error| format!("can't start the key watcher: {error}"))?;
         match started.recv() {
             Ok(true) => Ok(()),
-            _ => Err("Windows didn't let Murmur watch the dictation key".into()),
+            _ => Err("Windows didn't let Murmur watch the dictation key (trying again every few seconds)".into()),
         }
     }
 
@@ -417,10 +456,12 @@ mod hook {
                 let message = wparam as u32;
                 let pressed = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
                 let released = message == WM_KEYUP || message == WM_SYSKEYUP;
-                if pressed && info.vkCode == ESCAPE && info.flags & LLKHF_INJECTED == 0 {
+                // Murmur's own keys (the paste) are passed over; other programs' count, as typed ones do.
+                let own = info.dwExtraInfo == OWN_INPUT;
+                if pressed && info.vkCode == ESCAPE && !own {
                     (hooked.on)(Press::Escape);
                 }
-                if (pressed || released) && info.flags & LLKHF_INJECTED == 0 {
+                if (pressed || released) && !own {
                     // Kept short: Windows drops a hook that takes too long. `on` only hands the press on.
                     let combo = current_combo(hooked);
                     let mut tracker = hooked.tracker.lock().unwrap();
@@ -508,12 +549,38 @@ mod tests {
 
     #[test]
     fn a_key_let_go_unseen_is_forgotten() {
-        // Left Shift went down, and came up while an administrator's window had the keyboard: never seen going up.
+        // D went down (and the keyboard's state agreed: it's trusted), then came up while an administrator's window had
+        // the keyboard: never seen going up.
         let mut keys = Tracker::new();
-        keys.key(Combo::RightCtrl, 0xA0, true, |_| true);
-        let held = |k: u32| k != 0xA0;
+        let mut watch = Watch::new();
+        keys.key(Combo::RightCtrl, 0x44, true, |_| true);
+        assert_eq!(watch.look(&mut keys, Combo::RightCtrl, |k| k == 0x44, true), Fix::Fine);
+        let held = |k: u32| k != 0x44;
         assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true, held), Some(Press::Down));
         assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, false, held), Some(Press::Up));
+    }
+
+    #[test]
+    fn a_keyboard_state_that_never_says_held_is_not_believed() {
+        // GetAsyncKeyState says nothing is ever down. Believed, it forgot Ctrl before Windows went down (no dictation
+        // with Ctrl + Windows), and ended every dictation 300 ms in: the key seemed not to work at all.
+        let nothing = |_: u32| false;
+        let mut keys = Tracker::new();
+        let mut watch = Watch::new();
+        assert_eq!(keys.key(Combo::CtrlWin, LCONTROL, true, nothing), None);
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, true, nothing), Some(Press::Down));
+        for _ in 0..10 {
+            assert_eq!(watch.look(&mut keys, Combo::CtrlWin, nothing, false), Fix::Fine);
+        }
+        assert!(keys.is_active());
+        assert_eq!(keys.key(Combo::CtrlWin, LWIN, false, nothing), Some(Press::Up));
+        keys.key(Combo::CtrlWin, LCONTROL, false, nothing);
+        // Right Ctrl, held three seconds: still listening, and the release ends it.
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, true, nothing), Some(Press::Down));
+        for _ in 0..20 {
+            assert_eq!(watch.look(&mut keys, Combo::RightCtrl, nothing, false), Fix::Fine);
+        }
+        assert_eq!(keys.key(Combo::RightCtrl, RCONTROL, false, nothing), Some(Press::Up));
     }
 
     #[test]
@@ -565,7 +632,7 @@ mod tests {
         let mut keys = Tracker::new();
         let mut watch = Watch::new();
         assert_eq!(keys.key(Combo::RightAlt, RMENU, true, |_| true), Some(Press::Down));
-        // Held: fine, however long.
+        // Held: fine, however long (and the keyboard's state, saying so, is trusted from here).
         for _ in 0..10 {
             assert_eq!(watch.look(&mut keys, Combo::RightAlt, |k| k == RMENU, false), Fix::Fine);
         }
