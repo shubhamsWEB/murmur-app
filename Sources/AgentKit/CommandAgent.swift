@@ -133,6 +133,22 @@ public final class CommandAgent {
     private var prefs = CommandMemory.Preferences()
     /// What this command did, for memory: each tool call with its main arguments and result.
     private var did: [CommandMemory.Action] = []
+    /// Memory was asked first and had nothing on this question: the agent says so before it opens anything to look.
+    private var memoryHadNothing = false
+    /// The command is a question about the user's own past ("did we post it on LinkedIn?") and doesn't ask Murmur to
+    /// go and look: the web and the browser stay shut for it, whatever the model picks. A small local model once
+    /// searched the web for "Murmur 1.7 release", found another product's changelog and gave it as the user's release.
+    private var pastQuestion = false
+    /// What was said, checked against the names memory holds (misheard names and spoken versions corrected): what
+    /// memory is searched with and the request is routed by. The user's own words still go to the model, with the
+    /// corrections beside them.
+    private var grounded = Grounding.Result(text: "")
+    /// What `grounded` was made from (a resumed task routes a different prompt: its memory is searched with that).
+    private var groundedFrom = ""
+    /// The names memory holds, for hearing names right: read once a minute or two, not for every command.
+    private var vocabulary: (at: Date, names: [Grounding.Name])?
+    /// The words were typed as dictation (a guessed command that only answered): nothing else is shown over them.
+    private var typedInstead = false
     /// The model is working this command (not the quick path).
     private var routing = false
     /// Files offered to the model to pick from in this command: opening one of them is its choice, not a stale memory.
@@ -364,6 +380,17 @@ public final class CommandAgent {
         }
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
         prefs = CommandMemory.preferences()
+        memoryHadNothing = false
+        typedInstead = false
+        if vocabulary.map({ Date().timeIntervalSince($0.at) > 120 }) ?? true {
+            vocabulary = (Date(), Grounding.vocabulary(brain: Brain.shared.store, graph: Brain.shared.graph, prefs: prefs))
+        }
+        grounded = Grounding.ground(utterance, names: vocabulary?.names ?? [])
+        groundedFrom = utterance
+        if !grounded.fixes.isEmpty {
+            host.log("command: heard as " + grounded.fixes.map { "\"\($0.heard)\" → \"\($0.meant)\"" }.joined(separator: ", "))
+        }
+        pastQuestion = MemoryRoute.shutsOutTheWeb(grounded.text)
         inputTarget = await captureInputTarget()
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
@@ -438,11 +465,28 @@ public final class CommandAgent {
         }
         // A question about the user's own world, "forget …", or the brief: from memory, before the agent and its
         // tools (MemoryRoute). What memory can't answer goes on to the agent as before.
-        if selection?.isEmpty ?? true, let memoryRoute = MemoryRoute.classify(utterance), await fromMemory(memoryRoute) {
+        if selection?.isEmpty ?? true, let memoryRoute = MemoryRoute.classify(grounded.text), await fromMemory(memoryRoute) {
             host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
             return
         }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
+        // A question about the user's past that the agent finished without answering ("done" and no reply, as on
+        // 7 Nov): memory answers it, or says it has nothing, so it's never met with silence. Not after something was
+        // done or typed: a reminder made or a message sent ends quietly, as it should.
+        let changing: Set<String> = ["send_message", "type_text", "insert_text", "write_in_app", "replace_selection",
+                                     "paste_clipboard", "copy_text", "press_keys", "click", "click_at", "click_on", "browser_click",
+                                     "browser_type", "run_command", "run_applescript", "run_shortcut", "note", "remember",
+                                     "forget_fact", "use_app", "use_skill", "quit_app", "hide_app", "set_volume", "change_volume",
+                                     "mute", "brightness", "set_brightness", "set_bluetooth", "set_wifi", "lock_screen",
+                                     "media_control", "ask_claude", "ask_codex", "coding_followup", "build_with_agent"]
+        let acted = did.contains { changing.contains($0.tool) }
+        if shown.answer == nil, !stoppedEarly, pastQuestion, !acted, !typedInstead {
+            host.log("command: finished a question without an answer; answering from memory")
+            let answered = memoryHadNothing ? false : await fromMemory(.question)
+            if !answered {
+                host.showAnswer("Murmur's memory doesn't show that yet. Want me to check where it would be?")
+            }
+        }
         clearIfFinished()
         host.log(String(format: "command: finished in %.2f s", Date().timeIntervalSince(started)))
     }
@@ -683,6 +727,7 @@ public final class CommandAgent {
         let brain = Brain.shared
         switch kind {
         case .forget:
+            // As said, never as corrected: forgetting the wrong person can't be undone.
             let named = brain.store.entities(namedIn: utterance)
             guard !named.isEmpty else { return false }
             for row in named { brain.forget(entity: row.id) }
@@ -711,25 +756,36 @@ public final class CommandAgent {
         case .question:
             // What was seen answers it exactly (a flight, a release, a day's work): at once, no model.
             let started = Date()
-            if let direct = MemoryRecall.directAnswer(utterance, graph: brain.graph) {
+            if let direct = MemoryRecall.directAnswer(grounded.text, graph: brain.graph) {
                 host.log("command: memory route → answered from what was seen, no model, in "
                          + String(format: "%.0f ms", Date().timeIntervalSince(started) * 1000))
                 host.showAnswer(direct)
                 return true
             }
             host.progress("Looking in your memory…")
-            let found = await brain.ask(utterance)
+            var found = await brain.ask(grounded.text)
+            // What Murmur itself sent or wrote for the user: "have we told the group?" knows about Murmur's own message.
+            let did = MemoryRecall.isAboutTheUsersWork(grounded.text) ? CommandMemory.didForUser(days: 30, limit: 8) : []
+            if !did.isEmpty {
+                found = (found.hasPrefix("Nothing in Murmur's memory") ? "" : found + "\n") + did.joined(separator: "\n")
+            }
             let looked = Date()
             guard !found.hasPrefix("Nothing in Murmur's memory") else {
                 host.log("command: memory route → nothing in memory; the agent takes it")
+                memoryHadNothing = true
                 return false
             }
+            let coverage = ScreenMemory.shared.journal.coverageLine()
             let router = currentRouter()
             let reply = try? await router.chat(system: MemoryRoute.answerPrompt(user: brain.store.meNames()),
-                                               turns: [.user(MemoryRoute.answerRequest(utterance, memory: String(found.prefix(6000))))],
+                                               turns: [.user(MemoryRoute.answerRequest(grounded.text == utterance ? utterance
+                                                                                           : "\(grounded.text) (heard as: \"\(utterance)\")",
+                                                                                       memory: String(found.prefix(8000)),
+                                                                                       coverage: coverage))],
                                                tools: [])
-            guard let answer = reply.flatMap({ MemoryRoute.answer(from: $0.text) }) else {
-                host.log("command: memory route → memory doesn't cover it; the agent takes it")
+            guard let answer = reply.flatMap({ MemoryRoute.answer(from: $0.text, notSeenAnswers: pastQuestion) }) else {
+                host.log("command: memory route → memory doesn't cover it (\(found.split(separator: "\n").count) notes looked at); the agent takes it")
+                memoryHadNothing = true
                 return false
             }
             host.log("command: memory route → answered from \(found.split(separator: "\n").count) notes in memory (looking "
@@ -753,10 +809,22 @@ public final class CommandAgent {
         context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
         if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
         if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
+        if memoryHadNothing, pastQuestion {
+            context += "\nMurmur's memory was checked first and has nothing on this question. It's about the user's own "
+                + "past, so say first that memory doesn't show it. If an app or site could show it (LinkedIn, WhatsApp, "
+                + "Mail), offer to check it there, and open it only if the user's request asked you to check."
+        }
         if let memory = CommandMemory.workingSet(for: utterance) {
             context += "\nMemory (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" refer to):\n\(memory)"
         }
-        if let known = await Brain.shared.context(for: utterance) {
+        // The brief for this task: what was misheard, who and what it names and how the user reaches them, what
+        // they did that it touches. Every request, every model.
+        // A resumed task routes its own prompt (the request and the user's answer): memory is searched with that.
+        let heard = utterance == groundedFrom ? grounded : Grounding.Result(text: utterance)
+        if let brief = TaskBrief.make(heard, graph: Brain.shared.graph, brain: Brain.shared.store, prefs: prefs) {
+            context += "\nMemory for this task (the user's words win, then the screen, then this):\n\(brief)"
+        }
+        if let known = await Brain.shared.context(for: heard.text, limit: 1600) {
             context += "\nWhat Murmur knows about the people and things this may be about (from the user's Contacts, "
                 + "Calendar, Reminders, Notes and Mail; use it, but the user's words win):\n\(known)"
         }
@@ -801,7 +869,7 @@ public final class CommandAgent {
             groups = ToolGroup.select(QuickCommands.clean(utterance), frontIsBrowser: BrowserControl.inFront() != nil,
                                       hasSelection: !(selection?.isEmpty ?? true),
                                       codingSession: CodingSession.current != nil, skillsListed: !skills.text.isEmpty,
-                                      mentionsMemory: prefs.touches(utterance))
+                                      mentionsMemory: prefs.touches(utterance) || MemoryRoute.classify(grounded.text) == .question)
             host.log("command: local model's tools: core + \(groups.sorted().map(\.rawValue).joined(separator: ", "))")
         } else {
             groups = Set(ToolGroup.allCases)
@@ -898,6 +966,7 @@ public final class CommandAgent {
             if !explicit, step == 0, onlyAnswers {
                 // A guessed command that only answers: it was dictation. Type the words.
                 host.log("command: guessed command only answered; typing the words instead")
+                typedInstead = true
                 host.insert(utterance)
                 return
             }
@@ -1380,6 +1449,14 @@ public final class CommandAgent {
 
     /// Runs a tool, and remembers what it did for the next command.
     private func execute(_ tool: String, _ args: [String: JSONValue]) async -> Outcome {
+        if pastQuestion, MemoryRoute.looksElsewhere.contains(tool) {
+            host.log("command: \(tool) not run: a question about the user's own past answers from memory")
+            let outcome = Outcome(result: "Not done: this is a question about the user's own past, and the web isn't "
+                + "their memory. Answer from ask_memory (and recall). For a part memory doesn't cover, say Murmur hasn't "
+                + "seen it and offer to check where it would be (\"Want me to check LinkedIn?\"). Then reply.")
+            trace.record(tool, args.mapValues(\.description), result: outcome.result)
+            return outcome
+        }
         let outcome = await perform(tool, args)
         trace.record(tool, args.mapValues(\.description), result: outcome.result)
         // What it said, in the log: a step that "worked" but didn't is visible there.
@@ -1899,7 +1976,13 @@ public final class CommandAgent {
             return Outcome(result: await Connectors.shared.call(app: app, tool: name, arguments: arguments))
         case "ask_memory":
             host.progress("Looking in your memory…")
-            return Outcome(result: await Brain.shared.ask(text("query")))
+            let query = text("query")
+            var found = await Brain.shared.ask(query)
+            if MemoryRecall.isAboutTheUsersWork(query) {
+                let did = CommandMemory.didForUser(days: 30, limit: 8)
+                if !did.isEmpty { found += "\n" + did.joined(separator: "\n") }
+            }
+            return Outcome(result: found + "\n(" + ScreenMemory.shared.journal.coverageLine() + ")")
         case "recall":
             return Outcome(result: CommandMemory.recall(text("query"), kind: text("kind"), days: args["days"]?.number ?? 30))
         case "app_dictionary":
@@ -2623,9 +2706,12 @@ public final class CommandAgent {
                 + "with what the document is (\"Aadhaar card\", \"PAN card\"), not the user's name: a name matches every "
                 + "file about them. When the matches come back, pick the user's own one (their name in it helps tell)."),
             (.memory, "- The user's own world (their work, projects, releases, people, plans, promises, what they did: \"what did "
-                + "we ship in the last release\", \"when is my flight\", \"who is Arjun\", \"what did I promise Priya\"): "
-                + "call ask_memory and answer from what it returns. Never web_search or open a browser for these: what "
-                + "the web says about a name isn't the user's project. If ask_memory has nothing, say so."),
+                + "we ship in the last release\", \"when is my flight\", \"who is Arjun\", \"what did I promise Priya\", "
+                + "\"have we posted about it on LinkedIn\", \"did I tell the group on WhatsApp\"): call ask_memory (and recall, "
+                + "for what Murmur did) and answer from what they return. Never web_search or open a browser for these: "
+                + "what the web says about a name isn't the user's project. For a part memory doesn't cover, say Murmur "
+                + "hasn't seen it and offer to check the app or site it would be in; open it only when the user asked "
+                + "you to check."),
             (.memory, "- Memory: the latest commands and what's in play are below. For an earlier command to Murmur (\"what did I "
                 + "send Roma yesterday\", \"open the file from this morning\", \"which video did I watch\"), call recall. "
                 + "recall is only Murmur's own past commands; everything else the user knows is ask_memory."),

@@ -55,6 +55,8 @@ public final class ScreenWatcher {
     private var current: (id: Int64, app: String, domain: String, since: Date, kind: WindowKind, sighting: Int64)?
     /// What was being written in each window when it was last read, to notice when it's sent.
     private var drafts: [String: String] = [:]
+    /// A feed's page as it read last time: a "your post is live" already on it then says nothing about this draft.
+    private var pages: [String: String] = [:]
     private var lightDraft = ""
     /// The window in front (its app and title), whose message box the glance reads.
     private var currentKey = ""
@@ -135,6 +137,19 @@ public final class ScreenWatcher {
             MemoryLog.write("made the timeline's items and episodes again: \(items) items (emails you sent, flights, releases, "
                             + "files), \(episodes) episodes to read")
         }
+        // Once: the timeline is read again for what the readers learned (your own posts on LinkedIn, a release
+        // tagged but not yet published, a tag pushed from the terminal), so what happened before this version counts.
+        // In the background, on connections of its own, so watching starts at once; marked done in the memory file
+        // itself when it finished (a run cut short runs again: reading the same window twice makes the same items).
+        if graph.state("reread-posts-1") == nil {
+            let url = journal.url, me = brain.meNames()
+            Task.detached(priority: .background) {
+                let graph = MemoryGraph(url: url)
+                let items = graph.readAllItemsAgain(from: Journal(url: url), me: me)
+                graph.setState("reread-posts-1", String(Date().timeIntervalSince1970))
+                MemoryLog.write("read the timeline again for posts, tags and releases: \(items) new items")
+            }
+        }
         // Once: replies awaited are threads now (not open loops), a connecting flight isn't a trip of its own, and
         // memories of a button or a field name go.
         let threadsMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-threads-1")
@@ -180,8 +195,8 @@ public final class ScreenWatcher {
         Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.minute() }
         }
-        // In a conversation, a glance every ten seconds at the message box alone (cheap): when it empties, a message
-        // was sent, and the window is read to keep what the user wrote.
+        // In a conversation or on a feed, a glance every ten seconds at the box being written in alone (cheap): when it
+        // empties, a message was sent (or a post published), and the window is read to keep what the user wrote.
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.glance() }
         }
@@ -337,17 +352,28 @@ public final class ScreenWatcher {
             return
         }
         var capture = captured.capture
-        let draft = captured.draft
+        let draft = captured.draft, boxes = captured.boxes
         // What was in the message box last time and is now in the conversation, with the box empty: it was sent.
         let key = capture.app + "|" + capture.title
         let kind = WindowKind(rawValue: capture.kind) ?? .app
         // An email leaves no copy in the inbox it goes back to: the box emptying (or the compose window going) is it sent.
         let isMail = ItemReader.mailApps.contains(capture.app) || ItemReader.mailDomains.contains(capture.domain)
         let before = drafts[key] ?? ""
-        if kind == .conversation, let sent = ScreenText.sent(before: before, now: draft, in: capture.text)
-            ?? (isMail && draft.isEmpty && before.split(separator: " ").count >= 3 ? before : nil) {
+        // (A draft still in one of the window's text boxes wasn't sent: the user only clicked elsewhere.)
+        let stillThere = ScreenText.stillWriting(ScreenText.plain(before), in: boxes)
+        if kind == .conversation, let sent = ScreenText.sent(before: before, now: draft, in: capture.text, boxes: boxes)
+            ?? (isMail && draft.isEmpty && !stillThere && before.split(separator: " ").count >= 3 ? before : nil) {
             capture.authored = sent
             MemoryLog.write("kept a message you sent in \(capture.app)")
+        }
+        // A post (or a comment) on a feed: the box it was written in emptied, and it's on the page now, or the site
+        // said it was posted. A search box empties too, so only something sentence-long counts.
+        // Only on a site Murmur knows as somewhere people post (LinkedIn, X, YouTube…): elsewhere what was typed is
+        // left as typed.
+        if kind == .feed || kind == .video, ItemReader.platform(of: capture.domain) != nil,
+           let sent = ScreenText.posted(before: before, now: draft, in: capture.text, boxes: boxes, earlier: pages[key] ?? "") {
+            capture.authored = sent
+            MemoryLog.write("kept a post you published on \(capture.domain.isEmpty ? capture.app : capture.domain)")
         }
         // A compose window that closed (Mail, Outlook): what was in it was sent.
         // (A compose window renamed by its subject still has the text in its box: not sent.)
@@ -358,6 +384,8 @@ public final class ScreenWatcher {
             drafts[currentKey] = nil
         }
         drafts[key] = draft
+        // Only the latest feed's: a page left behind isn't needed (and every video is a page of its own).
+        if kind == .feed || kind == .video { pages = [key: capture.text] }
         currentKey = key
         settle(now: now)
         let kept = journal.record(capture, now: now)
@@ -370,7 +398,7 @@ public final class ScreenWatcher {
 
     /// A message box that just emptied in a conversation: read the window now.
     private func glance() {
-        guard settings.rules.authored, current?.kind == .conversation else { return }
+        guard settings.rules.authored, let kind = current?.kind, [.conversation, .feed, .video].contains(kind) else { return }
         let draft = ScreenReader.frontDraft()
         // The latest of what's being written, for when it's sent (the last full read may have caught only its start).
         if !draft.isEmpty, !currentKey.isEmpty { drafts[currentKey] = draft }
@@ -390,7 +418,8 @@ public final class ScreenWatcher {
     private func takePicture() async {
         guard canSee, settings.rules.pictures, let current, Date().timeIntervalSince(current.since) >= budget.stayed,
               WindowVision.worthLooking(current.kind, app: current.app), !journal.hasPicture(current.id),
-              Power.now().mayCapture, let app = ScreenReader.frontApp(), app.localizedName == current.app else { return }
+              Power.now().mayCapture, let app = ScreenReader.frontApp(),
+              ScreenText.appName(app.localizedName ?? "") == current.app else { return }
         pictureTimes = pictureTimes.filter { $0 > Date().addingTimeInterval(-3600) }
         guard pictureTimes.count < budget.perHour, Journal.picturesSize() < budget.maxBytes,
               let jpeg = await ScreenReader.thumbnail(of: app, side: budget.side) else { return }

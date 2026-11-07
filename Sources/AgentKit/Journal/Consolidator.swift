@@ -28,8 +28,11 @@ public enum Consolidator {
             let head = "[\(when), \(place)\(minutes > 0 ? ", \(minutes) min" : "")\(labels.isEmpty ? "" : "; how it was used: " + labels.joined(separator: ", "))] \(snapshot.title)"
             var body = BrainModel.redact(String(snapshot.text.prefix(max(400, budget / 4))))
             if !snapshot.seenAs.isEmpty { body = "Seen as: \(snapshot.seenAs)\n" + body }
-            if !snapshot.authored.isEmpty {
-                body += "\nThe user wrote and sent here: \(BrainModel.redact(String(snapshot.authored.suffix(1500))))"
+            let authored = ScreenText.confirmed(snapshot.authored)
+            if !authored.isEmpty {
+                let feed = ItemReader.platform(of: snapshot.domain) != nil && WindowKind.of(snapshot) != .conversation
+                body += "\nThe user \(feed ? "published (a post or comment) here" : "wrote and sent here"): "
+                    + BrainModel.redact(String(authored.suffix(1500)))
             }
             let part = "\(head)\n\(body)\n\n"
             if !text.isEmpty, text.count + part.count > budget {

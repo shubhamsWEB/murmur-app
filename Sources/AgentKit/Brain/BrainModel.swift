@@ -229,12 +229,16 @@ public enum BrainModel {
 
     private static let secretPatterns: [NSRegularExpression] = [
         // Keys and tokens: long runs of letters, digits and dashes with a known prefix, or bearer/api key labels.
-        #"\b(sk|pk|rk|ghp|gho|ghs|xox[abpr]|AKIA|AIza|ya29|glpat|npm)[-_A-Za-z0-9]{12,}"#,
-        #"(?i)\b(api[_ -]?key|secret|token|bearer|password|passcode|passwd|pwd)\b\s*[:=]?\s*\S{6,}"#,
+        #"\b(sk|pk|rk|ghp|gho|ghs|ghu|ghr|github_pat|xox[abpr]|AKIA|ASIA|AIza|ya29|glpat|npm|hf)[-_A-Za-z0-9]{12,}"#,
+        // "password: …", "token=…", or a label then a value with a digit in it ("bearer eyJ0…", "password is hunter22");
+        // not "the password-field fix" or "a 1M token context window".
+        #"(?i)\b(api[_ -]?key|secret|token|bearer|password|passcode|passwd|pwd)\b(?:\s*[:=]\s*["']?[^\s"']{6,}|(?:\s+is)?\s+(?=[^\s]*\d)[^\s]{6,})"#,
+        // A secret in an environment variable or a config line: "export AWS_SECRET_ACCESS_KEY=…", "GH_TOKEN: …".
+        #"\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH)[A-Z0-9_]*\s*[:=]\s*["']?[^\s"']{6,}"#,
+        // A password in an address: "postgres://user:pass@host".
+        #"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s@/]+@"#,
         // One-time codes: "code is 482913", "OTP: 4829".
         #"(?i)\b(otp|code|pin|verification)\b[^\n\d]{0,20}\d{4,8}\b"#,
-        // Card numbers.
-        #"\b(?:\d[ -]?){13,19}\b"#,
         // Private keys.
         #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"#,
     ].compactMap { try? NSRegularExpression(pattern: $0) }
@@ -247,7 +251,30 @@ public enum BrainModel {
             result = pattern.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result),
                                                       withTemplate: "[hidden]")
         }
+        // Card numbers: thirteen to nineteen digits that pass the card check digit (not a post's id in a link).
+        if let cards = try? NSRegularExpression(pattern: #"\b(?:\d[ -]?){12,18}\d\b"#) {
+            for match in cards.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
+                guard let range = Range(match.range, in: result) else { continue }
+                let digits = result[range].compactMap(\.wholeNumberValue)
+                let grouped = result[range].contains { $0 == " " || $0 == "-" }
+                if (13...19).contains(digits.count), grouped || digits.count <= 16, luhn(digits) {
+                    result.replaceSubrange(range, with: "[hidden]")
+                }
+            }
+        }
+        // A wallet's recovery phrase (twelve or more of its words in a row).
+        for range in RecoveryWords.phrases(in: result).reversed() { result.replaceSubrange(range, with: "[hidden]") }
         return result
+    }
+
+    /// The card number check digit (Luhn).
+    static func luhn(_ digits: [Int]) -> Bool {
+        var sum = 0
+        for (offset, digit) in digits.reversed().enumerated() {
+            let value = offset % 2 == 1 ? digit * 2 : digit
+            sum += value > 9 ? value - 9 : value
+        }
+        return sum % 10 == 0
     }
 
     /// Holds something that must never be remembered.

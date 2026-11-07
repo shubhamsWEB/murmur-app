@@ -16,6 +16,24 @@ public final class Journal: @unchecked Sendable {
     /// The file it's kept in (brain.sqlite, with the living memory).
     public let url: URL
 
+    /// How far back screen memory's windows go and when it last read one: what "Murmur hasn't seen it" covers. Nil
+    /// when it has read nothing.
+    public func coverage() -> (from: Date, to: Date)? {
+        guard let row = db.rows("SELECT min(first), max(last) FROM snapshot", []).first, row.count == 2,
+              let from = Double(row[0]), let to = Double(row[1]) else { return nil }
+        return (Date(timeIntervalSince1970: from), Date(timeIntervalSince1970: to))
+    }
+
+    /// The coverage as a line for a model answering from memory.
+    public func coverageLine(now: Date = Date()) -> String {
+        guard let span = coverage() else { return "Screen memory hasn't read any windows yet, so Murmur can't say what the user did." }
+        let day = span.from.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+        let last = span.to.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+        var line = "Screen memory has read the user's windows from \(day) until \(last)"
+        if now.timeIntervalSince(span.to) > 2 * 3600 { line += " (it hasn't read anything since, so later events aren't known)" }
+        return line + ". It reads chats (WhatsApp, Slack, Messages, Mail), feeds (LinkedIn, X) and what the user writes and sends in them, except in apps or sites the user excluded."
+    }
+
     public init(url: URL = BrainStore.defaultURL) {
         self.url = url
         db = SQLiteConnection(url: url)

@@ -105,7 +105,7 @@ public enum ToolGroup: String, CaseIterable, Sendable, Comparable {
             groups.insert(.messages)
         }
         if mentionsMemory
-            || says(#"\b(remember|forget|recall|yaad|again|earlier|before|last time|yesterday|previous|from now on|call me|my name|did i|what did|which (file|video|page|song)|who is|who's|kaun|what do you know|know about|birthday|works at|last met|second brain|promised?|owe|follow up|waiting on|worked on|time spent|recap|i saw)\b"#) {
+            || says(#"\b(remember|forget|recall|yaad|again|earlier|before|last time|yesterday|previous|from now on|call me|my name|did i|what did|which (file|video|page|song)|who is|who's|kaun|what do you know|know about|birthday|works at|last met|second brain|promised?|owe|follow up|waiting on|worked on|time spent|recap|i saw|did we|have we|had we|we did|what all|have i|had i|notified|did you)\b"#) {
             groups.insert(.memory)
         }
         let connected = ConnectorTools.shared.names

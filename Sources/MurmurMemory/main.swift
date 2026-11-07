@@ -13,6 +13,10 @@ if CommandLine.arguments.dropFirst().first == "mcp" {
 if let command = CommandLine.arguments.dropFirst().first, ["report", "ask"].contains(command) {
     MemoryReport.run(Array(CommandLine.arguments.dropFirst()))
 }
+// `murmur-memory eval evals/memory.local.json`: memory scored on your own questions (MemoryEval).
+if CommandLine.arguments.dropFirst().first == "eval" {
+    MemoryEval.run(Array(CommandLine.arguments.dropFirst()))
+}
 
 // The key for reading with Claude or OpenAI, when the user chose that: one line from Murmur, on standard input.
 CloudReader.takeKeysFromStandardInput()

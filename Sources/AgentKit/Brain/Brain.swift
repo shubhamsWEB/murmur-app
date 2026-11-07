@@ -25,6 +25,8 @@ public final class Brain {
     public nonisolated var search: MemorySearch { MemorySearch(store: store, journal: journal, vectors: vectors) }
     /// The timeline under screen memory: items read from windows, episodes of work, how entities connect.
     public nonisolated let graph: MemoryGraph
+    /// Everything above as one index, searched as one (BrainRecall): the one way into memory.
+    public nonisolated let index: MemoryIndex
 
     /// Bumped when what's known changes, so the Memory page reloads.
     public private(set) var revision = 0
@@ -42,6 +44,7 @@ public final class Brain {
         journal = Journal()
         vectors = MemoryVectors()
         graph = MemoryGraph()
+        index = MemoryIndex()
     }
 
     // MARK: Running
@@ -51,6 +54,9 @@ public final class Brain {
         guard loop == nil else { return }
         loop = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 20_000_000_000)   // let launch settle first
+            // The one index over all of memory, built now (the first time takes a few seconds), so the first question
+            // doesn't wait for it.
+            if let index = self?.index { await Task.detached(priority: .utility) { index.sync() }.value }
             while !Task.isCancelled {
                 await self?.sync()
                 try? await Task.sleep(nanoseconds: 30 * 60 * 1_000_000_000)
@@ -226,78 +232,40 @@ public final class Brain {
 
     // MARK: Using it
 
-    /// What a command should know: who and what it names, what matches its words, and what's coming up when it's
-    /// about time. At most ~1,200 characters. Nil when nothing applies. Used memories fade more slowly.
-    public nonisolated func context(for utterance: String, limit: Int = 1200) async -> String? {
-        // The command's meaning, for search by meaning; words and names alone when the model isn't there.
-        var vector: [Float]?
+    /// What memory holds for a question: everything searched at once (BrainRecall: words, meaning, who and what it
+    /// names, the span it names, what's owed), as one evidence pack, the most trustworthy and relevant first. Empty when
+    /// memory has nothing on it. `start`: start the embedding model if it isn't running (the agent's brief doesn't wait
+    /// for it; a question does).
+    public nonisolated func evidence(for query: String, limit: Int = 10, start: Bool = true, now: Date = Date()) async -> BrainRecall.Evidence {
+        index.sync(now: now)
+        index.putMurmur(CommandMemory.actionsForIndex(days: 30))
+        let parts = BrainRecall.parts(query)
+        var embedded: [[Float]]?
         if LocalReader.embedderInstalled {
-            vector = await LocalReader.embed([utterance], query: true, start: false)?.first
-            if vector == nil { LocalReader.warm() }   // ready for the next command
+            embedded = await LocalReader.embed(parts, query: true, start: start)
+            if embedded == nil { LocalReader.warm() }
         }
-        let search = self.search
-        var hits = search.memories(utterance, vector: vector, limit: 14).filter { $0.memory.origin != .told }
-        let lower = utterance.lowercased()
-        if ["today", "tomorrow", "this week", "next week", "meeting", "schedule", "free", "busy", "remind", "to do",
-            "todo", "agenda", "calendar"].contains(where: lower.contains) {
-            let known = Set(hits.map(\.id))
-            hits += store.upcoming(limit: 8).filter { !known.contains($0.id) }
-        }
-        // What screen memory adds: what's certain (a flight, a release) and what you did, then open loops, what you
-        // did, what you saw (when the command is about them).
-        var extra = MemoryRecall.isAboutTheUsersWork(utterance)
-            ? MemoryRecall.lines(for: utterance, graph: graph, brain: store, vectors: vectors, vector: vector, limit: 6) : []
-        extra += Recall.context(journal, for: utterance)
-        let related = search.related(vector)
-        extra += related.loops.prefix(3).map { "- Open loop (\($0.label.lowercased())): \(Nudges.describe($0, now: Date()))" }
-        extra += related.chronicle.map { "- \($0)" }
-        extra += related.seen.map(Recall.seen)
-        var unique: [String] = []
-        for line in extra where !unique.contains(line) { unique.append(line) }
-        extra = unique
-        guard !hits.isEmpty || !extra.isEmpty else { return nil }
-        var lines: [String] = []
-        var used: [Int64] = []
-        var length = 0
-        for line in extra where length + line.count <= limit / 2 {
-            lines.append(line)
-            length += line.count + 1
-        }
-        for hit in hits {
-            let line = "- \(hit.memory.text)"
-            guard length + line.count <= limit else { break }
-            lines.append(line)
-            used.append(hit.id)
-            length += line.count + 1
-        }
-        store.used(used)
-        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+        let names = Grounding.vocabulary(brain: store, graph: graph, prefs: CommandMemory.preferences()).map(\.name)
+        let evidence = BrainRecall(index: index, vectors: vectors).recall(query, names: names, vectors: embedded, now: now, limit: limit)
+        // Memories that were used fade more slowly.
+        store.used(evidence.found.compactMap { $0.record.source.hasPrefix("memory:") ? Int64($0.record.source.dropFirst(7)) : nil })
+        return evidence
     }
 
-    /// An answer to "what do you know about…": the memories that match, each with where it came from and how sure
-    /// Murmur is, for the model to answer from.
+    /// What a command should know from memory, for the agent planning it: the evidence for what was said, at most
+    /// `limit` characters. Nil when memory has nothing on it.
+    public nonisolated func context(for utterance: String, limit: Int = 1200) async -> String? {
+        let evidence = await evidence(for: utterance, limit: 8, start: false)
+        guard !evidence.isEmpty else { return nil }
+        return evidence.text(limit: limit)
+    }
+
+    /// An answer to "what do you know about…", "did we…", "when is…": the evidence, each line saying what kind of
+    /// thing it is and when, for a model to answer from.
     public nonisolated func ask(_ query: String) async -> String {
-        let vector = LocalReader.embedderInstalled ? await LocalReader.embed([query], query: true)?.first : nil
-        let search = self.search
-        let hits = search.memories(query, vector: vector, limit: 20)
-        // From the top down: what's certain from the windows, the episodes of work, how things connect; then promises,
-        // summaries and windows.
-        let structure = MemoryRecall.lines(for: query, graph: graph, brain: store, vectors: vectors, vector: vector)
-        var extra = Recall.answer(journal, for: query)
-        let related = search.related(vector)
-        extra += related.loops.map { "- \($0.label): \(Nudges.describe($0, now: Date())) [open loop]" }
-        extra += related.chronicle.map { "- \($0) [your summary]" }
-        extra += related.seen.map(Recall.seen)
-        var unique: [String] = []
-        for line in extra where !unique.contains(line) { unique.append(line) }
-        extra = unique
-        guard !hits.isEmpty || !extra.isEmpty || !structure.isEmpty else { return "Nothing in Murmur's memory about \"\(query)\"." }
-        store.used(hits.map(\.id))
-        return (structure + hits.map { hit in
-            let sure = hit.memory.pinned ? "told by the user" : hit.memory.confidence >= 0.9 ? "certain" : "likely"
-            let when = hit.memory.confirmed.formatted(.dateTime.day().month(.abbreviated).year())
-            return "- \(hit.memory.text) [about \(hit.about); from \(hit.memory.origin.display), \(when); \(sure)]"
-        } + extra).joined(separator: "\n")
+        let evidence = await evidence(for: query, limit: 14)
+        guard !evidence.isEmpty else { return "Nothing in Murmur's memory about \"\(query)\"." }
+        return evidence.text(limit: 7000)
     }
 
     /// Screen memory's helper wrote something (a loop, a summary): the Memory page reloads.

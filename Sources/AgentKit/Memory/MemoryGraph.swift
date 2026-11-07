@@ -169,9 +169,33 @@ public final class MemoryGraph: @unchecked Sendable {
         return added
     }
 
+    /// Reads every window still on the timeline into items again (nothing is forgotten: what's read the same way is
+    /// the same item), for when the readers learn something new. Returns how many items were new.
+    @discardableResult
+    /// A day of windows at a time, each day in one transaction, so a big timeline neither fills memory nor holds the
+    /// file's lock for long; what's read again doesn't count as seen again.
+    public func readAllItemsAgain(from journal: Journal, me: [String], now: Date = Date(), calendar: Calendar = .current) -> Int {
+        var added = 0
+        var day = now.addingTimeInterval(-14 * 86400)
+        while day < now {
+            let next = min(day.addingTimeInterval(86400), now.addingTimeInterval(60))
+            // Read first, then written in one short transaction (reading holds no lock; the watcher keeps writing).
+            let found = journal.snapshots(from: day, to: next, limit: 5_000).flatMap { window in
+                ItemReader.read(window, me: me, calendar: calendar).map { (item: $0, window: window) }
+            }
+            let batched = !found.isEmpty && db.exec("BEGIN IMMEDIATE")
+            for each in found where store(each.item, snapshot: each.window.id, seen: each.window.last, calendar: calendar, again: true) {
+                added += 1
+            }
+            if batched { db.exec("COMMIT") }
+            day = next
+        }
+        return added
+    }
+
     /// Keeps an item (the latest reading of it wins, the first sighting stays). True when it's new.
     @discardableResult
-    public func store(_ item: MemoryItem, snapshot: Int64, seen: Date, calendar: Calendar = .current) -> Bool {
+    public func store(_ item: MemoryItem, snapshot: Int64, seen: Date, calendar: Calendar = .current, again: Bool = false) -> Bool {
         let at = seen.timeIntervalSince1970
         let fields = (try? JSONSerialization.data(withJSONObject: item.fields, options: [.sortedKeys]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -180,9 +204,9 @@ public final class MemoryGraph: @unchecked Sendable {
         if let row = db.rows("SELECT id FROM screen_item WHERE key = ?", [item.key]).first, let existing = Int64(row[0]) {
             db.exec("""
                 UPDATE screen_item SET title = ?, body = ?, actor = ?, project = ?, people = ?, at = coalesce(?, at), fields = ?,
-                  mine = max(mine, ?), last = max(last, ?), seen = seen + 1 WHERE id = ?
+                  mine = max(mine, ?), last = max(last, ?), seen = seen + ? WHERE id = ?
                 """, [item.title, item.body, item.actor, item.project, item.people.joined(separator: "\n"),
-                      item.when?.timeIntervalSince1970, fields, item.mine, at, existing])
+                      item.when?.timeIntervalSince1970, fields, item.mine, at, again ? 0 : 1, existing])
             id = existing
             new = false
         } else {

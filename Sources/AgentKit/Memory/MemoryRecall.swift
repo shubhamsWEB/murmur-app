@@ -25,9 +25,57 @@ public enum MemoryRecall {
                              "this week", "on monday", "on tuesday", "on wednesday", "on thursday", "on friday",
                              "on saturday", "on sunday", "recap", "my day", "where did my time", "busy with", "been doing"]
 
+    /// Telling people about something: posting, announcing, sharing, notifying, on a feed or in a chat.
+    static let aboutSharing = [" notified", " notify", " posted", " post ", " posts", " posting", " shared", " share ",
+                               " announced", " announce", " tweeted", " tweet", " told ", " tell ", " informed", " inform ",
+                               " linkedin", " whatsapp", " slack", " twitter", " x.com", " instagram", " facebook",
+                               " telegram", " discord", " reddit", " product hunt", " threads"]
+    static let aboutDoingWe = ["what did we", "what have we", "did we ", "have we ", "had we ", "what all", "we did",
+                               "we've done", "we have done", "we worked", "we shipped"]
+
+    /// Whether the question is about the user themselves (or their team): "I", "my", "we", "our", "us".
+    static func aboutTheUser(_ lower: String) -> Bool {
+        let text = " " + lower.replacingOccurrences(of: #"[^a-z0-9' ]"#, with: " ", options: .regularExpression) + " "
+        return [" i ", " my ", " me ", " we ", " our ", " us ", " i've ", " we've ", " mine ", " ours "].contains(where: text.contains)
+    }
+
+    /// The apps and sites a question names ("on LinkedIn and WhatsApp"), as they appear in items' fields.
+    static func namedPlaces(_ query: String) -> [String] {
+        let lower = " " + query.lowercased() + " "
+        let places: [(String, [String])] = [
+            ("linkedin", [" linkedin", " linked in"]), ("whatsapp", [" whatsapp", " whats app"]), ("slack", [" slack"]),
+            ("x", [" twitter", " tweet", " x.com", " on x "]), ("instagram", [" instagram", " insta "]),
+            ("facebook", [" facebook"]), ("telegram", [" telegram"]), ("discord", [" discord"]), ("reddit", [" reddit"]),
+            ("product hunt", [" product hunt", " producthunt"]), ("threads", [" threads"]), ("messages", [" imessage", " sms"]),
+            ("mail", [" email", " mail", " gmail"]),
+        ]
+        return places.filter { $0.1.contains(where: lower.contains) }.map(\.0)
+    }
+
     /// Whether a command asks about the user's own trips, releases or work (then what's certain goes into its context).
     public static func isAboutTheUsersWork(_ text: String) -> Bool {
-        says(text, aboutTravel) || says(text, aboutReleases) || says(text, aboutDoing)
+        says(text, aboutTravel) || says(text, aboutReleases) || says(text, aboutDoing) || says(text, aboutDoingWe)
+            || (says(text, aboutSharing) && aboutTheUser(text.lowercased()))
+    }
+
+    /// What the user put out (posts on feeds, messages and emails they sent) and what Murmur sent for them, newest
+    /// first: on the places the question names, else all of it. "Have we notified on LinkedIn and WhatsApp?" is
+    /// answered from these, or by saying none was seen.
+    static func sharedByTheUser(for query: String, graph: MemoryGraph, since: Date? = nil, limit: Int = 8) -> [MemoryGraph.StoredItem] {
+        let places = namedPlaces(query)
+        let all = graph.items([.post, .message, .email], limit: 200).filter(\.item.mine)
+            .filter { since == nil || ($0.item.when ?? $0.last) >= since! }
+            .sorted { ($0.item.when ?? $0.last) > ($1.item.when ?? $1.last) }
+        guard !places.isEmpty else { return Array(all.prefix(limit)) }
+        let onThem = all.filter { stored in
+            let at = [stored.item.fields["app"], stored.item.fields["platform"], stored.item.fields["url"], stored.item.key]
+                .compactMap { $0?.lowercased() }.joined(separator: " ")
+            return places.contains { place in
+                place == "mail" ? stored.item.kind == .email : at.contains(place == "x" ? "x.com" : place)
+                    || (place == "x" && at.contains("twitter"))
+            }
+        }
+        return Array(onThem.prefix(limit))
     }
 
     /// Emails the user sent that a question is about: to someone it names, or on a day it names; the latest first.
@@ -47,7 +95,13 @@ public enum MemoryRecall {
     /// did on a day, and what was seen answers it exactly. Nil when a model has to put it together.
     public static func directAnswer(_ question: String, graph: MemoryGraph, now: Date = Date(),
                                     calendar: Calendar = .current) -> String? {
+        // Only something asked of memory gets a ready answer ("what did I do yesterday?" is the brief's): "tell the team
+        // we shipped 1.7" is something to do.
+        guard MemoryRoute.classify(question) != nil else { return nil }
         let lower = question.lowercased()
+        // Several questions at once: a ready answer to one would drop the others; the model answers them all.
+        if MemoryRoute.isCompound(question) { return nil }
+        let theirs = aboutTheUser(lower)
         func day(_ date: Date) -> String {
             calendar.isDate(date, inSameDayAs: now) ? "today"
                 : calendar.isDate(date, inSameDayAs: now.addingTimeInterval(86400)) ? "tomorrow"
@@ -93,7 +147,7 @@ public enum MemoryRecall {
             return parts.joined(separator: " ")
         }
         // "Did I email Tanay?", "who did I email today?".
-        if says(question, aboutEmail), lower.contains(" i ") || lower.hasPrefix("i ") || lower.contains("did i") {
+        if says(question, aboutEmail), theirs {
             let sent = sentEmails(for: question, graph: graph, now: now, calendar: calendar)
             guard !sent.isEmpty else { return nil }
             return sent.prefix(4).map { stored -> String in
@@ -103,16 +157,22 @@ public enum MemoryRecall {
             }.joined(separator: " ")
         }
         // "What did I release?", "which app did I ship recently?", "what's in the latest version?".
-        if says(question, aboutReleases), lower.contains(" i ") || lower.contains(" my ") || lower.hasPrefix("i ") || lower.contains("did i") {
+        if says(question, aboutReleases), theirs {
             // The newest first: by the day it was released, else by its version.
-            let releases = graph.items([.release], limit: 30).filter(\.item.mine).sorted { a, b in
-                if let x = a.item.when, let y = b.item.when, x != y { return x > y }
+            func released(_ stored: MemoryGraph.StoredItem) -> Date? {
+                stored.item.when ?? (["terminal", "tag"].contains(stored.item.fields["source"] ?? "") ? stored.first : nil)
+            }
+            let releases = ItemReader.uniqueReleases(graph.items([.release], limit: 30).filter(\.item.mine)).sorted { a, b in
+                if let x = released(a), let y = released(b), x != y { return x > y }
                 return ItemReader.newerVersion(a.item.fields["version"] ?? "", than: b.item.fields["version"] ?? "")
             }
             if let latest = releases.first {
                 let item = latest.item
-                var answer = "You released \(item.title)"
-                if let when = item.when { answer += " \(day(when) == "today" ? "today" : "on " + day(when))" }
+                let who = lower.contains(" we ") || lower.contains(" our ") ? "We" : "You"
+                let tagged = item.fields["status"] == "tagged" || item.fields["source"] == "terminal"
+                var answer = "\(who) \(tagged ? "tagged" : "released") \(item.title)"
+                if let when = released(latest) { answer += " \(day(when) == "today" ? "today" : "on " + day(when))" }
+                if tagged { answer += " (Murmur saw the tag; its published release page wasn't seen)" }
                 let notes = (item.fields["notes"] ?? "").split(separator: " ").prefix(30).joined(separator: " ")
                 answer += notes.isEmpty ? "." : ": \(notes)\(notes.hasSuffix(".") ? "" : "…")"
                 if releases.count > 1 { answer += " Before that: " + releases.dropFirst().prefix(2).map(\.item.title).joined(separator: ", ") + "." }
@@ -172,6 +232,11 @@ public enum MemoryRecall {
     }
 
     static func line(_ stored: MemoryGraph.StoredItem, calendar: Calendar) -> String {
+        if stored.item.mine, [.post, .message].contains(stored.item.kind) {
+            let at = ScreenDates.formatter("EEE d MMM, HH:mm", calendar).string(from: stored.item.when ?? stored.first)
+            let label = stored.item.kind == .post ? "you posted" : "you sent"
+            return "- \(at): " + stored.item.body.replacingOccurrences(of: "\n", with: "; ") + " [\(label); exact]"
+        }
         let seen = ScreenDates.formatter("d MMM", calendar).string(from: stored.last)
         let where_ = stored.item.fields["url"].flatMap { URL(string: $0)?.host } ?? stored.item.fields["repository"] ?? stored.item.kind.rawValue
         return "- " + stored.item.body.replacingOccurrences(of: "\n", with: "; ") + " [seen on screen, \(where_), \(seen); exact]"
@@ -208,7 +273,7 @@ public enum MemoryRecall {
             if coming.isEmpty { for stored in graph.items([.flight, .booking], limit: 3) { add(stored) } }
         }
         if says(query, aboutReleases) {
-            let releases = graph.items([.release], limit: 30).sorted {
+            let releases = ItemReader.uniqueReleases(graph.items([.release], limit: 30)).sorted {
                 ItemReader.newerVersion($0.item.fields["version"] ?? "", than: $1.item.fields["version"] ?? "")
             }
             let mine = releases.filter(\.item.mine)
@@ -217,6 +282,12 @@ public enum MemoryRecall {
         // Emails the user sent: to whom the question names, else on the day it names, else the latest.
         if says(query, aboutEmail) {
             for stored in sentEmails(for: query, graph: graph, now: now, calendar: calendar).prefix(5) { add(stored) }
+        }
+        // What the user put out (posts, messages, emails), when the question is about telling people: the latest on
+        // the places it names, each with its day, so the answer can set them against the release (or say none came
+        // after it).
+        if says(query, aboutSharing) {
+            for stored in sharedByTheUser(for: query, graph: graph) { add(stored) }
         }
         // 2. Items whose words match (an email's subject, a file, an issue), pages last.
         let matching = graph.searchItems(query, limit: 10)
