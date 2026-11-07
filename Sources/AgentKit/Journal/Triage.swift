@@ -74,6 +74,7 @@ public enum Triage {
                                     seconds: snapshot.seconds, sightings: snapshot.sightings, kind: snapshot.kind,
                                     authored: snapshot.authored, seenAs: snapshot.seenAs)
         copy.readText = snapshot.readText
+        copy.document = snapshot.document
         return copy
     }
 }

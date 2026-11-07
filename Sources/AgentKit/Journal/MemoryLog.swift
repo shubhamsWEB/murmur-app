@@ -43,7 +43,14 @@ public enum MemoryLog {
         return true
     }
 
+    /// Under `swift test`: what the tests read stays out of the real log.
+    static let testing: Bool = {
+        let name = ProcessInfo.processInfo.processName
+        return name.contains("xctest") || name.contains("PackageTests") || name.contains("swiftpm-testing-helper")
+    }()
+
     public static func write(_ line: String) {
+        guard !testing else { return }
         lock.lock(); defer { lock.unlock() }
         let text = "\(time.string(from: Date())) \(line)\n"
         if let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue,

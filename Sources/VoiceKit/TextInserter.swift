@@ -1,3 +1,4 @@
+import AgentKit
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
@@ -7,7 +8,8 @@ import Carbon.HIToolbox
 public enum TextInserter {
     public enum Outcome {
         case inserted
-        /// A password field (or another app holding Secure Input) has the focus: macOS blocks synthetic keystrokes.
+        /// A password field has the focus (or, when the focus can't be read, the front app holds Secure Input): nothing
+        /// is typed. Secure Input held by another app, or left on with a normal text box focused, doesn't stop it.
         case secureInput
         /// Murmur doesn't have Accessibility permission, which posting ⌘V needs.
         case needsAccessibility
@@ -19,7 +21,7 @@ public enum TextInserter {
     @MainActor
     public static func insert(_ text: String) -> Outcome {
         guard AXIsProcessTrusted() else { return .needsAccessibility }
-        if IsSecureEventInputEnabled() { return .secureInput }
+        if SecureInput.passwordFocused() { return .secureInput }
 
         let pasteboard = NSPasteboard.general
         let saved = snapshot(pasteboard)
@@ -51,7 +53,7 @@ public enum TextInserter {
     /// Chrome, Electron apps). Your clipboard is put back right after. Nil when nothing was copied.
     @MainActor
     public static func copySelection() async -> String? {
-        guard AXIsProcessTrusted(), !IsSecureEventInputEnabled() else { return nil }
+        guard AXIsProcessTrusted(), !SecureInput.passwordFocused() else { return nil }
         let pasteboard = NSPasteboard.general
         let saved = snapshot(pasteboard)
         let before = pasteboard.changeCount

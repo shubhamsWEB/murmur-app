@@ -7,10 +7,12 @@ import Foundation
 public final class MemoryServer {
     let brain: BrainStore
     let journal: Journal
+    let graph: MemoryGraph
 
     public init(brain: BrainStore = BrainStore(), journal: Journal = Journal()) {
         self.brain = brain
         self.journal = journal
+        graph = MemoryGraph(url: journal.url)
     }
 
     static let tools: [[String: Any]] = [
@@ -28,6 +30,10 @@ public final class MemoryServer {
         tool("search_screen", "Find windows the user had open: pages, documents, chats and email they saw, by their words.",
              ["query": ["type": "string", "description": "words from what they saw"]], required: ["query"]),
         tool("get_upcoming", "What's coming up for the user: events and things to do, soonest first.", [:]),
+        tool("get_work_history", "What the user worked on, as episodes (one task each: when, how long, which apps, what it "
+             + "was for, how it ended), for a day or matching some words.",
+             ["day": ["type": "string", "description": "YYYY-MM-DD, default today"],
+              "query": ["type": "string", "description": "words about the work (a project, a person); optional"]]),
     ]
 
     static func tool(_ name: String, _ description: String, _ properties: [String: Any], required: [String] = []) -> [String: Any] {
@@ -77,12 +83,18 @@ public final class MemoryServer {
         switch name {
         case "search_memory":
             let vector = LocalReader.embedderInstalled ? LocalReader.embedNow([text("query")], query: true)?.first : nil
-            let hits = MemorySearch(store: brain, journal: journal, vectors: MemoryVectors()).memories(text("query"), vector: vector, limit: 20)
-            let lines = hits.map { "- \($0.memory.text) [about \($0.about); from \($0.memory.origin.display)]" }
+            let vectors = MemoryVectors()
+            let hits = MemorySearch(store: brain, journal: journal, vectors: vectors).memories(text("query"), vector: vector, limit: 20)
+            let lines = MemoryRecall.lines(for: text("query"), graph: graph, brain: brain, vectors: vectors, vector: vector, now: now)
+                + hits.map { "- \($0.memory.text) [about \($0.about); from \($0.memory.origin.display)]" }
                 + Recall.answer(journal, for: text("query"), now: now)
             return lines.isEmpty ? "Nothing known about \"\(text("query"))\"." : lines.joined(separator: "\n")
         case "get_open_loops":
             let loops = journal.loops(limit: 40)
+            let threads = graph.openThreads(now: now, limit: 12).map { Threads.line($0, now: now) }
+            guard threads.isEmpty else {
+                return (threads + loops.map { "- \($0.label): \(Nudges.describe($0, now: now))" }).joined(separator: "\n")
+            }
             return loops.isEmpty ? "No open loops." : loops.map {
                 "- \($0.label.replacingOccurrences(of: "you", with: "the user")): \(Nudges.describe($0, now: now))"
                     + ($0.person.isEmpty ? "" : " (with \($0.person))")
@@ -108,8 +120,21 @@ public final class MemoryServer {
             let seen = journal.search(text("query"), limit: 8)
             return seen.isEmpty ? "Nothing seen matching \"\(text("query"))\"." : seen.map(Recall.seen).joined(separator: "\n")
         case "get_upcoming":
-            let coming = brain.upcoming(limit: 15, now: now)
-            return coming.isEmpty ? "Nothing coming up." : coming.map { "- \($0.memory.text)" }.joined(separator: "\n")
+            let certain = graph.upcoming(now: now, limit: 6).map { "- " + $0.item.body.replacingOccurrences(of: "\n", with: "; ") }
+            let coming = brain.upcoming(limit: 15, now: now).map { "- \($0.memory.text)" }
+            let lines = certain + coming
+            return lines.isEmpty ? "Nothing coming up." : lines.joined(separator: "\n")
+        case "get_work_history":
+            let query = text("query")
+            var episodes: [MemoryGraph.StoredEpisode]
+            if !query.isEmpty {
+                episodes = graph.searchEpisodes(query, limit: 12)
+            } else {
+                let formatter = ScreenDates.formatter("yyyy-MM-dd", .current)
+                let day = formatter.date(from: text("day")).map { Calendar.current.startOfDay(for: $0) } ?? Calendar.current.startOfDay(for: now)
+                episodes = graph.episodes(from: day, to: day.addingTimeInterval(86400)).filter { $0.seconds >= 60 }
+            }
+            return episodes.isEmpty ? "No work found." : episodes.map { MemoryRecall.line($0) }.joined(separator: "\n")
         default:
             return "Unknown tool \(name)."
         }

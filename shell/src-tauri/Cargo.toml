@@ -1,6 +1,6 @@
 [package]
 name = "murmur-shell"
-version = "1.6.0"
+version = "1.7.0"
 description = "Murmur for Windows and Linux: dictation, the tray icon, the hotkey and the search panel, over Murmur's helper"
 edition = "2021"
 publish = false
@@ -43,6 +43,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
                                               # dictation: the key, the paste, the pill that never takes the focus
                                               "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
                                               "Win32_System_LibraryLoader", "Win32_Graphics_Dwm",
+                                              # dictation: where the pill goes, read without waiting on the window thread
+                                              "Win32_Graphics_Gdi", "Win32_UI_HiDpi",
                                               # dictation: the key watcher's thread priority
                                               "Win32_System_Threading",
                                               # Commands & AI: the API keys in the Credential Manager, locking the PC

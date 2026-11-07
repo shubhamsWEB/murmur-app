@@ -92,6 +92,12 @@ public final class BrainStore: @unchecked Sendable {
         let key = kind == .me ? "me" : BrainModel.nameKey(name)
         guard !key.isEmpty else { return nil }
         let at = now.timeIntervalSince1970
+        // The user: there's one of them, whatever key their entity was kept under ("me", or "you" before).
+        if kind == .me, let found = rows("SELECT id FROM entity WHERE kind = 'me' ORDER BY id LIMIT 1", []).first?.first,
+           let id = Int64(found) {
+            exec("UPDATE entity SET last_seen = ? WHERE id = ?", [at, id])
+            return id
+        }
         // The user, by their own name (from their Contacts card), before anyone else of that name: the user's own
         // contact card and what the screen says about "Shubham Agrawal" are about the user, not someone else.
         if kind != .me, let found = rows("SELECT id FROM entity WHERE kind = 'me' AND instr(aliases, ?) > 0 LIMIT 1",
@@ -116,8 +122,75 @@ public final class BrainStore: @unchecked Sendable {
             exec("UPDATE entity SET last_seen = ?, mentions = mentions + 1 WHERE id = ?", [at, id])
             return id
         }
-        return insert("INSERT INTO entity(kind, name, key, aliases, first_seen, last_seen) VALUES(?,?,?,'',?,?)",
-                      [kind.rawValue, name, key, at, at])
+        // A project by another of its names ("Murmur 1.6.0" for Murmur, "shubhamsWEB/murmur-app" for murmur-app): the
+        // same entity, which learns the name as an alias. A new one is named without the version.
+        var named = name
+        if kind == .project {
+            let core = BrainModel.projectCore(name)
+            if !core.isEmpty {
+                for row in rows("SELECT id, name, aliases FROM entity WHERE kind = 'project'", []) {
+                    guard let id = Int64(row[0]) else { continue }
+                    let names = [row[1]] + row[2].split(separator: "\n").map(String.init)
+                    if names.contains(where: { BrainModel.projectCore($0) == core }) {
+                        exec("UPDATE entity SET last_seen = ?, mentions = mentions + 1 WHERE id = ?", [at, id])
+                        aliasLocked(key, to: id)
+                        return id
+                    }
+                }
+                let bare = name.replacingOccurrences(of: #"\s*\b(v(ersion)?\s?)?\d+(\.\d+)+[A-Za-z0-9.-]*\b"#, with: "",
+                                                     options: .regularExpression).trimmingCharacters(in: .whitespaces)
+                if !bare.isEmpty { named = bare }
+            }
+        }
+        let id = insert("INSERT INTO entity(kind, name, key, aliases, first_seen, last_seen) VALUES(?,?,?,'',?,?)",
+                        [kind.rawValue, named, kind == .me ? key : BrainModel.nameKey(named), at, at])
+        guard id != 0 else {
+            // Already there under this key (another process kept it a moment ago): that one.
+            return rows("SELECT id FROM entity WHERE kind = ? AND key = ? LIMIT 1",
+                        [kind.rawValue, kind == .me ? key : BrainModel.nameKey(named)]).first?.first.flatMap { Int64($0) }
+        }
+        if named != name { aliasLocked(key, to: id) }
+        return id
+    }
+
+    private func aliasLocked(_ key: String, to entity: Int64) {
+        let current = rows("SELECT aliases, key FROM entity WHERE id = ?", [entity]).first ?? ["", ""]
+        guard current[1] != key, !current[0].contains("\n\(key)\n") else { return }
+        exec("UPDATE entity SET aliases = ? WHERE id = ?", [(current[0].isEmpty ? "\n" : current[0]) + key + "\n", entity])
+    }
+
+    /// Projects kept under several of their names before they were one: merged into the one with the most known, the
+    /// others' names kept as its aliases. How many were merged.
+    @discardableResult
+    public func mergeProjects() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let projects = rows("""
+            SELECT e.id, e.name, e.aliases, (SELECT count(*) FROM memory m WHERE m.entity = e.id AND m.archived = 0) AS n
+            FROM entity e WHERE e.kind = 'project' ORDER BY n DESC, e.id
+            """, [])
+        var keeper: [String: Int64] = [:]
+        var merged = 0
+        for row in projects {
+            guard let id = Int64(row[0]) else { continue }
+            let core = BrainModel.projectCore(row[1])
+            guard !core.isEmpty else { continue }
+            guard let into = keeper[core] else { keeper[core] = id; continue }
+            exec("UPDATE memory SET entity = ? WHERE entity = ?", [into, id])
+            for alias in [BrainModel.nameKey(row[1])] + row[2].split(separator: "\n").map(String.init) { aliasLocked(alias, to: into) }
+            exec("DELETE FROM entity WHERE id = ?", [id])
+            merged += 1
+        }
+        // The one kept is called by its plain name ("Murmur", not "Murmur 1.6.0").
+        for (core, id) in keeper {
+            guard let name = rows("SELECT name FROM entity WHERE id = ?", [id]).first?.first,
+                  BrainModel.nameKey(name).contains(where: \.isNumber) else { continue }
+            let bare = name.replacingOccurrences(of: #"\s*\b(v(ersion)?\s?)?\d+(\.\d+)+[A-Za-z0-9.-]*\b"#, with: "",
+                                                 options: .regularExpression).trimmingCharacters(in: .whitespaces)
+            guard !bare.isEmpty, BrainModel.projectCore(bare) == core else { continue }
+            aliasLocked(BrainModel.nameKey(name), to: id)
+            exec("UPDATE entity SET name = ?, key = ? WHERE id = ?", [bare, BrainModel.nameKey(bare), id])
+        }
+        return merged
     }
 
     /// Another name an entity goes by ("Mom" for Roma Agrawal): found by either from now on.
@@ -154,6 +227,25 @@ public final class BrainStore: @unchecked Sendable {
         sql += " GROUP BY e.id ORDER BY e.kind = 'me' DESC, count(m.id) + e.mentions DESC, e.last_seen DESC LIMIT ?"
         values.append(limit)
         return rows(sql, values).compactMap(entityRow)
+    }
+
+    /// The people, projects and things named in a request ("forget Project Phoenix"), by name or alias as whole
+    /// words, longest name first. Never the user.
+    public func entities(namedIn text: String, limit: Int = 5) -> [EntityRow] {
+        func plain(_ text: String) -> String {
+            text.lowercased().split { !($0.isLetter || $0.isNumber) }.joined(separator: " ")
+        }
+        let haystack = " " + plain(text) + " "
+        guard haystack.count > 2 else { return [] }
+        return entities(limit: 2000).filter { row in
+            guard row.kind != .me else { return false }
+            return ([row.name] + row.aliases).contains { name in
+                let key = plain(name)
+                return key.count >= 3 && haystack.contains(" " + key + " ")
+            }
+        }
+        .sorted { $0.name.count > $1.name.count }
+        .prefix(limit).map { $0 }
     }
 
     private func entityRow(_ row: [String]) -> EntityRow? {
@@ -320,6 +412,19 @@ public final class BrainStore: @unchecked Sendable {
             }
         }
         return merged
+    }
+
+    /// What an earlier slip left behind: the user kept under the key "you" (found by no lookup, so memories about them
+    /// went to whichever entity was made last), and memories whose entity is gone. Returns how many memories went.
+    @discardableResult
+    public func repairEntities() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        if rows("SELECT id FROM entity WHERE kind = 'me' AND key = 'me'", []).isEmpty {
+            exec("UPDATE entity SET key = 'me' WHERE id = (SELECT id FROM entity WHERE kind = 'me' ORDER BY id LIMIT 1)")
+        }
+        let orphans = Int(rows("SELECT count(*) FROM memory WHERE entity NOT IN (SELECT id FROM entity)", []).first?.first ?? "0") ?? 0
+        exec("DELETE FROM memory WHERE entity NOT IN (SELECT id FROM entity)")
+        return orphans
     }
 
     /// Memories made from the screen, newest first, with what each is about: what the Memory page shows of it.
@@ -673,7 +778,8 @@ public final class BrainStore: @unchecked Sendable {
 
     @discardableResult
     private func insert(_ sql: String, _ values: [Any?]) -> Int64 {
-        exec(sql, values)
+        // A failed insert (a row that's already there) has no id of its own: not the last one inserted.
+        guard exec(sql, values) else { return 0 }
         return db.map(sqlite3_last_insert_rowid) ?? 0
     }
 

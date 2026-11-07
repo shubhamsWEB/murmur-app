@@ -196,10 +196,21 @@ public enum BrainModel {
     public static func strength(_ memory: Memory, now: Date = Date()) -> Double {
         if let expires = memory.expires, expires < now { return 0 }
         if memory.pinned { return 1 }
+        // Seen on screen with a known end (a flight, a deadline): whole until then, gone after.
+        if memory.origin == .screen, memory.expires != nil { return memory.confidence }
         let days = max(0, now.timeIntervalSince(memory.confirmed) / 86400)
         // Importance stretches it (a commitment, a close colleague: up to 1.75 times) or shortens it (something only
         // seen: down to 0.4 times); each use stretches it by a quarter more.
-        let halfLife = memory.kind.halfLife * (0.25 + 1.5 * min(1, max(0.1, memory.importance)))
+        // What the screen says about how things stand ("the user is preparing the release"), a task or an event seen
+        // there, is true for days, not months: it lasts while the screen keeps saying it (each sighting confirms it),
+        // and fades in about a week (a status) or two (a task, an event) once it stops.
+        let base: Double
+        switch (memory.origin, memory.kind) {
+        case (.screen, .status): base = 3
+        case (.screen, .task), (.screen, .event): base = 7
+        default: base = memory.kind.halfLife
+        }
+        let halfLife = base * (0.25 + 1.5 * min(1, max(0.1, memory.importance)))
             * (1 + 0.25 * Double(min(max(memory.uses, 0), 8)))
         return memory.confidence * pow(0.5, days / halfLife)
     }
@@ -291,6 +302,20 @@ public enum BrainModel {
     }
 
     /// A name as it's matched: lowercased, without titles or spare spaces.
+    /// A project's own name without what changes or decorates it: "Murmur 1.6.0", "Murmur v1.6", "murmur-app",
+    /// "shubhamsWEB/murmur-app" and "the Murmur project" are all "murmur". One project, one entity.
+    public static func projectCore(_ name: String) -> String {
+        var text = name.lowercased()
+        if let slash = text.lastIndex(of: "/") { text = String(text[text.index(after: slash)...]) }   // owner/repo
+        text = text.replacingOccurrences(of: #"\b(v(ersion)?\s?)?\d+(\.\d+)+[a-z0-9.-]*\b"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"[-_.]"#, with: " ", options: .regularExpression)
+        var words = text.split { !($0.isLetter || $0.isNumber) }.map(String.init)
+        if words.first == "the" { words.removeFirst() }
+        while let last = words.last, ["app", "application", "project", "repo", "repository", "website", "site", "release",
+                                      "beta"].contains(last), words.count > 1 { words.removeLast() }
+        return words.joined(separator: " ")
+    }
+
     public static func nameKey(_ name: String) -> String {
         var words = name.lowercased().split { $0.isWhitespace || $0 == "." || $0 == "," }.map(String.init)
         while let first = words.first, ["mr", "mrs", "ms", "dr", "prof", "sir"].contains(first) { words.removeFirst() }

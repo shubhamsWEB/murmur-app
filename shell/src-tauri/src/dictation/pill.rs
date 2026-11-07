@@ -3,6 +3,12 @@
 //! person was typing, and clicks go through it. The page is told what to show; the window is hidden once the page's
 //! closing animation is through. With the Murmur button on (logo.rs), the pill opens out of it, where it is, and the
 //! button hides while the pill is out.
+//!
+//! On Windows nothing here waits on the window thread. Tauri's window getters (`hwnd`, `outer_position`,
+//! `cursor_position`, `monitor_from_point`, `is_visible`) post to the event loop and block until it answers. The window
+//! thread is busy for all of startup, and at other moments too. Dictation's thread, waiting on it as the pill opened,
+//! stopped hearing the key: every press queued behind the first. So the windows' handles are kept when they're made,
+//! and where the pill goes and whether it's shown are read straight from Windows.
 
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +42,7 @@ pub fn make(app: &AppHandle) -> tauri::Result<()> {
     let _ = window.set_ignore_cursor_events(true);
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
+        windows::remember(LABEL, hwnd.0 as _);
         windows::never_activate(hwnd.0 as _);
     }
     Ok(())
@@ -83,8 +90,13 @@ fn send(app: &AppHandle, state: serde_json::Value) -> u64 {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(window) = app.get_webview_window(LABEL) {
         if !is_shown(&window) {
-            place(app, &window);
-            show_quietly(&window);
+            #[cfg(windows)]
+            show_quietly_at(&window, windows::pill_spot(WIDTH, HEIGHT, ABOVE_BOTTOM));
+            #[cfg(not(windows))]
+            {
+                place(app, &window);
+                show_quietly(&window);
+            }
         }
     }
     let _ = app.emit_to(LABEL, "pill", state);
@@ -93,7 +105,8 @@ fn send(app: &AppHandle, state: serde_json::Value) -> u64 {
 }
 
 /// Centred on the Murmur button when it's on (the pill's closed capsule is the button's size, so it grows out of it);
-/// otherwise bottom centre of the screen the pointer is on, above the taskbar.
+/// otherwise bottom centre of the screen the pointer is on, above the taskbar. (Windows: `windows::pill_spot`.)
+#[cfg(not(windows))]
 fn place(app: &AppHandle, window: &tauri::WebviewWindow) {
     if let Some(centre) = super::logo::anchor(app) {
         let scale = window.monitor_from_point(centre.x as f64, centre.y as f64).ok().flatten()
@@ -123,14 +136,92 @@ fn place(app: &AppHandle, window: &tauri::WebviewWindow) {
 /// with a close button).
 #[cfg(windows)]
 pub(super) mod windows {
-    use windows_sys::Win32::Foundation::HWND;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
     use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
-        HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-        SW_SHOWNOACTIVATE, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        GetCursorPos, GetWindowLongPtrW, GetWindowRect, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SW_HIDE, SW_SHOWNOACTIVATE, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
+
+    /// The pill's and the Murmur button's handles, kept when they're made (on the window thread, where asking Tauri
+    /// for them doesn't wait): every other thread reads them from here.
+    static PILL: AtomicIsize = AtomicIsize::new(0);
+    static LOGO: AtomicIsize = AtomicIsize::new(0);
+
+    pub fn remember(label: &str, hwnd: HWND) {
+        if let Some(slot) = slot(label) {
+            slot.store(hwnd as isize, Ordering::SeqCst);
+        }
+    }
+
+    pub fn handle(label: &str) -> Option<HWND> {
+        let hwnd = slot(label)?.load(Ordering::SeqCst);
+        (hwnd != 0).then_some(hwnd as HWND)
+    }
+
+    fn slot(label: &str) -> Option<&'static AtomicIsize> {
+        match label {
+            super::LABEL => Some(&PILL),
+            super::super::logo::LABEL => Some(&LOGO),
+            _ => None,
+        }
+    }
+
+    /// The Murmur button's centre on screen (physical pixels), read from Windows.
+    pub fn logo_centre() -> Option<(i32, i32)> {
+        let hwnd = handle(super::super::logo::LABEL)?;
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+            return None;
+        }
+        Some(((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2))
+    }
+
+    /// The screen at a point: its work area (without the taskbar) and its scale.
+    fn screen_at(point: POINT) -> Option<(RECT, f64)> {
+        unsafe {
+            let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+            if monitor.is_null() {
+                return None;
+            }
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(monitor, &mut info) == 0 {
+                return None;
+            }
+            let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
+            let scale = if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == 0 && dpi_x > 0 {
+                dpi_x as f64 / 96.0
+            } else {
+                1.0
+            };
+            Some((info.rcWork, scale))
+        }
+    }
+
+    /// Where the pill's top-left corner goes (physical pixels): centred on the Murmur button when it's on, else bottom
+    /// centre of the screen the pointer is on, `above_bottom` over the taskbar. None: leave it where it is.
+    pub fn pill_spot(width: f64, height: f64, above_bottom: f64) -> Option<(i32, i32)> {
+        if super::super::logo::is_enabled() {
+            if let Some((x, y)) = logo_centre() {
+                let scale = screen_at(POINT { x, y }).map_or(1.0, |(_, scale)| scale);
+                let (w, h) = ((width * scale) as i32, (height * scale) as i32);
+                return Some((x - w / 2, y - h / 2));
+            }
+        }
+        let mut pointer = POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut pointer) };
+        let (area, scale) = screen_at(pointer)?;
+        let (w, h) = ((width * scale) as i32, (height * scale) as i32);
+        let x = area.left + (area.right - area.left - w) / 2;
+        let y = area.bottom - h - (above_bottom * scale) as i32;
+        Some((x, y))
+    }
 
     /// A bare popup, never activated, not in Alt+Tab; no rounded corners or outline on Windows 11.
     pub fn never_activate(hwnd: HWND) {
@@ -151,10 +242,13 @@ pub(super) mod windows {
         }
     }
 
-    /// Shown on top without taking the focus from the app the person is typing in.
-    pub fn show_without_activating(hwnd: HWND) {
+    /// Shown on top without taking the focus from the app the person is typing in; at `at` (physical pixels) if given.
+    pub fn show_without_activating(hwnd: HWND, at: Option<(i32, i32)>) {
         never_activate(hwnd);
         unsafe {
+            if let Some((x, y)) = at {
+                SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            }
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
@@ -176,16 +270,22 @@ pub(super) mod windows {
 /// waiting so as it opened the pill, stopped hearing the key altogether.
 pub(super) fn show_quietly(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
-    {
-        let target = window.clone();
-        let _ = window.run_on_main_thread(move || {
-            if let Ok(hwnd) = target.hwnd() {
-                windows::show_without_activating(hwnd.0 as _);
-            }
-        });
-    }
+    show_quietly_at(window, None);
     #[cfg(not(windows))]
     let _ = window.show();
+}
+
+/// As `show_quietly`, moved to `at` (physical pixels) first, in the same step on the window's thread.
+#[cfg(windows)]
+pub(super) fn show_quietly_at(window: &tauri::WebviewWindow, at: Option<(i32, i32)>) {
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        // On the window thread: asking Tauri for the handle is immediate here.
+        let hwnd = windows::handle(target.label()).or_else(|| target.hwnd().ok().map(|hwnd| hwnd.0 as _));
+        if let Some(hwnd) = hwnd {
+            windows::show_without_activating(hwnd, at);
+        }
+    });
 }
 
 pub(super) fn hide_quietly(window: &tauri::WebviewWindow) {
@@ -193,8 +293,9 @@ pub(super) fn hide_quietly(window: &tauri::WebviewWindow) {
     {
         let target = window.clone();
         let _ = window.run_on_main_thread(move || {
-            if let Ok(hwnd) = target.hwnd() {
-                windows::hide(hwnd.0 as _);
+            let hwnd = windows::handle(target.label()).or_else(|| target.hwnd().ok().map(|hwnd| hwnd.0 as _));
+            if let Some(hwnd) = hwnd {
+                windows::hide(hwnd);
             }
         });
     }
@@ -202,10 +303,12 @@ pub(super) fn hide_quietly(window: &tauri::WebviewWindow) {
     let _ = window.hide();
 }
 
+/// Whether the window is on screen. On Windows from the handle kept when it was made: asking Tauri waits on the
+/// window thread.
 pub(super) fn is_shown(window: &tauri::WebviewWindow) -> bool {
     #[cfg(windows)]
-    if let Ok(hwnd) = window.hwnd() {
-        return windows::visible(hwnd.0 as _);
+    if let Some(hwnd) = windows::handle(window.label()) {
+        return windows::visible(hwnd);
     }
     window.is_visible().unwrap_or(false)
 }

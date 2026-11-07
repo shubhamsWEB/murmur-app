@@ -43,15 +43,21 @@ public enum Power {
 public final class ScreenWatcher {
     private let journal = Journal()
     private let brain = BrainStore()
+    /// The timeline, items, episodes and connections under it all.
+    private let graph = MemoryGraph()
+    /// When items and episodes were last brought up to date (cheap, no model: every few minutes).
+    private var lastStructure = Date.distantPast
     private var settings = ScreenMemorySettings.load()
     private var observer: AXObserver?
     private var observed: pid_t = 0
     private var pending: DispatchWorkItem?
     /// The snapshot in front now, and since when (for its time).
-    private var current: (id: Int64, app: String, domain: String, since: Date, kind: WindowKind)?
+    private var current: (id: Int64, app: String, domain: String, since: Date, kind: WindowKind, sighting: Int64)?
     /// What was being written in each window when it was last read, to notice when it's sent.
     private var drafts: [String: String] = [:]
     private var lightDraft = ""
+    /// The window in front (its app and title), whose message box the glance reads.
+    private var currentKey = ""
     /// Pictures taken this hour, for the budget.
     private var pictureTimes: [Date] = []
     private let budget = WindowVision.Budget()
@@ -62,6 +68,8 @@ public final class ScreenWatcher {
     private var awakeSince = Date()
     /// When a batch was last read while the user worked.
     private var lastGentle = Date.distantPast
+    /// Claude or OpenAI couldn't be reached (or refused): the local model reads until then.
+    private var cloudPause = Date.distantPast
     private var thinking = false
     private var embedding = false
     private let vectors = MemoryVectors()
@@ -78,7 +86,7 @@ public final class ScreenWatcher {
         MemoryLog.write("helper started (pid \(getpid()), Murmur \(parent)): " + describe(settings))
         // Once: memories made from the screen before menus and sidebars were left out, and before what's written was
         // checked against what was seen, go; the windows are read again under the new rules.
-        let marker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-reread-5")
+        let marker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-reread-6")
         if !FileManager.default.fileExists(atPath: marker.path) {
             brain.forget(origin: .screen)
             journal.forgetScreenLoops()   // and the promises taken from a product's website
@@ -97,8 +105,61 @@ public final class ScreenWatcher {
             FileManager.default.createFile(atPath: plansMarker.path, contents: Data())
             if !bookings.isEmpty { MemoryLog.write("reading \(bookings.count) booking pages again for what you have coming up") }
         }
+        // Once: memories rebuilt on the timeline. What was read a window at a time goes; the kept windows get their
+        // timeline, items and episodes, and each episode is read as a whole (with its exact items: flights, releases).
+        let episodesMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-episodes-1")
+        if !FileManager.default.fileExists(atPath: episodesMarker.path) {
+            brain.repairEntities()
+            brain.forget(origin: .screen)
+            journal.forgetScreenLoops()
+            journal.readAgain()
+            let windows = graph.backfill(from: journal)
+            let items = graph.readItems(from: journal, me: brain.meNames())
+            let episodes = graph.segment().count
+            FileManager.default.createFile(atPath: episodesMarker.path, contents: Data())
+            MemoryLog.write("rebuilt screen memory on a timeline: \(windows) windows, \(items) items (flights, releases, "
+                            + "emails, files…), \(episodes) episodes to read")
+        }
+        // Once: the first timeline's items never got kept (their table's name was taken), so its episodes were read
+        // without them (no emails sent, no flight, no project). Items and episodes are made again from the timeline,
+        // with emails, releases and flights read the new way, and read again.
+        let rebuiltMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-episodes-2")
+        if !FileManager.default.fileExists(atPath: rebuiltMarker.path) {
+            brain.forget(itemPrefix: "episode:")
+            journal.forgetScreenLoops()
+            journal.readAgain()
+            graph.rebuild()
+            let items = graph.readItems(from: journal, me: brain.meNames())
+            let episodes = graph.segment().count
+            FileManager.default.createFile(atPath: rebuiltMarker.path, contents: Data())
+            MemoryLog.write("made the timeline's items and episodes again: \(items) items (emails you sent, flights, releases, "
+                            + "files), \(episodes) episodes to read")
+        }
+        // Once: replies awaited are threads now (not open loops), a connecting flight isn't a trip of its own, and
+        // memories of a button or a field name go.
+        let threadsMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-threads-1")
+        if !FileManager.default.fileExists(atPath: threadsMarker.path) {
+            let cleaned = journal.forgetLoops { loop in
+                loop.summary.hasPrefix("Reply from ") || graph.isConnectingFlight(in: loop.summary)
+            }
+            let junk = brain.fromScreen(limit: 5000).filter { EpisodeReader.isJunk(about: $0.about, text: $0.memory.text) }
+            for hit in junk { brain.forget(memory: hit.id) }
+            let opened = Threads.update(graph: graph)
+            FileManager.default.createFile(atPath: threadsMarker.path, contents: Data())
+            MemoryLog.write("opened \(opened) threads from what you sent; dropped \(cleaned) loops and \(junk.count) memories that weren't facts")
+        }
         // Every start: no "you" twice, no promises to yourself.
         if brain.mergeMe() > 0 { MemoryLog.write("put what was kept under your own name with the rest about you") }
+        // Once: build, CI and pull-request states kept as memories before they were left out.
+        let passingMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-passing-1")
+        if !FileManager.default.fileExists(atPath: passingMarker.path) {
+            let passing = brain.fromScreen(limit: 5000).filter { Consolidator.isPassingState($0.memory.text) }
+            for hit in passing { brain.forget(memory: hit.id) }
+            FileManager.default.createFile(atPath: passingMarker.path, contents: Data())
+            if !passing.isEmpty { MemoryLog.write("forgot \(passing.count) build, CI and pull-request states kept as memories") }
+        }
+        let projects = brain.mergeProjects()
+        if projects > 0 { MemoryLog.write("put \(projects) projects kept under other names (versions, repos) with the one they are") }
         journal.forgetLoops(with: brain.meNames())
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
@@ -136,24 +197,39 @@ public final class ScreenWatcher {
         if !settings.enabled { exit(0) }
         if idle() < 60 { soon(after: 0) } else { settle() }
         Task { await takePicture() }
+        structure()
         stayAwake()
         think()
         brief()
         if Date().timeIntervalSince(lastReport) >= 600 {
             let counts = journal.counts()
+            let structure = graph.counts()
             MemoryLog.write("last 10 min: \(captures) windows kept, \(skips) not read; \(counts.snapshots) kept in all, "
-                            + "\(journal.pending(limit: 1000).count) waiting to be read, \(counts.openLoops) open loops")
+                            + "\(structure.items) items, \(structure.episodes) episodes (\(structure.unread) to read), "
+                            + "\(counts.openLoops) open loops")
             captures = 0
             skips = 0
             lastReport = Date()
         }
     }
 
+    /// Items and episodes brought up to date: what's new on the timeline read by rules (no model, a few milliseconds),
+    /// every minute, so an episode that just finished is read within a minute or two.
+    private func structure(force: Bool = false) {
+        guard force || Date().timeIntervalSince(lastStructure) >= 55 else { return }
+        lastStructure = Date()
+        let items = graph.readItems(from: journal, me: brain.meNames())
+        let finished = graph.segment().count
+        let threads = Threads.update(graph: graph)
+        if threads > 0 { MemoryLog.write("opened \(threads) threads from what you sent") }
+        if items > 0 || finished > 0 { MemoryLog.write("timeline: \(items) new items, \(finished) episodes finished") }
+    }
+
     /// Plugged in with windows waiting: the Mac doesn't sleep by itself until they're read (the display still turns
     /// off and the screen still locks), for at most three hours at a time. Unplugged, or nothing waiting: sleeps as
     /// it always does.
     private func stayAwake() {
-        let wanted = Power.now().plugged && Power.now().mayThink && !journal.pending(limit: 1).isEmpty
+        let wanted = Power.now().plugged && Power.now().mayThink && graph.unreadCount() > 0
             && (awake == nil || Date().timeIntervalSince(awakeSince) < 3 * 3600)
         if wanted, awake == nil {
             awake = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
@@ -163,7 +239,7 @@ public final class ScreenWatcher {
         } else if !wanted, let held = awake, !thinking {
             ProcessInfo.processInfo.endActivity(held)
             awake = nil
-            MemoryLog.write("letting the Mac sleep again: " + (journal.pending(limit: 1).isEmpty ? "everything is read"
+            MemoryLog.write("letting the Mac sleep again: " + (graph.unreadCount() == 0 ? "everything is read"
                                                               : "unplugged, or three hours were enough for now"))
         }
     }
@@ -182,12 +258,17 @@ public final class ScreenWatcher {
     }
 
     /// The morning brief, the evening wrap-up and reminders, when it's their time (one short model call each).
+    /// The brief, the wrap-up and reminders. Never held back by the battery: without the model (on battery, in Low
+    /// Power Mode, when the Mac is hot) they're the facts as they are, which costs nothing. Only waits a minute when
+    /// the reader is busy.
     private func brief() {
-        guard !thinking, Power.now().mayThink else { return }
+        guard !thinking else { return }
+        let mayThink = Power.now().mayThink
         thinking = true
         Task {
             defer { thinking = false }
-            await Nudges.make(journal: journal, brain: brain, settings: settings, model: await BrainDistiller.model())
+            let model = mayThink ? await BrainDistiller.model() : nil
+            await Nudges.make(journal: journal, brain: brain, graph: graph, settings: settings, model: model)
         }
     }
 
@@ -238,6 +319,7 @@ public final class ScreenWatcher {
         let seconds = max(0, min(now.timeIntervalSince(current.since), 300))   // away from the Mac doesn't count
         journal.stayed(current.id, seconds: seconds, now: now)
         journal.spend(seconds, app: current.app, domain: current.domain, at: now)
+        graph.stayed(current.sighting, until: current.since.addingTimeInterval(seconds))
         self.current = nil
     }
 
@@ -259,27 +341,49 @@ public final class ScreenWatcher {
         // What was in the message box last time and is now in the conversation, with the box empty: it was sent.
         let key = capture.app + "|" + capture.title
         let kind = WindowKind(rawValue: capture.kind) ?? .app
-        if kind == .conversation, let sent = ScreenText.sent(before: drafts[key] ?? "", now: draft, in: capture.text) {
+        // An email leaves no copy in the inbox it goes back to: the box emptying (or the compose window going) is it sent.
+        let isMail = ItemReader.mailApps.contains(capture.app) || ItemReader.mailDomains.contains(capture.domain)
+        let before = drafts[key] ?? ""
+        if kind == .conversation, let sent = ScreenText.sent(before: before, now: draft, in: capture.text)
+            ?? (isMail && draft.isEmpty && before.split(separator: " ").count >= 3 ? before : nil) {
             capture.authored = sent
             MemoryLog.write("kept a message you sent in \(capture.app)")
         }
+        // A compose window that closed (Mail, Outlook): what was in it was sent.
+        // (A compose window renamed by its subject still has the text in its box: not sent.)
+        if key != currentKey, draft.isEmpty, let gone = drafts[currentKey], gone.split(separator: " ").count >= 3,
+           currentKey.hasPrefix("Mail|") || currentKey.hasPrefix("Microsoft Outlook|"), !ScreenReader.windowExists(currentKey) {
+            MemoryLog.write("kept an email you sent from \(currentKey.split(separator: "|").first ?? "Mail")")
+            capture.authored = (capture.authored.isEmpty ? "" : capture.authored + "\n") + gone
+            drafts[currentKey] = nil
+        }
         drafts[key] = draft
+        currentKey = key
         settle(now: now)
         let kept = journal.record(capture, now: now)
+        let sighting = graph.sighted(snapshot: kept.id, at: now, app: capture.app, title: capture.title, domain: capture.domain,
+                                     kind: capture.kind)
         captures += 1
         if capture.via == "image" { MemoryLog.write("read a picture of \(capture.app) (little text)") }
-        current = (kept.id, capture.app, capture.domain, now, kind)
+        current = (kept.id, capture.app, capture.domain, now, kind, sighting)
     }
 
     /// A message box that just emptied in a conversation: read the window now.
     private func glance() {
-        guard settings.rules.authored, current?.kind == .conversation, idle() < 30 else { lightDraft = ""; return }
+        guard settings.rules.authored, current?.kind == .conversation else { return }
         let draft = ScreenReader.frontDraft()
+        // The latest of what's being written, for when it's sent (the last full read may have caught only its start).
+        if !draft.isEmpty, !currentKey.isEmpty { drafts[currentKey] = draft }
         if !lightDraft.isEmpty, draft.isEmpty { soon(after: 1) }
         lightDraft = draft
     }
 
     // MARK: Pictures
+
+    /// The model, as an episode reader asks it.
+    nonisolated static func ask(_ model: String, fast: Bool) -> EpisodeReader.Ask {
+        { system, user in await Consolidator.chat(system, user, schema: EpisodeReader.schema, model: model, fast: fast, maxTokens: 700) }
+    }
 
     /// A small picture of the window you've stayed in, for the vision model to look at later: only on a Mac that can
     /// run it, for windows whose meaning their text leaves open, within the budget.
@@ -335,6 +439,34 @@ public final class ScreenWatcher {
                 await MainActor.run { self?.embedding = false }
             }
         }
+        // Reading with Claude or OpenAI (the user turned it on, with their key): any time, on any Mac, on battery too
+        // (the Mac only sends text), the episodes that finished first. Back to the local model when it can't be reached.
+        if let provider = settings.cloudReader, Date() >= cloudPause, let ask = CloudReader.ask(provider),
+           graph.unreadCount(includePrivate: false) > 0 {
+            waiting("")
+            thinking = true
+            Task {
+                defer { thinking = false }
+                let started = Date()
+                structure(force: true)
+                let read = await EpisodeReader.pass(graph: graph, journal: journal, brain: brain, ask: ask, vectors: vectors,
+                                                    limit: 20, remote: true) { Power.now().mayCapture }
+                if read == 0, graph.unreadCount(includePrivate: false) > 0 {
+                    cloudPause = Date().addingTimeInterval(10 * 60)   // offline, or the key refused: the local model meanwhile
+                    return
+                }
+                if let prose = CloudReader.ask(provider, json: false) {
+                    await Consolidator.chronicle(journal: journal, model: "", now: Date(), keepGoing: { true }, graph: graph, ask: prose)
+                }
+                if read > 0 {
+                    let name = provider == "openai" ? "OpenAI" : "Claude"
+                    MemoryLog.write("read \(read) episodes of what you did with \(name) in "
+                                    + String(format: "%.0f s", Date().timeIntervalSince(started)))
+                    MemoryLog.setStatus("Read \(read) episodes with \(name) at " + Date().formatted(date: .omitted, time: .shortened))
+                }
+            }
+            return
+        }
         guard power.mayThink else {
             waiting(power.lowPower ? "Low Power Mode is on" : power.hot ? "the Mac is hot"
                     : "on battery at \(power.battery ?? 0)% (reads plugged in, or above 50%)")
@@ -343,13 +475,15 @@ public final class ScreenWatcher {
         let load = cpuLoad() ?? 1
         // "Read Now" on the Memory page: a full round now, while the user is here.
         let asked = MemoryLog.takeReadingRequest()
-        // While the user works: only on a Mac strong enough (Apple silicon, 16 GB or more), plugged in, and quiet,
-        // one batch every three minutes, without summaries or pictures. On anything less, only while they're away.
+        // While the user works, on the fly: on a Mac strong enough (Apple silicon, 16 GB or more), plugged in, and not
+        // busy, one episode a minute (the one that just finished first), without summaries or pictures: a few seconds
+        // of the reader at background priority. On anything less, only while they're away.
         var gentle = false
         if idle() <= 120, !asked {
-            guard canSee, power.plugged, load < 0.25, Date().timeIntervalSince(lastGentle) >= 180,
-                  !journal.pending(limit: 1).isEmpty else {
-                waiting("you're using the Mac (reads after 2 minutes away)")
+            guard canSee, power.plugged, load < 0.4, Date().timeIntervalSince(lastGentle) >= 55,
+                  graph.unreadCount() > 0 else {
+                waiting(canSee && power.plugged ? "other apps are keeping the Mac busy (reads when it's quieter)"
+                        : "you're using the Mac (reads after 2 minutes away; while you work only plugged in, on Apple silicon with 16 GB)")
                 return
             }
             gentle = true
@@ -366,12 +500,13 @@ public final class ScreenWatcher {
             if gentle {
                 guard let model = await BrainDistiller.model() else { return }
                 let started = Date()
-                let read = await Consolidator.pass(journal: journal, brain: brain, model: model, batchesPerPass: 1,
-                                                   vectors: vectors, summaries: false) { Power.now().mayThink }
+                structure(force: true)
+                let read = await EpisodeReader.pass(graph: graph, journal: journal, brain: brain, ask: Self.ask(model, fast: false),
+                                                    vectors: vectors, limit: 1) { Power.now().mayThink }
                 if read > 0 {
-                    MemoryLog.write("read \(read) windows while you worked (the Mac was quiet) in "
+                    MemoryLog.write("read \(read) episode while you worked (the Mac was quiet) in "
                                     + String(format: "%.0f s", Date().timeIntervalSince(started)))
-                    MemoryLog.setStatus("Read \(read) windows while you worked, at "
+                    MemoryLog.setStatus("Read what you did while you worked, at "
                                         + Date().formatted(date: .omitted, time: .shortened))
                 }
                 return
@@ -395,20 +530,24 @@ public final class ScreenWatcher {
                 return
             }
             let started = Date()
-            let pending = journal.pending(limit: 1000).count
+            structure(force: true)
+            let pending = graph.unreadCount()
             let keepGoing: @Sendable () -> Bool = { asked ? Power.now().mayThink
                 : Brain.idleSeconds() > 60 && Power.now().mayThink }
             // Plugged in: at full speed. On a well-charged battery: as many windows a round, at background priority.
             let now = Power.now()
-            let read = await Consolidator.pass(journal: journal, brain: brain, model: model,
-                                               batchesPerPass: now.plugged || (now.battery ?? 0) >= 50 ? 6 : 3,
-                                               vectors: vectors, fast: now.plugged, keepGoing: keepGoing)
-            MemoryLog.write("read \(read) of \(pending) waiting windows with \(model) in "
+            let read = await EpisodeReader.pass(graph: graph, journal: journal, brain: brain, ask: Self.ask(model, fast: now.plugged),
+                                                vectors: vectors, limit: now.plugged ? 12 : 6, keepGoing: keepGoing)
+            if keepGoing() {
+                await Consolidator.chronicle(journal: journal, model: model, now: Date(), keepGoing: keepGoing, graph: graph)
+            }
+            MemoryLog.write("read \(read) of \(pending) episodes of what you did with \(model) in "
                             + String(format: "%.0f s", Date().timeIntervalSince(started))
                             + (keepGoing() ? "" : " (stopped: you came back, or the power changed)"))
-            MemoryLog.setStatus("Read \(read) windows at " + Date().formatted(date: .omitted, time: .shortened)
+            MemoryLog.setStatus("Read \(read) episodes of your work at " + Date().formatted(date: .omitted, time: .shortened)
                                 + (keepGoing() ? "" : "; stopped when you came back"))
             journal.prune()
+            graph.prune()
         }
     }
 }

@@ -41,6 +41,8 @@ public final class DictationController: ObservableObject {
     private var lastTapAt = Date.distantPast
     private var retryTimer: Timer?
     private var openedAccessibilitySettings = false
+    /// The app last logged as holding Secure Input while Murmur typed anyway (so it's said once, not every time).
+    private var secureHolderLogged: String?
     private var warnedAboutKey = false
     /// ⌃ was held with the dictation key: the speech is a command, not text to type.
     private var commandRequested = false
@@ -82,6 +84,8 @@ public final class DictationController: ObservableObject {
     public var onOpenModelSettings: (() -> Void)?
     /// Opens Murmur's window (the floating button, set by the app).
     public var onOpenApp: (() -> Void)?
+    /// The microphone is on: what a command will need can start loading while the user speaks.
+    public var onListening: (() -> Void)?
     /// Opens Settings at the speech languages (no speech model chosen yet).
     public var onOpenSpeechSettings: (() -> Void)?
     /// The search's best matches for a description of a file (set by the app).
@@ -103,6 +107,8 @@ public final class DictationController: ObservableObject {
     private static let fitTextDefault = "dictation.fitText"
     private static let microphoneDefault = "dictation.microphone"
     private static let preferBuiltInDefault = "dictation.preferBuiltInMic"
+    private static let clearVoiceDefault = "dictation.clearVoice"
+    private static let lowLevelWarnedDefault = "dictation.lowLevelWarned"
     private static let showLogoDefault = "dictation.showLogo"
     private static let aiCleanupDefault = "dictation.aiCleanup"
 
@@ -125,6 +131,18 @@ public final class DictationController: ObservableObject {
         set {
             UserDefaults.standard.set(newValue, forKey: Self.preferBuiltInDefault)
             recorder.preferBuiltIn = newValue
+            objectWillChange.send()
+        }
+    }
+
+    /// Clear voice: macOS's voice processing on the microphone (as FaceTime uses): background noise and echo out,
+    /// your level evened out, before Murmur hears it. On unless turned off.
+    public var clearVoice: Bool {
+        get { UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.clearVoiceDefault)
+            recorder.clearVoice = newValue
+            log("dictation: clear voice \(newValue ? "on" : "off")")
             objectWillChange.send()
         }
     }
@@ -289,6 +307,7 @@ public final class DictationController: ObservableObject {
         }
         recorder.chosenUID = UserDefaults.standard.string(forKey: Self.microphoneDefault)
         recorder.preferBuiltIn = UserDefaults.standard.object(forKey: Self.preferBuiltInDefault) as? Bool ?? true
+        recorder.clearVoice = UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? true
         hud.onVisible = { [weak self] frame in self?.logo.pillMoved(frame) }
         // With the Murmur button on screen, the listening pill grows out of it (one pill, not two).
         hud.anchor = { [weak self] in self?.logo.anchor }
@@ -702,8 +721,13 @@ public final class DictationController: ObservableObject {
             }
             micLive = true
             let name = result.device.map { "\($0.name) (\($0.kind))" } ?? "the default microphone"
-            log(String(format: "dictation: listening with %@, on in %.2f s", name, result.took))
+            let level = result.inputVolume.map { String(format: ", input level %.0f%%", $0 * 100) } ?? ""
+            log(String(format: "dictation: listening with %@%@%@, on in %.2f s", name, result.cleaned ? " (clear voice)" : "",
+                       level, result.took))
             if let fellBack = result.fellBack { log("dictation: used the default microphone instead of \(fellBack)") }
+            onListening?()
+            if let problem = result.clearVoiceProblem { log("dictation: clear voice isn't available with \(name): \(problem)") }
+            if let volume = result.inputVolume { warnIfLow(volume, microphone: result.device?.name) }
             guard case .listening(let handsFree) = phase else { return }
             if showingMicStart {
                 showingMicStart = false
@@ -711,6 +735,22 @@ public final class DictationController: ObservableObject {
             }
         }
     }
+
+    /// The microphone's input level turned down in System Settings › Sound (under 40 %) makes every word arrive faint,
+    /// and nothing after the microphone can bring back what wasn't recorded. Said (at most once a day) when a
+    /// dictation comes back empty, where it explains why.
+    private func warnIfLow(_ volume: Float, microphone: String?) {
+        lowLevelNotice = nil
+        guard volume < 0.4 else { return }
+        let last = UserDefaults.standard.object(forKey: Self.lowLevelWarnedDefault) as? Date ?? .distantPast
+        guard Date().timeIntervalSince(last) > 86_400 else { return }
+        lowLevelNotice = String(format: "%@ is set to %.0f%% · raise Input level in System Settings › Sound",
+                                microphone ?? "Your microphone", volume * 100)
+        log(String(format: "dictation: %@'s input level is %.0f%%", microphone ?? "the microphone", volume * 100))
+    }
+
+    /// Shown when the dictation in progress comes back empty.
+    private var lowLevelNotice: String?
 
     /// The pill while recording: a command (⌃), typing only (⇧), or plain listening.
     private func listeningMode(handsFree: Bool) -> DictationHUD.Mode {
@@ -765,9 +805,10 @@ public final class DictationController: ObservableObject {
             return
         }
         phase = .transcribing
-        let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 40 : 30)
-        log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, gain +%.0f dB%@",
-                   leveled.speechDB, leveled.noiseDB, leveled.gainDB, whisperMode ? " (quiet voice)" : ""))
+        let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 40 : 30, cleaned: recorder.cleaned)
+        log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, noise −%.0f dB, gain +%.0f dB%@%@",
+                   leveled.speechDB, leveled.noiseDB, leveled.noiseReducedDB, leveled.gainDB,
+                   recorder.cleaned ? " (clear voice)" : "", whisperMode ? " (quiet voice)" : ""))
         let samples = leveled.samples
         lastSamples = samples
         // Next to no sound at all: the microphone isn't hearing you (muted, the wrong one, a closed lid).
@@ -801,6 +842,10 @@ public final class DictationController: ObservableObject {
                         log("dictation: no sound from \(micName ?? "the microphone")")
                         hud.flash("No sound from \(micName ?? "the microphone") · choose another in Settings",
                                   seconds: 4, tone: .problem)
+                    } else if let notice = lowLevelNotice {
+                        lowLevelNotice = nil
+                        UserDefaults.standard.set(Date(), forKey: Self.lowLevelWarnedDefault)
+                        hud.flash(notice, seconds: 5, tone: .problem)
                     } else {
                         hud.flash("Didn't catch that")
                     }
@@ -946,8 +991,14 @@ public final class DictationController: ObservableObject {
     private func report(_ outcome: TextInserter.Outcome) {
         switch outcome {
         case .inserted:
-            break
+            // Secure Input held elsewhere no longer stops typing; said once per holder, for the log.
+            let holder = SecureInput.holderName()
+            if holder != secureHolderLogged {
+                if let holder { log("paste: Secure Input is on (held by \(holder)), typing anyway: no password field has the focus") }
+                secureHolderLogged = holder
+            }
         case .secureInput:
+            log("paste: a password field has the focus (Secure Input held by \(SecureInput.holderName() ?? "nobody")), nothing typed")
             hud.flash("Can't type into a password field · use Paste Last Dictation")
         case .needsAccessibility:
             // Keep the words: they go on the clipboard, so ⌘V still works. Settings opens once per launch, not on

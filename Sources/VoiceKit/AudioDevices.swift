@@ -40,6 +40,19 @@ public enum AudioDevices {
         }
     }
 
+    /// A microphone's input level in System Settings › Sound, 0…1; nil for one without a level of its own.
+    public static func inputVolume(_ id: AudioDeviceID) -> Float? {
+        for element in [kAudioObjectPropertyElementMain, 1] {
+            var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
+                                                     mScope: kAudioDevicePropertyScopeInput, mElement: element)
+            guard AudioObjectHasProperty(id, &address) else { continue }
+            var volume = Float32(0)
+            var size = UInt32(MemoryLayout<Float32>.size)
+            if AudioObjectGetPropertyData(id, &address, 0, nil, &size, &volume) == noErr { return volume }
+        }
+        return nil
+    }
+
     /// The system's default microphone (System Settings › Sound › Input).
     public static func defaultInput() -> Input? {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,

@@ -188,6 +188,7 @@ impl Dictation {
                         keys::Press::Revived => worker.note("key watcher: Windows had dropped it, so it was put back (this press still counts)"),
                         keys::Press::Command => worker.mode_key(true),
                         keys::Press::Typing => worker.mode_key(false),
+                        keys::Press::Ready => worker.key_ready(),
                     }
                     *worker.busy.lock().unwrap() = None;
                 }
@@ -495,6 +496,16 @@ impl Inner {
             *self.last_tap.lock().unwrap() = Some(at);
         } else {
             self.end();
+        }
+    }
+
+    /// The key watcher is on: said in the log (with the key), and Settings' problem with it, if any, cleared.
+    fn key_ready(&self) {
+        let was = self.key_problem.lock().unwrap().take();
+        self.note(&format!("key watcher: on, listening for {}{}", self.config().key.title(),
+                           if was.is_some() { " (Windows let it be set at last)" } else { "" }));
+        if was.is_some() {
+            self.changed();
         }
     }
 

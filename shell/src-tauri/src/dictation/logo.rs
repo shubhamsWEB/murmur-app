@@ -41,6 +41,7 @@ pub fn make(app: &AppHandle, position: Option<(i32, i32)>, save: impl Fn(i32, i3
         .build()?;
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
+        super::pill::windows::remember(LABEL, hwnd.0 as _);
         super::pill::windows::never_activate(hwnd.0 as _);
     }
     place(&window, position);
@@ -67,7 +68,15 @@ pub fn set_enabled(app: &AppHandle, on: bool) {
     update(app);
 }
 
-/// Where the listening pill should open: the button's centre, while it's on.
+/// Whether the button is on (Settings → Murmur button on screen).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::SeqCst)
+}
+
+/// Where the listening pill should open: the button's centre, while it's on. (Windows: `pill::windows::pill_spot`,
+/// which doesn't wait on the window thread.)
+#[cfg_attr(windows, allow(dead_code))]
 pub fn anchor(app: &AppHandle) -> Option<PhysicalPosition<i32>> {
     if !ENABLED.load(Ordering::SeqCst) {
         return None;

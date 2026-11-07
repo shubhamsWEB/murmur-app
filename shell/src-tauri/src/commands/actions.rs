@@ -401,7 +401,8 @@ fn key_event(code: u16, up: bool) -> INPUT {
     if extended {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
-    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: flags, time: 0,
+        dwExtraInfo: crate::dictation::keys::OWN_INPUT } } }
 }
 
 fn send(inputs: &[INPUT]) {
