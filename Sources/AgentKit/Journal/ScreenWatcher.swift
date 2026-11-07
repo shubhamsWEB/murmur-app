@@ -135,6 +135,14 @@ public final class ScreenWatcher {
             MemoryLog.write("made the timeline's items and episodes again: \(items) items (emails you sent, flights, releases, "
                             + "files), \(episodes) episodes to read")
         }
+        // Once: the timeline is read again for what the readers learned (your own posts on LinkedIn, a release
+        // tagged but not yet published, a tag pushed from the terminal), so what happened before this version counts.
+        let postsMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-posts-1")
+        if !FileManager.default.fileExists(atPath: postsMarker.path) {
+            let items = graph.readAllItemsAgain(from: journal, me: brain.meNames())
+            FileManager.default.createFile(atPath: postsMarker.path, contents: Data())
+            MemoryLog.write("read the timeline again for posts, tags and releases: \(items) new items")
+        }
         // Once: replies awaited are threads now (not open loops), a connecting flight isn't a trip of its own, and
         // memories of a button or a field name go.
         let threadsMarker = MemoryLog.url.deletingLastPathComponent().appendingPathComponent(".screen-memory-threads-1")
@@ -180,8 +188,8 @@ public final class ScreenWatcher {
         Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.minute() }
         }
-        // In a conversation, a glance every ten seconds at the message box alone (cheap): when it empties, a message
-        // was sent, and the window is read to keep what the user wrote.
+        // In a conversation or on a feed, a glance every ten seconds at the box being written in alone (cheap): when it
+        // empties, a message was sent (or a post published), and the window is read to keep what the user wrote.
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.glance() }
         }
@@ -349,6 +357,12 @@ public final class ScreenWatcher {
             capture.authored = sent
             MemoryLog.write("kept a message you sent in \(capture.app)")
         }
+        // A post (or a comment) on a feed: the box it was written in emptied, and it's on the page now, or the site
+        // said it was posted. A search box empties too, so only something sentence-long counts.
+        if kind == .feed || kind == .video, let sent = ScreenText.posted(before: before, now: draft, in: capture.text) {
+            capture.authored = sent
+            MemoryLog.write("kept a post you published on \(capture.domain.isEmpty ? capture.app : capture.domain)")
+        }
         // A compose window that closed (Mail, Outlook): what was in it was sent.
         // (A compose window renamed by its subject still has the text in its box: not sent.)
         if key != currentKey, draft.isEmpty, let gone = drafts[currentKey], gone.split(separator: " ").count >= 3,
@@ -370,7 +384,7 @@ public final class ScreenWatcher {
 
     /// A message box that just emptied in a conversation: read the window now.
     private func glance() {
-        guard settings.rules.authored, current?.kind == .conversation else { return }
+        guard settings.rules.authored, let kind = current?.kind, [.conversation, .feed, .video].contains(kind) else { return }
         let draft = ScreenReader.frontDraft()
         // The latest of what's being written, for when it's sent (the last full read may have caught only its start).
         if !draft.isEmpty, !currentKey.isEmpty { drafts[currentKey] = draft }

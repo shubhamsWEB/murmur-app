@@ -8,11 +8,16 @@ public final class MemoryServer {
     let brain: BrainStore
     let journal: Journal
     let graph: MemoryGraph
+    /// The one index over this memory, and its vectors (the same file as the journal).
+    let index: MemoryIndex
+    let vectors: MemoryVectors
 
     public init(brain: BrainStore = BrainStore(), journal: Journal = Journal()) {
         self.brain = brain
         self.journal = journal
         graph = MemoryGraph(url: journal.url)
+        index = MemoryIndex(url: journal.url)
+        vectors = MemoryVectors(url: journal.url)
     }
 
     static let tools: [[String: Any]] = [
@@ -82,13 +87,17 @@ public final class MemoryServer {
         let now = Date()
         switch name {
         case "search_memory":
-            let vector = LocalReader.embedderInstalled ? LocalReader.embedNow([text("query")], query: true)?.first : nil
-            let vectors = MemoryVectors()
-            let hits = MemorySearch(store: brain, journal: journal, vectors: vectors).memories(text("query"), vector: vector, limit: 20)
-            let lines = MemoryRecall.lines(for: text("query"), graph: graph, brain: brain, vectors: vectors, vector: vector, now: now)
-                + hits.map { "- \($0.memory.text) [about \($0.about); from \($0.memory.origin.display)]" }
-                + Recall.answer(journal, for: text("query"), now: now)
-            return lines.isEmpty ? "Nothing known about \"\(text("query"))\"." : lines.joined(separator: "\n")
+            // The same one way into memory the app uses (BrainRecall), so Claude Code and Cursor get the same answers.
+            let query = text("query")
+            index.sync(now: now)
+            // What Murmur did for the user lives with the app's own memory, not in a copy being searched.
+            if journal.url == BrainStore.defaultURL { index.putMurmur(CommandMemory.actionsForIndex(days: 30)) }
+            let parts = BrainRecall.parts(query)
+            let embedded = LocalReader.embedderInstalled ? LocalReader.embedNow(parts, query: true) : nil
+            let names = Grounding.vocabulary(brain: brain, graph: graph, prefs: CommandMemory.preferences()).map(\.name)
+            let evidence = BrainRecall(index: index, vectors: vectors).recall(query, names: names, vectors: embedded,
+                                                                                    now: now, limit: 14)
+            return evidence.isEmpty ? "Nothing known about \"\(query)\"." : evidence.text(limit: 7000)
         case "get_open_loops":
             let loops = journal.loops(limit: 40)
             let threads = graph.openThreads(now: now, limit: 12).map { Threads.line($0, now: now) }

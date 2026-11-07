@@ -56,7 +56,7 @@ public enum ScreenReader {
             : (attribute(window, kAXDocumentAttribute) as String?).flatMap(ScreenText.documentPath)
         let domain = Journal.Capture(app: "", bundle: "", title: "", url: url, text: "").domain
         guard skip(bundle: bundle, title: title, domain: domain, rules: rules) == nil else { return nil }
-        let name = app.localizedName ?? bundle
+        let name = ScreenText.appName(app.localizedName ?? bundle)
         var text = ScreenText.clean(Self.text(of: window))
         var via = "text", labels = ""
         // Little text to go on: a picture of the window, read on this Mac.
@@ -69,7 +69,9 @@ public enum ScreenReader {
         }
         guard words(text) >= 5 || !labels.isEmpty else { return nil }
         let kind = WindowKind.of(app: name, domain: domain, url: url, title: title, text: text)
-        let capture = Journal.Capture(app: name, bundle: bundle, title: title, url: url, text: String(text.prefix(16_000)),
+        // A terminal's newest lines are at the bottom: keep those (the top is old scrollback). Elsewhere, the top.
+        let kept = ItemReader.terminals.contains(name) ? String(text.suffix(16_000)) : String(text.prefix(16_000))
+        let capture = Journal.Capture(app: name, bundle: bundle, title: ScreenText.appName(title), url: url, text: kept,
                                       via: via, labels: labels, kind: kind.rawValue, document: document)
         return (capture, rules.authored ? draft(in: element) : "")
     }

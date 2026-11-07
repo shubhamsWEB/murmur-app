@@ -1,0 +1,386 @@
+import Foundation
+
+/// Everything Murmur remembers, as one kind of record in one index: what the user did (sent, posted, released, worked
+/// on), what's theirs (a flight, a file), conversations, facts, summaries of their days, promises, what Murmur did for
+/// them, and the raw windows everything else was read from. One record says what happened, who did it, when, about
+/// whom or what, and where it came from.
+///
+/// Before this there were six stores and fifteen keyword lists deciding which one a question went to ("release" →
+/// releases, "flight" → flights): a question in other words, or about two things, missed even when memory held the
+/// answer. On 7 Nov "what did we release?" was answered with 1.5.1 while two episodes said "Releasing Murmur 1.7.0".
+/// Now every question searches all of it at once (`BrainRecall`), and the stores stay what they are underneath: the
+/// index is rebuilt from them, never written to by anyone else.
+public final class MemoryIndex: @unchecked Sendable {
+    public enum Kind: String, Sendable, CaseIterable {
+        /// The user did it: sent, posted, released, tagged, worked on.
+        case did
+        /// The user's own thing: a booking, a file, a project.
+        case yours
+        /// Someone the user is in a conversation with, and where it stands.
+        case conversation
+        /// Something known: from Contacts, Calendar, what the user told Murmur, a note, a page.
+        case fact
+        /// A summary of an hour or a day.
+        case summary
+        /// Something promised or owed.
+        case promise
+        /// What Murmur did for the user (a message it sent, a reminder it made).
+        case murmur
+        /// A window as it was on screen: the source of truth for everything above, ranked below it.
+        case saw
+    }
+
+    public struct Record: Sendable, Equatable {
+        public var id: Int64 = 0
+        /// Where it came from, unique: "item:259", "episode:84", "snapshot:744".
+        public var source: String
+        public var kind: Kind
+        /// "me" (the user), "murmur", or "other".
+        public var actor: String
+        /// When it happened (else when it was first seen).
+        public var at: Date?
+        public var title: String
+        public var text: String
+        /// Who and what it involves: people, apps, projects.
+        public var entities: [String]
+        /// How much to trust it, 0 to 1: what the user did and what they told Murmur first, raw windows last.
+        public var prior: Double
+
+        public init(source: String, kind: Kind, actor: String, at: Date?, title: String, text: String,
+                    entities: [String] = [], prior: Double) {
+            self.source = source
+            self.kind = kind
+            self.actor = actor
+            self.at = at
+            self.title = title
+            self.text = text
+            self.entities = entities
+            self.prior = prior
+        }
+    }
+
+    private let db: SQLiteConnection
+    private let lock = NSLock()
+
+    public init(url: URL = BrainStore.defaultURL) {
+        db = SQLiteConnection(url: url)
+        db.exec("""
+            CREATE TABLE IF NOT EXISTS recall_record(id INTEGER PRIMARY KEY, source TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+              actor TEXT NOT NULL, at REAL, title TEXT NOT NULL, text TEXT NOT NULL, entities TEXT NOT NULL, prior REAL NOT NULL)
+            """)
+        db.exec("CREATE INDEX IF NOT EXISTS recall_record_at ON recall_record(at)")
+        // Porter stemming: "release" finds "Releasing", "post" finds "posted". `extra` holds version keys ("v1_7") so
+        // "1.7" finds "1.7.0".
+        db.exec("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS recall_fts USING fts5(title, text, entities, extra,
+              tokenize='porter unicode61 remove_diacritics 2')
+            """)
+        db.exec("CREATE TABLE IF NOT EXISTS recall_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    }
+
+    // MARK: Writing
+
+    /// Puts records in (a record from the same source replaces the one before).
+    public func put(_ records: [Record]) {
+        lock.lock(); defer { lock.unlock() }
+        db.exec("BEGIN")
+        for record in records { write(record) }
+        db.exec("COMMIT")
+    }
+
+    private func write(_ record: Record) {
+        if let old = db.rows("SELECT id FROM recall_record WHERE source = ?", [record.source]).first?.first, let id = Int64(old) {
+            db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id])
+            db.exec("DELETE FROM recall_record WHERE id = ?", [id])
+        }
+        let id = db.insert("""
+            INSERT INTO recall_record(source, kind, actor, at, title, text, entities, prior) VALUES(?,?,?,?,?,?,?,?)
+            """, [record.source, record.kind.rawValue, record.actor, record.at?.timeIntervalSince1970, record.title,
+                  record.text, record.entities.joined(separator: "\n"), record.prior])
+        guard id != 0 else { return }
+        let extra = Self.versionKeys(record.title + " " + record.text).sorted().joined(separator: " ")
+        db.exec("INSERT INTO recall_fts(rowid, title, text, entities, extra) VALUES(?,?,?,?,?)",
+                [id, record.title, record.text, record.entities.joined(separator: " "), extra])
+    }
+
+    /// Takes out every record from sources starting with a prefix ("episode:") but those listed.
+    public func keepOnly(prefix: String, sources: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
+        let gone = db.rows("SELECT id, source FROM recall_record WHERE source LIKE ?", [prefix + "%"])
+            .filter { !sources.contains($0[1]) }.compactMap { Int64($0[0]) }
+        guard !gone.isEmpty else { return }
+        db.exec("BEGIN")
+        for id in gone {
+            db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id])
+            db.exec("DELETE FROM recall_record WHERE id = ?", [id])
+        }
+        db.exec("COMMIT")
+    }
+
+    func state(_ key: String) -> String? {
+        db.rows("SELECT value FROM recall_state WHERE key = ?", [key]).first?.first
+    }
+
+    func setState(_ key: String, _ value: String) {
+        db.exec("INSERT OR REPLACE INTO recall_state(key, value) VALUES(?, ?)", [key, value])
+    }
+
+    // MARK: Reading
+
+    /// Records whose words match, best first (BM25 over title, text, who and what, versions).
+    public func search(_ match: String, limit: Int = 300) -> [Int64] {
+        guard !match.isEmpty else { return [] }
+        return db.rows("SELECT rowid FROM recall_fts WHERE recall_fts MATCH ? ORDER BY bm25(recall_fts, 3.0, 1.0, 4.0, 6.0) LIMIT ?",
+                       [match, limit]).compactMap { Int64($0[0]) }
+    }
+
+    /// Records that name someone or something, the newest first.
+    public func naming(_ name: String, limit: Int = 100) -> [Int64] {
+        db.rows("SELECT id FROM recall_record WHERE entities LIKE ? OR title LIKE ? ORDER BY at DESC LIMIT ?",
+                ["%\(name)%", "%\(name)%", limit]).compactMap { Int64($0[0]) }
+    }
+
+    /// Records of these kinds in a span, the most trusted and newest first.
+    public func within(_ from: Date, _ to: Date, kinds: [Kind], limit: Int = 60) -> [Int64] {
+        db.rows("""
+            SELECT id FROM recall_record WHERE at >= ? AND at < ? AND kind IN (\(kinds.map { _ in "?" }.joined(separator: ",")))
+            ORDER BY prior DESC, at DESC LIMIT ?
+            """, ([from.timeIntervalSince1970, to.timeIntervalSince1970] as [Any?]) + kinds.map { $0.rawValue as Any? } + [limit as Any?])
+            .compactMap { Int64($0[0]) }
+    }
+
+    /// What the user owes: to-dos, things due, promises, conversations waiting on them.
+    public func owed(limit: Int = 40) -> [Int64] {
+        db.rows("""
+            SELECT id FROM recall_record WHERE kind = 'promise'
+              OR (kind = 'fact' AND (text LIKE 'To do:%' OR text LIKE '%(due %' OR text LIKE 'Coming up:%'))
+              OR (kind = 'conversation' AND (text LIKE '%your turn%' OR text LIKE '%follow up%'))
+            ORDER BY prior DESC, at DESC LIMIT ?
+            """, [limit]).compactMap { Int64($0[0]) }
+    }
+
+    /// The record for a source ("snapshot:744"), when there is one.
+    public func id(of source: String) -> Int64? {
+        db.rows("SELECT id FROM recall_record WHERE source = ?", [source]).first?.first.flatMap { Int64($0) }
+    }
+
+    public func records(_ ids: [Int64]) -> [Int64: Record] {
+        guard !ids.isEmpty else { return [:] }
+        var out: [Int64: Record] = [:]
+        for chunk in stride(from: 0, to: ids.count, by: 400).map({ Array(ids[$0..<min($0 + 400, ids.count)]) }) {
+            for row in db.rows("""
+                SELECT id, source, kind, actor, at, title, text, entities, prior FROM recall_record
+                WHERE id IN (\(chunk.map { _ in "?" }.joined(separator: ",")))
+                """, chunk.map { $0 as Any? }) {
+                guard row.count == 9, let id = Int64(row[0]), let kind = Kind(rawValue: row[2]) else { continue }
+                var record = Record(source: row[1], kind: kind, actor: row[3],
+                                    at: Double(row[4]).map { Date(timeIntervalSince1970: $0) }, title: row[5], text: row[6],
+                                    entities: row[7].split(separator: "\n").map(String.init), prior: Double(row[8]) ?? 0.5)
+                record.id = id
+                out[id] = record
+            }
+        }
+        return out
+    }
+
+    public func count() -> Int { Int(db.rows("SELECT count(*) FROM recall_record", []).first?.first ?? "") ?? 0 }
+
+    /// "1.7.0" → v1_7 and v1_7_0, so a question about "1.7" finds "1.7.0" and the other way round.
+    public static func versionKeys(_ text: String) -> Set<String> {
+        guard let regex = try? NSRegularExpression(pattern: #"\bv?(\d+)\.(\d+)(?:\.(\d+))?\b"#) else { return [] }
+        var keys = Set<String>()
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            func group(_ i: Int) -> String? { Range(match.range(at: i), in: text).map { String(text[$0]) } }
+            guard let major = group(1), let minor = group(2) else { continue }
+            keys.insert("v\(major)_\(minor)")
+            if let patch = group(3) { keys.insert("v\(major)_\(minor)_\(patch)") }
+        }
+        return keys
+    }
+}
+
+// MARK: - Keeping the index current
+
+extension MemoryIndex {
+    /// Brings the index up to date with the stores it's made from (all in brain.sqlite): what changed since the last
+    /// time, and what went away. Cheap when nothing changed (one query of counts); the small stores are read whole,
+    /// windows only when new or changed.
+    public func sync(now: Date = Date()) {
+        lock.lock(); defer { lock.unlock() }
+        // One stamp per store: only a store that changed is read again (windows change every minute; the rest
+        // seldom).
+        let stamps: [(key: String, sql: String, records: () -> [Record])] = [
+            ("items", "SELECT count(*) || ':' || coalesce(max(last), 0) || ':' || total(seen) FROM screen_item", self.itemRecords),
+            ("episodes", "SELECT count(*) || ':' || coalesce(max(end), 0) || ':' || total(length(title) + length(summary)) FROM episode",
+             self.episodeRecords),
+            ("threads", "SELECT count(*) || ':' || coalesce(max(last_at), 0) || ':' || total(length(status)) FROM thread", self.threadRecords),
+            ("memories", "SELECT count(*) || ':' || coalesce(max(confirmed), 0) FROM memory WHERE archived = 0", self.memoryRecords),
+            ("chronicle", "SELECT count(*) || ':' || coalesce(max(generated), 0) FROM chronicle", self.chronicleRecords),
+            ("loops", "SELECT count(*) || ':' || coalesce(max(last), 0) || ':' || total(length(status)) FROM loop", self.loopRecords),
+        ]
+        var changed = false
+        for store in stamps {
+            let stamp = db.rows(store.sql, []).first?.first ?? ""
+            guard !stamp.isEmpty, stamp != state("stamp-" + store.key) else { continue }
+            let records = store.records()
+            db.exec("BEGIN")
+            for record in records { write(record) }
+            db.exec("COMMIT")
+            setState("stamp-" + store.key, stamp)
+            changed = true
+        }
+        let through = Double(state("snapshots-through") ?? "0") ?? 0
+        let windows = snapshotRecords(since: through)
+        if !windows.isEmpty {
+            db.exec("BEGIN")
+            for record in windows { write(record) }
+            db.exec("COMMIT")
+            changed = true
+        }
+        let pruneStamp = db.rows("SELECT count(*) FROM snapshot", []).first?.first ?? ""
+        guard changed || pruneStamp != state("stamp-pruned") else { return }
+        setState("stamp-pruned", pruneStamp)
+        // What's gone from the stores goes from the index: windows pruned after two weeks, memories forgotten.
+        let present: [(String, String)] = [
+            ("item:", "SELECT 'item:' || id FROM screen_item"), ("episode:", "SELECT 'episode:' || id FROM episode"),
+            ("thread:", "SELECT 'thread:' || id FROM thread"), ("memory:", "SELECT 'memory:' || id FROM memory WHERE archived = 0"),
+            ("chronicle:", "SELECT 'chronicle:' || rowid FROM chronicle"), ("loop:", "SELECT 'loop:' || id FROM loop"),
+            ("snapshot:", "SELECT 'snapshot:' || id FROM snapshot"),
+        ]
+        for (prefix, sql) in present {
+            let keep = Set(db.rows(sql, []).map { $0[0] })
+            let gone = db.rows("SELECT id, source FROM recall_record WHERE source LIKE ?", [prefix + "%"])
+                .filter { !keep.contains($0[1]) }.compactMap { Int64($0[0]) }
+            guard !gone.isEmpty else { continue }
+            db.exec("BEGIN")
+            for id in gone {
+                db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id])
+                db.exec("DELETE FROM recall_record WHERE id = ?", [id])
+            }
+            db.exec("COMMIT")
+        }
+        let latest = db.rows("SELECT coalesce(max(last), 0) FROM snapshot", []).first?.first ?? "0"
+        setState("snapshots-through", latest)
+    }
+
+    /// What Murmur did for the user (from its own command history), as records.
+    public func putMurmur(_ actions: [(at: Date, what: String, source: String)]) {
+        put(actions.map { Record(source: $0.source, kind: .murmur, actor: "murmur", at: $0.at, title: "Murmur did this for you",
+                                 text: $0.what, entities: ["Murmur"], prior: 0.9) })
+    }
+
+    // MARK: The stores, as records
+
+    private func date(_ text: String) -> Date? { Double(text).map { Date(timeIntervalSince1970: $0) } }
+
+    /// Items: what the user sent, posted, released or tagged is what they did; their bookings and files are theirs;
+    /// a page is something seen.
+    func itemRecords() -> [Record] {
+        db.rows("SELECT id, kind, title, body, people, at, first, mine, fields FROM screen_item", []).compactMap { row in
+            guard row.count == 9 else { return nil }
+            let kind = row[1], mine = row[7] == "1"
+            let people = row[4].split(separator: "\n").map(String.init)
+            let fields = (row[8].data(using: .utf8)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            let places = ["app", "platform", "name", "repository", "to"].compactMap { fields[$0] as? String }.filter { !$0.isEmpty }
+            let when = date(row[5]) ?? date(row[6])
+            if kind == "page" {
+                return Record(source: "item:\(row[0])", kind: .saw, actor: "other", at: date(row[6]), title: row[2],
+                              text: String(row[3].prefix(600)), entities: people, prior: 0.25)
+            }
+            let did = mine && ["email", "message", "post", "release"].contains(kind)
+            return Record(source: "item:\(row[0])", kind: did ? .did : (mine ? .yours : .saw), actor: mine ? "me" : "other",
+                          at: when, title: row[2], text: String(row[3].prefix(1500)), entities: people + places,
+                          // A file or folder the user had open says little on its own; a booking or a project says more.
+                          prior: did ? 1.0 : (mine ? (["code", "document"].contains(kind) ? 0.5 : 0.9) : 0.6))
+        }
+    }
+
+    /// Episodes: stretches of the user's work, as the reading model saw them; an unread one only when it was long.
+    func episodeRecords() -> [Record] {
+        db.rows("SELECT id, start, seconds, project, title, summary, outcome, apps, titles FROM episode", []).compactMap { row in
+            guard row.count == 9, let seconds = Double(row[2]) else { return nil }
+            let minutes = Int((seconds / 60).rounded())
+            let apps = row[7].split(separator: "\n").map(String.init)
+            var title = row[4], text = row[5]
+            var prior = 0.85
+            if title.isEmpty && text.isEmpty {
+                guard seconds >= 300 else { return nil }
+                title = "Work in " + apps.prefix(3).joined(separator: ", ")
+                text = row[8].replacingOccurrences(of: "\n", with: "; ").prefix(500).description
+                prior = 0.35
+            }
+            if !row[6].isEmpty { text += " Outcome: \(row[6])." }
+            text += " (\(max(1, minutes)) min, in \(apps.prefix(3).joined(separator: ", ")))"
+            return Record(source: "episode:\(row[0])", kind: .did, actor: "me", at: date(row[1]), title: title, text: text,
+                          entities: [row[3]] + apps, prior: prior)
+        }
+    }
+
+    /// Conversations: who, about what, and whose turn it is.
+    func threadRecords() -> [Record] {
+        db.rows("SELECT id, title, person, organization, status, channel, last_action, last_at, ask, details FROM thread", [])
+            .compactMap { row in
+                guard row.count == 10 else { return nil }
+                let status = ["waiting": "waiting for their reply", "your_turn": "your turn to reply",
+                              "nudge": "time to follow up, no reply yet", "done": "done"][row[4]] ?? row[4]
+                var text = "\(row[6]). Status: \(status)" + (row[5].isEmpty ? "" : " (\(row[5]))") + "."
+                if !row[8].isEmpty { text += " They asked: \(row[8])." }
+                if !row[9].isEmpty { text += " " + row[9].prefix(300) }
+                return Record(source: "thread:\(row[0])", kind: .conversation, actor: "me", at: date(row[7]), title: row[1],
+                              text: text, entities: [row[2], row[3]].filter { !$0.isEmpty }, prior: 0.9)
+            }
+    }
+
+    /// Facts: what the user told Murmur and what their apps say first, what was inferred from a page last.
+    func memoryRecords() -> [Record] {
+        let trust = ["told": 0.95, "calendar": 0.9, "reminders": 0.9, "contacts": 0.9, "mail": 0.7, "notes": 0.5, "screen": 0.45]
+        return db.rows("""
+            SELECT m.id, e.kind, e.name, m.text, m.origin, m.confidence, m.confirmed FROM memory m
+            JOIN entity e ON e.id = m.entity WHERE m.archived = 0
+            """, []).compactMap { row in
+            guard row.count == 7 else { return nil }
+            let confidence = Double(row[5]) ?? 0.6
+            return Record(source: "memory:\(row[0])", kind: .fact, actor: row[1] == "me" ? "me" : "other", at: date(row[6]),
+                          title: row[1] == "me" ? "About you" : row[2], text: row[3], entities: row[1] == "me" ? [] : [row[2]],
+                          prior: (trust[row[4]] ?? 0.5) * (0.6 + 0.4 * confidence))
+        }
+    }
+
+    /// Summaries of the user's hours and days.
+    func chronicleRecords() -> [Record] {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return db.rows("SELECT rowid, level, period, summary, generated FROM chronicle", []).compactMap { row in
+            guard row.count == 5 else { return nil }
+            formatter.dateFormat = row[1] == "hour" ? "yyyy-MM-dd'T'HH" : "yyyy-MM-dd"
+            let at = formatter.date(from: row[2]) ?? date(row[4])
+            return Record(source: "chronicle:\(row[0])", kind: .summary, actor: "me", at: at,
+                          title: "Your \(row[1]), \(row[2])", text: row[3], prior: 0.55)
+        }
+    }
+
+    /// Promises and things owed.
+    func loopRecords() -> [Record] {
+        db.rows("SELECT id, summary, person, status, first, due FROM loop", []).compactMap { row in
+            guard row.count == 6 else { return nil }
+            var text = row[1] + (row[2].isEmpty ? "" : " (with \(row[2]))") + ", \(row[3])"
+            if let due = date(row[5]) { text += ", due " + due.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)) }
+            return Record(source: "loop:\(row[0])", kind: .promise, actor: "me", at: date(row[4]), title: row[1], text: text,
+                          entities: [row[2]].filter { !$0.isEmpty }, prior: 0.7)
+        }
+    }
+
+    /// Windows as they were on screen, new or changed since `since`: the evidence under everything, found when what
+    /// was read from it missed the point.
+    func snapshotRecords(since: Double) -> [Record] {
+        db.rows("SELECT id, app, title, domain, text, first, authored FROM snapshot WHERE last > ?", [since]).compactMap { row in
+            guard row.count == 7 else { return nil }
+            let app = ScreenText.appName(row[1])
+            let authored = row[6].replacingOccurrences(of: ScreenText.unconfirmed, with: "")
+            let text = (authored.isEmpty ? "" : "You wrote and sent here: \(authored.prefix(800))\n") + row[4].prefix(2500)
+            return Record(source: "snapshot:\(row[0])", kind: .saw, actor: authored.isEmpty ? "other" : "me", at: date(row[5]),
+                          title: "\(app): \(ScreenText.cleanTitle(row[2]))".prefix(200).description, text: text,
+                          entities: [app, row[3]].filter { !$0.isEmpty }, prior: authored.isEmpty ? 0.3 : 0.45)
+        }
+    }
+}

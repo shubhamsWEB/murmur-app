@@ -169,6 +169,14 @@ public final class MemoryGraph: @unchecked Sendable {
         return added
     }
 
+    /// Reads every window still on the timeline into items again (nothing is forgotten: what's read the same way is
+    /// the same item), for when the readers learn something new. Returns how many items were new.
+    @discardableResult
+    public func readAllItemsAgain(from journal: Journal, me: [String], now: Date = Date()) -> Int {
+        setState("items-through", "0")
+        return readItems(from: journal, me: me, now: now)
+    }
+
     /// Keeps an item (the latest reading of it wins, the first sighting stays). True when it's new.
     @discardableResult
     public func store(_ item: MemoryItem, snapshot: Int64, seen: Date, calendar: Calendar = .current) -> Bool {

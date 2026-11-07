@@ -85,7 +85,7 @@ public enum WindowKind: String, Sendable, CaseIterable {
 
     /// The kind of a window: its app (or site), then its address, then what it says.
     public static func of(app: String, domain: String, url: String?, title: String, text: String) -> WindowKind {
-        let name = app.lowercased()
+        let name = ScreenText.appName(app).lowercased()
         let address = (url ?? "").lowercased()
         guard !domain.isEmpty else {
             if conversationApps.contains(where: { name == $0 || name.hasPrefix($0 + " ") }) { return .conversation }

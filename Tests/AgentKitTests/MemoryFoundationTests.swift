@@ -480,7 +480,9 @@ struct MemoryFoundationTests {
         #expect(releases[0].fields["notes"]?.hasPrefix("What's new on Windows AI cleanup") == true)
         let tag = Self.window(title: "Release v1.6.0 · shubhamsWEB/murmur-app", url: "https://github.com/shubhamsWEB/murmur-app/releases/tag/v1.6.0",
                               text: "Create release from tag\n@shubhamsWEB\nshubhamsWEB tagged this\nMurmur 1.6.0")
-        #expect(ItemReader.read(tag, me: ["Shubham Agrawal"], calendar: Self.calendar).allSatisfy { $0.kind != .release })
+        // A tag not published yet is kept as tagged, never as released.
+        let tagged = ItemReader.read(tag, me: ["Shubham Agrawal"], calendar: Self.calendar).filter { $0.kind == .release }
+        #expect(tagged.count == 1 && tagged[0].fields["status"] == "tagged" && tagged[0].title == "Murmur 1.6.0" && tagged[0].mine)
         #expect(ItemReader.newerVersion("1.10.0", than: "1.9.2") && !ItemReader.newerVersion("1.5.0", than: "1.5.1"))
     }
 

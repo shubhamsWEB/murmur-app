@@ -41,10 +41,58 @@ public enum ScreenText {
     public static func sent(before: String, now: String, in text: String) -> String? {
         let draft = before.trimmingCharacters(in: .whitespacesAndNewlines)
         guard draft.split(separator: " ").count >= 2, now.isEmpty || !now.hasPrefix(draft) else { return nil }
-        let start = String(draft.prefix(30))
-        guard let line = text.split(separator: "\n").last(where: { $0.contains(start) }) else { return nil }
-        return String(line.count >= draft.count ? line : Substring(draft)).trimmingCharacters(in: .whitespaces)
+        // Compared as they read, not as they're typed: WhatsApp and Slack show "*Murmur 1.7*" as bold "Murmur 1.7",
+        // and a long message wraps onto several lines.
+        let start = String(plain(draft).prefix(24))
+        guard !start.isEmpty else { return nil }
+        if let line = text.split(separator: "\n").last(where: { plain(String($0)).contains(start) }) {
+            return String(line.count >= draft.count ? line : Substring(draft)).trimmingCharacters(in: .whitespaces)
+        }
+        // A long message shows in the chat by its end when its start has scrolled up (a caption under a video),
+        // wrapped onto lines of its own: compared without spaces.
+        func tight(_ text: String) -> String { plain(text).filter { !$0.isWhitespace } }
+        let end = String(tight(draft).suffix(20))
+        if draft.split(separator: " ").count >= 8, end.count == 20, tight(text).contains(end) { return draft }
+        return nil
     }
+
+    /// Text as it reads: no chat formatting marks (* _ ~ `), no invisible direction marks, one space between words.
+    static func plain(_ text: String) -> String {
+        let marks = CharacterSet(charactersIn: "*_~`").union(invisible)
+        return String(String.UnicodeScalarView(text.unicodeScalars.filter { !marks.contains($0) }))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// Invisible characters apps put in names and text: direction marks (WhatsApp calls itself "\u{200E}WhatsApp"),
+    /// zero-width joiners and spaces, the byte-order mark.
+    static let invisible = CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}\u{FEFF}")
+
+    /// An app's name as people say it: "\u{200E}WhatsApp" is "WhatsApp" (the mark made it no chat app at all, so the
+    /// messages sent in it were never kept).
+    public static func appName(_ name: String) -> String {
+        String(String.UnicodeScalarView(name.unicodeScalars.filter { !invisible.contains($0) }))
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// What the user published on a feed: the box they wrote it in emptied (or moved on to something else) and the
+    /// text is on the page now, or the site said it was posted ("Post successful", "Your post is live"). At least five
+    /// words, so a search or a one-word reaction isn't taken for a post.
+    public static func posted(before: String, now: String, in text: String) -> String? {
+        let draft = before.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard draft.split(separator: " ").count >= 5, now.isEmpty || !now.hasPrefix(String(draft.prefix(20))) else { return nil }
+        if let shown = sent(before: draft, now: now, in: text) { return shown.count >= draft.count ? shown : draft }
+        let lower = text.lowercased()
+        let said = ["post successful", "your post is live", "your post was shared", "post shared", "posted successfully",
+                    "your post has been", "your tweet was sent", "your post was sent", "comment posted", "reply sent"]
+        if said.contains(where: lower.contains) { return draft }
+        // A long post that left its box with nothing in it now: most likely posted (a site's composer is a dialog the
+        // page's text doesn't include), kept as not confirmed so an answer says "looks like".
+        if now.isEmpty, draft.split(separator: " ").count >= 12 { return unconfirmed + draft }
+        return nil
+    }
+
+    /// Put before a post seen leaving its box but not seen on the page.
+    public static let unconfirmed = "(not confirmed on the page) "
 
     /// The file a window shows, from its Accessibility "document" (a file:// address, percent-encoded): Cocoa document
     /// apps (TextEdit, Pages, Preview, Xcode) say it; browsers' is a web page's address, not a file.

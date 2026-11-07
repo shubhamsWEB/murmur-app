@@ -29,7 +29,10 @@ public enum Consolidator {
             var body = BrainModel.redact(String(snapshot.text.prefix(max(400, budget / 4))))
             if !snapshot.seenAs.isEmpty { body = "Seen as: \(snapshot.seenAs)\n" + body }
             if !snapshot.authored.isEmpty {
-                body += "\nThe user wrote and sent here: \(BrainModel.redact(String(snapshot.authored.suffix(1500))))"
+                let feed = ItemReader.platform(of: snapshot.domain) != nil && WindowKind.of(snapshot) != .conversation
+                let authored = snapshot.authored.replacingOccurrences(of: ScreenText.unconfirmed, with: "")
+                body += "\nThe user \(feed ? "published (a post or comment) here" : "wrote and sent here"): "
+                    + BrainModel.redact(String(authored.suffix(1500)))
             }
             let part = "\(head)\n\(body)\n\n"
             if !text.isEmpty, text.count + part.count > budget {

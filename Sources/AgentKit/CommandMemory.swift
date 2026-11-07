@@ -481,6 +481,59 @@ public enum CommandMemory {
         }.joined(separator: "\n")
     }
 
+    /// What Murmur itself did for the user that changed something outside it, in the last `days` days, newest first:
+    /// messages sent, text written into apps, pages posted to. Memory's answers see these next to what screen memory
+    /// saw, so "have we told the group on WhatsApp?" knows about the message Murmur sent there itself. Only actions
+    /// that went through (their result doesn't say it failed or was cancelled).
+    static func didForUser(days: Double = 30, limit: Int = 12) -> [String] {
+        actionsForIndex(days: days, limit: limit).map { action in
+            "- \(when(String(action.at.timeIntervalSince1970))): \(action.what) [Murmur did, for you]"
+        }
+    }
+
+    /// What Murmur itself did for the user that changed something outside it, in the last `days` days, newest first:
+    /// messages sent, text written into apps, reminders and events made. Only what went through (its result doesn't
+    /// say it failed or was cancelled). Memory's index keeps these beside what screen memory saw.
+    public static func actionsForIndex(days: Double = 30, limit: Int = 40) -> [(at: Date, what: String, source: String)] {
+        lock.lock(); defer { lock.unlock() }
+        guard let db = open() else { return [] }
+        let since = Date().timeIntervalSince1970 - days * 86400
+        let tools = ["send_message", "write_in_app", "insert_text", "replace_selection", "type_text", "browser_type",
+                     "create_reminder", "create_event"]
+        let found = rows(db, """
+            SELECT e.at, a.tool, a.args, a.result, e.app, e.id, a.seq, e.said FROM action a JOIN episode e ON e.id = a.episode
+            WHERE e.at > ? AND a.tool IN (\(tools.map { _ in "?" }.joined(separator: ",")))
+            ORDER BY e.at DESC LIMIT ?
+            """, ([since] as [Any]) + tools.map { $0 as Any } + [limit * 2])
+        let failed = #"(?i)\b(cancel|couldn'?t|could not|failed|error|not sent|didn'?t|declined|no such|isn'?t)\b"#
+        var out: [(at: Date, what: String, source: String)] = []
+        for row in found where row.count == 8 && row[3].range(of: failed, options: .regularExpression) == nil {
+            let args = (row[2].data(using: .utf8)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            func arg(_ names: String...) -> String {
+                for name in names { if let value = args[name] as? String, !value.isEmpty { return value } }
+                return ""
+            }
+            let text = arg("message", "text", "content", "title").prefix(160)
+            // Typing a search or a name isn't something done for the user: only sentence-long writing counts.
+            if ["write_in_app", "insert_text", "replace_selection", "type_text", "browser_type"].contains(row[1]),
+               text.split(separator: " ").count < 5 { continue }
+            let what: String
+            switch row[1] {
+            case "send_message":
+                let to = arg("to", "recipient", "contact", "name"), app = arg("app")
+                what = "sent a message" + (to.isEmpty ? "" : " to \(to)") + (app.isEmpty ? "" : " on \(app)")
+            case "create_reminder": what = "added a reminder"
+            case "create_event": what = "added a calendar event"
+            default: what = "wrote" + (row[4].isEmpty ? "" : " in \(row[4])")
+            }
+            let at = Date(timeIntervalSince1970: Double(row[0]) ?? 0)
+            out.append((at, "Murmur \(what)" + (text.isEmpty ? "" : ": \"\(text)\"") + " (you asked: \"\(row[7].prefix(120))\")",
+                        "murmur:\(row[5]):\(row[6])"))
+            if out.count >= limit { break }
+        }
+        return out
+    }
+
     /// "and also ask when she's coming back", "tell him too", "do it again", "send it", said within a few minutes
     /// of a command: it follows on from it, so it's a command too (it was typed into the box as dictation).
     public static func isFollowUp(_ utterance: String) -> Bool {

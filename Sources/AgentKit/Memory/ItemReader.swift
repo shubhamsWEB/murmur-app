@@ -8,6 +8,8 @@ import Foundation
 public struct MemoryItem: Sendable, Equatable {
     public enum Kind: String, Sendable, CaseIterable {
         case flight, booking, release, issue, email, message, document, code, page
+        /// Something the user published on a feed: a LinkedIn post, a tweet, a Product Hunt comment.
+        case post
     }
 
     public var kind: Kind
@@ -50,9 +52,12 @@ public enum ItemReader {
         let mine = Engagement.mentions(window.title + "\n" + window.text, any: me)
         items += flights(in: window, mine: mine, calendar: calendar)
         items += releases(in: window, me: me, calendar: calendar)
+        items += taggedReleases(in: window)
         if let issue = issue(in: window) { items.append(issue) }
         items += emails(in: window, me: me, calendar: calendar)
         items += messages(in: window)
+        items += posts(in: window)
+        if let post = ownPost(in: window, me: me) { items.append(post) }
         if let work = work(in: window) { items.append(work) }
         if items.isEmpty, let page = page(in: window) { items.append(page) }
         return items
@@ -251,15 +256,33 @@ public enum ItemReader {
         }
         // A page of one release that reads differently: its version from the address.
         if starts.isEmpty, path.count >= 5, path[3] == "tag", let version = first(versionPattern, in: path[4]) {
-            if lines.contains(where: { $0.lowercased().hasPrefix("create release from tag") }) { return [] }   // not released
-            starts = [(lines.firstIndex { $0.contains(version) } ?? 0, "", version)]
+            // Not released yet: its heading goes first, so the block below is read as a tag.
+            let tagged = lines.contains(where: { $0.lowercased().hasPrefix("create release from tag") })
+            starts = [(tagged ? -1 : (lines.firstIndex { $0.contains(version) } ?? 0), "", version)]
         }
         var out: [MemoryItem] = []
         for (position, start) in starts.enumerated() {
             let end = position + 1 < starts.count ? starts[position + 1].index : lines.count
-            let block = Array(lines[min(start.index + 1, end)..<end])
-            // A tag not released yet: none.
+            let block = Array(lines[max(0, min(start.index + 1, end))..<end])
+            // A tag not released yet (its build may still be running): kept as tagged, not as published. The page of
+            // the published release, seen later, has the same key and replaces it.
             if block.prefix(8).contains(where: { $0.lowercased().hasPrefix("create release from tag") || $0.lowercased().hasSuffix("tagged this") }) {
+                let named = block.compactMap { line in ranges(heading, in: line).first.flatMap { $0.groups[0].isEmpty ? nil : line } }.first
+                let tagger = block.firstIndex { $0.lowercased().hasSuffix("tagged this") }.flatMap { index -> String? in
+                    let line = block[index].trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+                    if line.lowercased() == "tagged this" { return index > 0 ? block[index - 1].trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) : nil }
+                    return String(line.dropLast("tagged this".count)).trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+                } ?? owner
+                let product = named ?? "\(repo) \(start.version)"
+                let name = product.replacingOccurrences(of: " v" + start.version, with: "")
+                    .replacingOccurrences(of: " " + start.version, with: "")
+                let mine = lowerMe.contains { tagger.lowercased().contains($0) || owner.lowercased().contains($0) }
+                out.append(MemoryItem(kind: .release, key: "release|\(repo.lowercased())|\(start.version.lowercased())", title: product,
+                                      body: "Tagged: \(product)\nRepository: \(owner)/\(repo)\nTagged by: \(tagger)\n"
+                                          + "Status: tagged, its release not published yet when seen",
+                                      actor: tagger, project: name,
+                                      fields: ["version": start.version, "repository": "\(owner)/\(repo)", "name": name,
+                                               "status": "tagged", "source": "tag"], mine: mine))
                 continue
             }
             // "shubhamsWEB released this Nov 6", or "released this" on a line of its own after the name.
@@ -304,6 +327,51 @@ public enum ItemReader {
                                            "notes": String(text.prefix(900))], mine: mine))
         }
         return out
+    }
+
+    /// A release cut in a terminal: "git tag v1.7.0", "git tag -a v1.7.0 -m …", "git push origin v1.7.0", "gh release
+    /// create v1.7.0", typed by the user or run by a coding agent ("Bash(git tag v1.7.0)"). The project is the folder the
+    /// terminal is in. Listing or deleting tags isn't a release.
+    static func taggedReleases(in window: Journal.Snapshot) -> [MemoryItem] {
+        guard terminals.contains(window.app) || editors.contains(window.app) else { return [] }
+        let pattern = #"\b(?:git\s+tag\s+(?:-[as]\s+)?|gh\s+release\s+create\s+|git\s+push\s+(?:-u\s+)?[\w.-]+\s+(?:refs/tags/)?)v?(\d+\.\d+\.\d+(?:-[\w.]+)?)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let project = work(in: window)?.project ?? ""
+        var seen = Set<String>(), out: [MemoryItem] = []
+        // The title too: Terminal names its window after the command running ("murmur — git push origin v1.7.0").
+        for line in ([window.title] + window.text.split(separator: "\n").map(String.init)) where line.count < 400 {
+            let range = NSRange(line.startIndex..., in: line)
+            for match in regex.matches(in: line, range: range) {
+                guard let versionRange = Range(match.range(at: 1), in: line) else { continue }
+                let version = String(line[versionRange])
+                guard seen.insert(version).inserted else { continue }
+                let name = project.isEmpty ? "Release" : project
+                let core = BrainModel.projectCore(name)
+                let command = String(line.trimmingCharacters(in: .whitespaces).prefix(200))
+                out.append(MemoryItem(kind: .release, key: "release|\(core.isEmpty ? "terminal" : core)|\(version.lowercased())|tag",
+                                      title: "\(name) \(version)",
+                                      body: "Release: \(name) \(version)\nTagged in \(window.app): \(command)", actor: "me",
+                                      // No day: the scrollback is read again and again; the first sighting is when.
+                                      project: name, when: nil,
+                                      fields: ["version": version, "name": name, "source": "terminal", "command": command],
+                                      mine: true))
+            }
+        }
+        return out
+    }
+
+    /// The same release seen twice (its GitHub page and the terminal that tagged it): kept once, the page first.
+    public static func uniqueReleases(_ releases: [MemoryGraph.StoredItem]) -> [MemoryGraph.StoredItem] {
+        var seen = Set<String>(), out: [MemoryGraph.StoredItem] = []
+        let ordered = releases.filter { $0.item.fields["source"] != "terminal" } + releases.filter { $0.item.fields["source"] == "terminal" }
+        for stored in ordered {
+            let key = BrainModel.projectCore(stored.item.fields["name"] ?? stored.item.project) + "|"
+                + (stored.item.fields["version"] ?? stored.item.title).lowercased()
+            if seen.insert(key).inserted { out.append(stored) }
+        }
+        // Back in the order they came.
+        let kept = Set(out.map(\.id))
+        return releases.filter { kept.contains($0.id) }
     }
 
     /// Versions in order: "1.10.0" after "1.9.2".
@@ -429,29 +497,118 @@ public enum ItemReader {
         return date
     }
 
+    /// Feeds by their address, by the name people call them.
+    static let platforms: [(domain: String, name: String)] = [
+        ("linkedin.com", "LinkedIn"), ("x.com", "X"), ("twitter.com", "X"), ("facebook.com", "Facebook"),
+        ("instagram.com", "Instagram"), ("reddit.com", "Reddit"), ("threads.net", "Threads"),
+        ("producthunt.com", "Product Hunt"), ("news.ycombinator.com", "Hacker News"), ("quora.com", "Quora"),
+        ("youtube.com", "YouTube"), ("medium.com", "Medium"), ("substack.com", "Substack"), ("dev.to", "DEV"),
+    ]
+
+    static func platform(of domain: String) -> String? {
+        platforms.first { domain == $0.domain || domain.hasSuffix("." + $0.domain) }?.name
+    }
+
+    /// What the user published on a feed (a post, a comment), seen leaving the box they wrote it in.
+    static func posts(in window: Journal.Snapshot) -> [MemoryItem] {
+        guard !window.authored.isEmpty, let platform = platform(of: window.domain),
+              WindowKind.of(window) != .conversation else { return [] }
+        let lines = window.authored.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.split(separator: " ").count >= 3 }
+        return lines.suffix(4).map { raw in
+            let unsure = raw.hasPrefix(ScreenText.unconfirmed)
+            let line = unsure ? String(raw.dropFirst(ScreenText.unconfirmed.count)) : raw
+            let key = "post|\(platform.lowercased())|" + BrainModel.fingerprint([line])
+            let said = unsure ? "You wrote a post on \(platform) and it left the box (likely posted, not seen on the page)"
+                : "You posted on \(platform)"
+            return MemoryItem(kind: .post, key: key, title: String(line.prefix(80)), body: "\(said): \(line.prefix(600))",
+                              actor: "me", when: window.last,
+                              fields: ["text": String(line.prefix(2000)), "platform": platform, "app": platform,
+                                       "url": window.url ?? "", "confirmed": unsure ? "no" : "yes"], mine: true)
+        }
+    }
+
+    /// The user's own post, read from its page on the feed: LinkedIn shows "Boost", "View analytics" and its
+    /// impressions only to the one who posted it, under "<name> … You". What it says, and when it went up ("42m" before
+    /// the page was seen). This is how a post is known even when its writing wasn't seen (it was pasted, or written
+    /// in a dialog the page's text doesn't include).
+    static func ownPost(in window: Journal.Snapshot, me: [String]) -> MemoryItem? {
+        guard let platform = platform(of: window.domain), platform == "LinkedIn", !me.isEmpty else { return nil }
+        let lines = window.text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let names = me.map { BrainModel.nameKey($0) }.filter { $0.contains(" ") || $0.count >= 4 }
+        func isMe(_ text: String) -> Bool { names.contains { BrainModel.nameKey(text).hasPrefix($0) } }
+        let controls = lines.contains { $0.hasPrefix("Open control menu for post by ") && isMe(String($0.dropFirst(30))) }
+        let ownerOnly = lines.contains { ["Boost", "View analytics", "Promote this post to reach people who matter to you."].contains($0) }
+            || lines.contains { $0.range(of: #"^\d[\d,]* impressions$"#, options: .regularExpression) != nil }
+        guard controls, ownerOnly else { return nil }
+        // The post: after its author's line ("Shubham Agrawal Verified Profile You", "Shubham Agrawal • You"), up to
+        // its age ("42m •") or the comment box.
+        guard let head = lines.firstIndex(where: { isMe($0) && ($0.hasSuffix(" You") || $0.hasSuffix("• You")) }) else { return nil }
+        var body: [String] = [], age: String?
+        // The post's own age has a bullet after it ("42m •"); a bare "10m" is a comment's.
+        let rest = lines[(head + 1)...]
+        age = rest.first { $0.range(of: #"^\d+[mhdw] •"#, options: .regularExpression) != nil }
+        for line in rest {
+            if line.range(of: #"^\d+[mhdw]( •.*)?$"#, options: .regularExpression) != nil { age = age ?? line; break }
+            if ["Add a comment...", "Like", "Comment", "Repost", "Send"].contains(line) || line.hasPrefix("View ") { break }
+            if line.count < 2 || line.hasPrefix("Open ") && line.contains("http") { continue }
+            body.append(line)
+            if body.joined(separator: " ").count > 1500 { break }
+        }
+        let text = body.joined(separator: " ")
+        guard text.split(separator: " ").count >= 5 else { return nil }
+        var posted: Date?
+        if let age, let number = Double(age.prefix { $0.isNumber }), let unit = age.drop(while: { $0.isNumber }).first {
+            let units: [String: Double] = ["m": 60, "h": 3600, "d": 86400, "w": 7 * 86400]
+            let seconds = units[String(unit)] ?? 0
+            if seconds > 0 { posted = window.first.addingTimeInterval(-number * seconds) }
+        }
+        let url = window.url ?? ""
+        let id = first(#"(?:ugcPost|activity|share)[-:](\d{10,})"#, in: url) ?? BrainModel.fingerprint([String(text.prefix(200))])
+        return MemoryItem(kind: .post, key: "post|linkedin|\(id)", title: String(text.prefix(80)),
+                          body: "You posted on LinkedIn: \(text.prefix(900))", actor: "me", when: posted,
+                          fields: ["text": String(text.prefix(2000)), "platform": "LinkedIn", "app": "LinkedIn", "url": url,
+                                   "confirmed": "yes"], mine: true)
+    }
+
     /// What the user sent in a conversation, with whom (the conversation's title, when it's a name).
     static func messages(in window: Journal.Snapshot) -> [MemoryItem] {
         guard !window.authored.isEmpty else { return [] }
+        // On a feed it's a post, not a message (posts(in:)).
+        if platform(of: window.domain) != nil, WindowKind.of(window) != .conversation { return [] }
         let with = conversationName(window)
         let lines: [String] = window.authored.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.count >= 2 }
         let to = with.isEmpty ? "" : " to \(with)"
         let people: [String] = with.isEmpty ? [] : [with]
-        return lines.suffix(6).map { (line: String) -> MemoryItem in
-            let key = "message|\(window.app.lowercased())|" + BrainModel.fingerprint([with, line])
-            let body = "You sent\(to) in \(window.app): \(line)"
+        let app = ScreenText.appName(window.app)
+        return lines.suffix(6).map { (raw: String) -> MemoryItem in
+            let unsure = raw.hasPrefix(ScreenText.unconfirmed)
+            let line = unsure ? String(raw.dropFirst(ScreenText.unconfirmed.count)) : raw
+            let key = "message|\(app.lowercased())|" + BrainModel.fingerprint([with, line])
+            let body = unsure ? "You wrote\(to) in \(app) and it left the box (likely sent, not seen in the chat): \(line)"
+                : "You sent\(to) in \(app): \(line)"
             return MemoryItem(kind: .message, key: key, title: String(line.prefix(80)), body: body, actor: "me", people: people,
-                              when: window.last, fields: ["text": line, "to": with, "app": window.app], mine: true)
+                              when: window.last, fields: ["text": line, "to": with, "app": app, "confirmed": unsure ? "no" : "yes"],
+                              mine: true)
         }
     }
 
     /// Who a conversation is with, from its title: "Priya Sharma", "WhatsApp: Mom", "#design - Acme - Slack".
     static func conversationName(_ window: Journal.Snapshot) -> String {
-        let parts = titleParts(window.title.replacingOccurrences(of: ": ", with: " - "))
-            .filter { ![window.app.lowercased(), "slack", "whatsapp", "messages", "telegram", "signal", "discord", "teams",
+        let parts = titleParts(ScreenText.appName(window.title).replacingOccurrences(of: ": ", with: " - "))
+            .filter { ![ScreenText.appName(window.app).lowercased(), "slack", "whatsapp", "messages", "telegram", "signal", "discord", "teams",
                        "microsoft teams", "messenger", "linkedin", "chat"].contains($0.lowercased()) }
-        guard let name = parts.first, name.count <= 50, !name.lowercased().hasPrefix("inbox") else { return "" }
-        return name.trimmingCharacters(in: CharacterSet(charactersIn: "()0123456789 "))
+        if let name = parts.first, name.count <= 50, !name.lowercased().hasPrefix("inbox") {
+            return name.trimmingCharacters(in: CharacterSet(charactersIn: "()0123456789 "))
+        }
+        // WhatsApp's window is only ever called "WhatsApp": the open chat is named by its own controls.
+        let named = #"(?m)^(?:Messages in chat with|Open call dropdown menu with|Start video call with|Start voice call with|Chat with) (.{2,60})$"#
+        if let name = first(named, in: ScreenText.plain(window.text.replacingOccurrences(of: "\n", with: "\u{1}"))
+                                .replacingOccurrences(of: "\u{1}", with: "\n")) {
+            return name.trimmingCharacters(in: .whitespaces)
+        }
+        return ""
     }
 
     // MARK: Flights
