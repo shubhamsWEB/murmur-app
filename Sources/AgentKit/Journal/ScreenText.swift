@@ -36,24 +36,39 @@ public enum ScreenText {
         return out
     }
 
-    /// The message the user sent, if the box held one that's gone from it and now shows in the conversation: the
-    /// conversation's own line for it (the box may have held only the start of it when last looked at).
-    public static func sent(before: String, now: String, in text: String) -> String? {
+    /// The message the user sent: the box held it, the box no longer does (`boxes`: what the window's text boxes hold
+    /// now; a draft still in one wasn't sent, only left when the user clicked elsewhere), and the conversation shows
+    /// it, all of it. What's kept is what the user wrote, never the line on the page (someone else's message can
+    /// start the same way).
+    public static func sent(before: String, now: String, in text: String, boxes: [String] = [], byItsEnd: Bool = true) -> String? {
         let draft = before.trimmingCharacters(in: .whitespacesAndNewlines)
         guard draft.split(separator: " ").count >= 2, now.isEmpty || !now.hasPrefix(draft) else { return nil }
         // Compared as they read, not as they're typed: WhatsApp and Slack show "*Murmur 1.7*" as bold "Murmur 1.7",
         // and a long message wraps onto several lines.
-        let start = String(plain(draft).prefix(24))
-        guard !start.isEmpty else { return nil }
-        if let line = text.split(separator: "\n").last(where: { plain(String($0)).contains(start) }) {
-            return String(line.count >= draft.count ? line : Substring(draft)).trimmingCharacters(in: .whitespaces)
-        }
-        // A long message shows in the chat by its end when its start has scrolled up (a caption under a video),
-        // wrapped onto lines of its own: compared without spaces.
+        let written = plain(draft)
+        guard !written.isEmpty, !stillWriting(written, in: boxes) else { return nil }
+        // Without spaces too: a mention or a link breaks a post onto lines of its own ("Congrats\nPriya Sharma\n, well…").
         func tight(_ text: String) -> String { plain(text).filter { !$0.isWhitespace } }
-        let end = String(tight(draft).suffix(20))
-        if draft.split(separator: " ").count >= 8, end.count == 20, tight(text).contains(end) { return draft }
+        // The box held only the start of it when last looked at ("Sure, I'll send it Thurs"): the chat's line for it,
+        // when it begins with all of that and is little more (not someone else's longer message that starts the same
+        // way). On a feed, never: what the user wrote is kept.
+        if byItsEnd, !text.split(separator: "\n").contains(where: { plain(String($0)) == written }),
+           let line = text.split(separator: "\n").last(where: { plain(String($0)).hasPrefix(written) }),
+           plain(String(line)).count - written.count <= max(12, written.count / 2) {
+            return line.trimmingCharacters(in: .whitespaces)
+        }
+        if plain(text).contains(written) || tight(text).contains(tight(draft)) { return draft }
+        // A long message shows in the chat by its end when its start has scrolled up (a caption under a video),
+        // wrapped onto lines of its own: compared without spaces, by its last 40 letters.
+        let end = String(tight(draft).suffix(40))
+        if byItsEnd, draft.split(separator: " ").count >= 8, end.count == 40, tight(text).contains(end) { return draft }
         return nil
+    }
+
+    /// Whether a text box still holds the draft (its start): it hasn't been sent.
+    static func stillWriting(_ written: String, in boxes: [String]) -> Bool {
+        let start = String(written.prefix(24))
+        return boxes.contains { plain($0).contains(start) }
     }
 
     /// Text as it reads: no chat formatting marks (* _ ~ `), no invisible direction marks, one space between words.
@@ -77,22 +92,38 @@ public enum ScreenText {
     /// What the user published on a feed: the box they wrote it in emptied (or moved on to something else) and the
     /// text is on the page now, or the site said it was posted ("Post successful", "Your post is live"). At least five
     /// words, so a search or a one-word reaction isn't taken for a post.
-    public static func posted(before: String, now: String, in text: String) -> String? {
+    /// `before`: the page's text the last time it was read; a "posted" message already there then says nothing new.
+    public static func posted(before: String, now: String, in text: String, boxes: [String] = [], earlier: String = "") -> String? {
         let draft = before.trimmingCharacters(in: .whitespacesAndNewlines)
         guard draft.split(separator: " ").count >= 5, now.isEmpty || !now.hasPrefix(String(draft.prefix(20))) else { return nil }
-        if let shown = sent(before: draft, now: now, in: text) { return shown.count >= draft.count ? shown : draft }
-        let lower = text.lowercased()
+        guard !stillWriting(plain(draft), in: boxes) else { return nil }
+        // On the page, all of it (not by its end: a feed is full of other people's words).
+        if let shown = sent(before: draft, now: now, in: text, boxes: boxes, byItsEnd: false) { return shown }
+        // A long post shows cut short ("… more"): its first hundred letters, then the cut.
+        let tight = plain(draft).filter { !$0.isWhitespace }
+        let page = plain(text).filter { !$0.isWhitespace }.lowercased()
+        if tight.count >= 100, page.contains(String(tight.prefix(100)).lowercased()),
+           ["…more", "...more", "seemore", "…seemore", "showmore", "readmore"].contains(where: page.contains) {
+            return draft
+        }
+        // The site said so, just now (not a notification that was on the page before).
+        let lower = text.lowercased(), was = earlier.lowercased()
         let said = ["post successful", "your post is live", "your post was shared", "post shared", "posted successfully",
                     "your post has been", "your tweet was sent", "your post was sent", "comment posted", "reply sent"]
-        if said.contains(where: lower.contains) { return draft }
-        // A long post that left its box with nothing in it now: most likely posted (a site's composer is a dialog the
-        // page's text doesn't include), kept as not confirmed so an answer says "looks like".
-        if now.isEmpty, draft.split(separator: " ").count >= 12 { return unconfirmed + draft }
+        if said.contains(where: { lower.contains($0) && !was.contains($0) }) { return draft }
         return nil
     }
 
-    /// Put before a post seen leaving its box but not seen on the page.
+    /// Put before a post seen leaving its box but not seen on the page (by an earlier version; no longer made).
     public static let unconfirmed = "(not confirmed on the page) "
+
+    /// What the user wrote and sent here, without what an earlier version kept as "not confirmed": a draft that left
+    /// its box is no proof it was sent.
+    public static func confirmed(_ authored: String) -> String {
+        authored.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix(unconfirmed.trimmingCharacters(in: .whitespaces)) }
+            .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// The file a window shows, from its Accessibility "document" (a file:// address, percent-encoded): Cocoa document
     /// apps (TextEdit, Pages, Preview, Xcode) say it; browsers' is a web page's address, not a file.

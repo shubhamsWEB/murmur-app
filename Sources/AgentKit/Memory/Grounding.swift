@@ -140,15 +140,23 @@ public enum Grounding {
         var fixes = spoken.fixes
         // The candidates: each name, and its first words ("AI Builders" of "AI Builders x Blr"), each at least five
         // letters long, so "Raj" or "AI" alone never pulls a word toward it.
-        var candidates: [(key: String, words: Int, name: Name, full: Bool)] = []
+        var candidates: [(key: String, sound: String, words: Int, name: Name, full: Bool)] = []
         var known = Set<String>()
         for name in names {
             let words = name.name.split(separator: " ").map(String.init)
             for count in 1...max(1, min(words.count, 4)) {
                 let part = key(words.prefix(count).joined())
                 known.insert(part)
-                if part.count >= 5 { candidates.append((part, count, name, count == words.count)) }
+                if part.count >= 5 { candidates.append((part, skeleton(part), count, name, count == words.count)) }
             }
+        }
+        // The dictionary is asked once per word (the Mac's spell checker isn't free).
+        var asked: [String: Bool] = [:]
+        func isRealWord(_ word: String) -> Bool {
+            if let known = asked[word] { return known }
+            let answer = isWord(word)
+            asked[word] = answer
+            return answer
         }
         guard !candidates.isEmpty else { return Result(text: text, fixes: fixes) }
         // The words as said, with where each is in the text.
@@ -158,8 +166,29 @@ public enum Grounding {
                 Range(match.range, in: text).map { (String(text[$0]), $0) }
             }
         }
-        let words = tokens(text)
+        // Only where a name is said: not inside an address, a path or code ("github.com/tanai", "tanai_ledger"), not
+        // past the first 40 words, and not in what's to be said or sent ("tell Tanay that the Herschel deal is done":
+        // the message is the user's words, kept as they are).
+        let all = tokens(text)
+        func joined(_ token: (word: String, range: Range<String.Index>)) -> Bool {
+            let before = token.range.lowerBound > text.startIndex ? text[text.index(before: token.range.lowerBound)] : " "
+            let after = token.range.upperBound < text.endIndex ? text[token.range.upperBound] : " "
+            return "./@_:\\#=".contains(before) || "/@_\\#=".contains(after)
+                || (after == "." && token.range.upperBound < text.index(before: text.endIndex)
+                    && !text[text.index(after: token.range.upperBound)].isWhitespace)
+        }
+        let sending: Set<String> = ["tell", "message", "text", "send", "email", "mail", "reply", "write", "say", "ask", "whatsapp", "dm", "post"]
+        var end = min(all.count, 40)
+        if let verb = all.prefix(3).firstIndex(where: { sending.contains($0.word.lowercased()) }) {
+            // "that" right after the verb is what's sent ("send that to Tanai"), not where the message starts.
+            if let body = all.indices.first(where: { $0 > verb + 1 && ["that", "saying", "says"].contains(all[$0].word.lowercased()) }) {
+                end = min(end, body)
+            }
+            if let colon = text.firstIndex(of: ":"), let body = all.firstIndex(where: { $0.range.lowerBound > colon }) { end = min(end, body) }
+        }
+        let words = Array(all.prefix(end))
         var taken = Array(repeating: false, count: words.count)
+        var spans: [(range: Range<String.Index>, meant: String)] = []
         // Longest runs first: "CI Builder" before "Builder".
         for size in stride(from: 4, through: 1, by: -1) where words.count >= size {
             var start = 0
@@ -178,22 +207,23 @@ public enum Grounding {
                 // A number isn't part of a misheard name ("1.7 Murmur" stays), and nor is a name already said right
                 // ("Tanay reply" isn't a mishearing of "Tanay Kothari").
                 if said.contains(where: { $0.allSatisfy(\.isNumber) }) { continue }
+                if span.contains(where: { joined(words[$0]) }) { continue }
                 if size > 1, said.contains(where: { known.contains(key($0)) }) { continue }
                 // A capital in the middle of a sentence is speech-to-text hearing a name ("reply from Herschel"),
                 // even when the word is also in the dictionary.
                 func heardAsName(_ index: Int) -> Bool { index > 0 && words[index].word.first?.isUppercase == true }
                 // A word on its own that's a real word may have been meant ("diaper").
-                if size == 1, isWord(said[0].lowercased()), !heardAsName(start) { continue }
+                if size == 1, isRealWord(said[0].lowercased()), !heardAsName(start) { continue }
                 let realWords = span.filter { index in
                     let word = words[index].word.lowercased()
-                    return small.contains(word) || (isWord(word) && !heardAsName(index))
+                    return small.contains(word) || (isRealWord(word) && !heardAsName(index))
                 }.count
                 let saidSound = skeleton(said.joined())
                 var best: (score: Double, name: Name, key: String, full: Bool)?
                 for candidate in candidates where abs(candidate.words - size) <= 1 {
                     // By spelling, or by sound when a word in it isn't one ("Herschel" / "Harshal", "Thanai" / "Tanay").
                     var score = likeness(saidKey, candidate.key)
-                    if realWords < size { score = max(score, 0.97 * soundLikeness(saidSound, skeleton(candidate.key))) }
+                    if realWords < size { score = max(score, 0.97 * soundLikeness(saidSound, candidate.sound)) }
                     // Real words throughout need a closer sound-alike than a run with a stray word in it.
                     let needed = realWords == size ? 0.86 : 0.78
                     guard score >= needed else { continue }
@@ -204,13 +234,13 @@ public enum Grounding {
                 guard let best, best.key != saidKey else { continue }
                 let heard = String(text[words[span.lowerBound].range.lowerBound..<words[span.upperBound - 1].range.upperBound])
                 fixes.append(Fix(heard: heard, meant: best.name.name, why: best.name.what))
+                spans.append((words[span.lowerBound].range.lowerBound..<words[span.upperBound - 1].range.upperBound, best.name.name))
                 for index in span { taken[index] = true }
             }
         }
-        // Applied from the end, so earlier positions stay right.
-        let named = fixes.filter { $0.why != "a version said aloud" }
-        for fix in named.reversed() {
-            if let range = text.range(of: fix.heard, options: .backwards) { text.replaceSubrange(range, with: fix.meant) }
+        // Each where it was heard, from the end, so earlier positions stay right.
+        for span in spans.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
+            text.replaceSubrange(span.range, with: span.meant)
         }
         return Result(text: text, fixes: fixes)
     }

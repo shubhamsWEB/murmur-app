@@ -81,40 +81,86 @@ public final class MemoryIndex: @unchecked Sendable {
     // MARK: Writing
 
     /// Puts records in (a record from the same source replaces the one before).
-    public func put(_ records: [Record]) {
+    @discardableResult
+    public func put(_ records: [Record]) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        db.exec("BEGIN")
-        for record in records { write(record) }
-        db.exec("COMMIT")
+        return writeAll(records)
     }
 
-    private func write(_ record: Record) {
+    /// Writes records a few hundred at a time, each batch all or nothing, so the screen-memory helper and the MCP server
+    /// (other processes on the same file) never wait long for the lock. False when any batch failed (busy, a snapshot
+    /// that moved under it): the caller then doesn't mark the store as read, and it's read again next time.
+    private func writeAll(_ records: [Record]) -> Bool {
+        var ok = true
+        for start in stride(from: 0, to: records.count, by: 400) {
+            let chunk = records[start..<min(start + 400, records.count)]
+            switch batch({ chunk.allSatisfy(write) }) {
+            case .done: continue
+            case .busy: ok = false
+            case .failed:
+                // One record that can't be written (not the file being busy) is left out and said in the log, not
+                // tried again with the rest at every sync.
+                for record in chunk {
+                    switch batch({ write(record) }) {
+                    case .done: continue
+                    case .busy: ok = false
+                    case .failed: MemoryLog.write("memory index: couldn't keep \(record.source)")
+                    }
+                }
+            }
+        }
+        return ok
+    }
+
+    enum Batch { case done, busy, failed }
+
+    /// One write transaction, taken up front (IMMEDIATE, so another writer can't slip in between its reads and writes),
+    /// committed only when every write in it worked. `busy`: another process held the file (try again later).
+    private func batch(_ body: () -> Bool) -> Batch {
+        guard db.exec("BEGIN IMMEDIATE") else { return .busy }
+        guard body() else { db.exec("ROLLBACK"); return .failed }
+        guard db.exec("COMMIT") else { db.exec("ROLLBACK"); return .busy }
+        return .done
+    }
+
+    private func write(_ unsafe: Record) -> Bool {
+        // What goes into the index can reach a model (the agent's, Claude Code's through the MCP server): no passwords,
+        // keys, codes, card numbers or recovery phrases in it.
+        var record = unsafe
+        record.title = BrainModel.redact(unsafe.title)
+        record.text = BrainModel.redact(unsafe.text)
         if let old = db.rows("SELECT id FROM recall_record WHERE source = ?", [record.source]).first?.first, let id = Int64(old) {
-            db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id])
-            db.exec("DELETE FROM recall_record WHERE id = ?", [id])
+            guard remove(id) else { return false }
         }
         let id = db.insert("""
             INSERT INTO recall_record(source, kind, actor, at, title, text, entities, prior) VALUES(?,?,?,?,?,?,?,?)
             """, [record.source, record.kind.rawValue, record.actor, record.at?.timeIntervalSince1970, record.title,
                   record.text, record.entities.joined(separator: "\n"), record.prior])
-        guard id != 0 else { return }
+        guard id != 0 else { return false }
         let extra = Self.versionKeys(record.title + " " + record.text).sorted().joined(separator: " ")
-        db.exec("INSERT INTO recall_fts(rowid, title, text, entities, extra) VALUES(?,?,?,?,?)",
-                [id, record.title, record.text, record.entities.joined(separator: " "), extra])
+        return db.exec("INSERT INTO recall_fts(rowid, title, text, entities, extra) VALUES(?,?,?,?,?)",
+                       [id, record.title, record.text, record.entities.joined(separator: " "), extra])
+    }
+
+    private func remove(_ id: Int64) -> Bool {
+        db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id]) && db.exec("DELETE FROM recall_record WHERE id = ?", [id])
     }
 
     /// Takes out every record from sources starting with a prefix ("episode:") but those listed.
     public func keepOnly(prefix: String, sources: Set<String>) {
         lock.lock(); defer { lock.unlock() }
+        prune(prefix: prefix, keep: sources)
+    }
+
+    @discardableResult
+    private func prune(prefix: String, keep: Set<String>) -> Bool {
         let gone = db.rows("SELECT id, source FROM recall_record WHERE source LIKE ?", [prefix + "%"])
-            .filter { !sources.contains($0[1]) }.compactMap { Int64($0[0]) }
-        guard !gone.isEmpty else { return }
-        db.exec("BEGIN")
-        for id in gone {
-            db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id])
-            db.exec("DELETE FROM recall_record WHERE id = ?", [id])
+            .filter { !keep.contains($0[1]) }.compactMap { Int64($0[0]) }
+        var ok = true
+        for start in stride(from: 0, to: gone.count, by: 400) {
+            ok = batch { gone[start..<min(start + 400, gone.count)].allSatisfy(remove) } == .done && ok
         }
-        db.exec("COMMIT")
+        return ok
     }
 
     func state(_ key: String) -> String? {
@@ -152,7 +198,7 @@ public final class MemoryIndex: @unchecked Sendable {
     /// What the user owes: to-dos, things due, promises, conversations waiting on them.
     public func owed(limit: Int = 40) -> [Int64] {
         db.rows("""
-            SELECT id FROM recall_record WHERE kind = 'promise'
+            SELECT id FROM recall_record WHERE (kind = 'promise' AND actor = 'me')
               OR (kind = 'fact' AND (text LIKE 'To do:%' OR text LIKE '%(due %' OR text LIKE 'Coming up:%'))
               OR (kind = 'conversation' AND (text LIKE '%your turn%' OR text LIKE '%follow up%'))
             ORDER BY prior DESC, at DESC LIMIT ?
@@ -209,37 +255,51 @@ extension MemoryIndex {
         lock.lock(); defer { lock.unlock() }
         // One stamp per store: only a store that changed is read again (windows change every minute; the rest
         // seldom).
+        // A stamp is a fingerprint of what the index reads from that store: a status changing from "open" to "done",
+        // an entity renamed or a thread's ask edited changes it, so the store is read again.
         let stamps: [(key: String, sql: String, records: () -> [Record])] = [
-            ("items", "SELECT count(*) || ':' || coalesce(max(last), 0) || ':' || total(seen) FROM screen_item", self.itemRecords),
-            ("episodes", "SELECT count(*) || ':' || coalesce(max(end), 0) || ':' || total(length(title) + length(summary)) FROM episode",
-             self.episodeRecords),
-            ("threads", "SELECT count(*) || ':' || coalesce(max(last_at), 0) || ':' || total(length(status)) FROM thread", self.threadRecords),
-            ("memories", "SELECT count(*) || ':' || coalesce(max(confirmed), 0) FROM memory WHERE archived = 0", self.memoryRecords),
-            ("chronicle", "SELECT count(*) || ':' || coalesce(max(generated), 0) FROM chronicle", self.chronicleRecords),
-            ("loops", "SELECT count(*) || ':' || coalesce(max(last), 0) || ':' || total(length(status)) FROM loop", self.loopRecords),
+            ("items", "SELECT group_concat(id || ':' || coalesce(last, '') || ':' || coalesce(seen, '') || ':' || coalesce(length(title), '') || ':' || coalesce(length(body), ''), ',') FROM screen_item",
+             self.itemRecords),
+            ("episodes", """
+                SELECT group_concat(id || ':' || coalesce(end, '') || ':' || coalesce(length(title), '') || ':' || coalesce(length(summary), '') || ':' || coalesce(length(outcome), ''), ',')
+                FROM episode
+                """, self.episodeRecords),
+            ("threads", """
+                SELECT group_concat(id || ':' || coalesce(last_at, '') || ':' || coalesce(status, '') || ':' || coalesce(length(title), '') || ':'
+                  || coalesce(length(last_action), '') || ':' || coalesce(length(ask), '') || ':' || coalesce(length(details), ''), ',') FROM thread
+                """, self.threadRecords),
+            ("memories", """
+                SELECT group_concat(m.id || ':' || coalesce(m.confirmed, '') || ':' || coalesce(length(m.text), '') || ':' || e.id || ':' || coalesce(e.name, ''), ',')
+                FROM memory m JOIN entity e ON e.id = m.entity WHERE m.archived = 0
+                """, self.memoryRecords),
+            ("chronicle", "SELECT group_concat(rowid || ':' || coalesce(generated, '') || ':' || coalesce(length(summary), ''), ',') FROM chronicle",
+             self.chronicleRecords),
+            ("loops", "SELECT group_concat(id || ':' || coalesce(last, '') || ':' || coalesce(status, '') || ':' || coalesce(due, ''), ',') FROM loop",
+             self.loopRecords),
         ]
         var changed = false
         for store in stamps {
-            let stamp = db.rows(store.sql, []).first?.first ?? ""
-            guard !stamp.isEmpty, stamp != state("stamp-" + store.key) else { continue }
-            let records = store.records()
-            db.exec("BEGIN")
-            for record in records { write(record) }
-            db.exec("COMMIT")
-            setState("stamp-" + store.key, stamp)
+            let stamp = Self.fingerprint(db.rows(store.sql, []).first?.first ?? "")
+            guard stamp != state("stamp-" + store.key) else { continue }
+            // Marked read only when every write went in; otherwise it's read again next time.
+            if writeAll(store.records()) { setState("stamp-" + store.key, stamp) }
             changed = true
         }
+        // Windows: the ones changed since the last time, with a few minutes' overlap for a window the helper wrote late.
+        // The new mark is the newest window actually read, so nothing written while this ran is skipped.
         let through = Double(state("snapshots-through") ?? "0") ?? 0
-        let windows = snapshotRecords(since: through)
+        let windows = snapshotRecords(since: through - 600)
         if !windows.isEmpty {
-            db.exec("BEGIN")
-            for record in windows { write(record) }
-            db.exec("COMMIT")
-            changed = true
+            let known = Set(db.rows("SELECT source FROM recall_record WHERE source LIKE 'snapshot:%' AND at >= ?",
+                                    [through - 86400 * 2]).map { $0[0] })
+            let fresh = windows.filter { $0.last > through || !known.contains($0.record.source) }.map(\.record)
+            if !fresh.isEmpty {
+                changed = true
+                if writeAll(fresh), let newest = windows.map(\.last).max() { setState("snapshots-through", String(max(newest, through))) }
+            }
         }
         let pruneStamp = db.rows("SELECT count(*) FROM snapshot", []).first?.first ?? ""
         guard changed || pruneStamp != state("stamp-pruned") else { return }
-        setState("stamp-pruned", pruneStamp)
         // What's gone from the stores goes from the index: windows pruned after two weeks, memories forgotten.
         let present: [(String, String)] = [
             ("item:", "SELECT 'item:' || id FROM screen_item"), ("episode:", "SELECT 'episode:' || id FROM episode"),
@@ -247,26 +307,32 @@ extension MemoryIndex {
             ("chronicle:", "SELECT 'chronicle:' || rowid FROM chronicle"), ("loop:", "SELECT 'loop:' || id FROM loop"),
             ("snapshot:", "SELECT 'snapshot:' || id FROM snapshot"),
         ]
+        var pruned = true
         for (prefix, sql) in present {
-            let keep = Set(db.rows(sql, []).map { $0[0] })
-            let gone = db.rows("SELECT id, source FROM recall_record WHERE source LIKE ?", [prefix + "%"])
-                .filter { !keep.contains($0[1]) }.compactMap { Int64($0[0]) }
-            guard !gone.isEmpty else { continue }
-            db.exec("BEGIN")
-            for id in gone {
-                db.exec("DELETE FROM recall_fts WHERE rowid = ?", [id])
-                db.exec("DELETE FROM recall_record WHERE id = ?", [id])
-            }
-            db.exec("COMMIT")
+            pruned = prune(prefix: prefix, keep: Set(db.rows(sql, []).map { $0[0] })) && pruned
         }
-        let latest = db.rows("SELECT coalesce(max(last), 0) FROM snapshot", []).first?.first ?? "0"
-        setState("snapshots-through", latest)
+        if pruned { setState("stamp-pruned", pruneStamp) }
     }
 
-    /// What Murmur did for the user (from its own command history), as records.
+    /// A short, stable fingerprint (FNV-1a) of a store's stamp text: the same in every process and every launch.
+    static func fingerprint(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3 }
+        return String(hash, radix: 16) + ":" + String(text.utf8.count)
+    }
+
+    /// What Murmur did for the user (from its own command history), as records, replacing the ones before: an action
+    /// forgotten in Murmur's history, or older than the history it was given, leaves the index too.
     public func putMurmur(_ actions: [(at: Date, what: String, source: String)]) {
-        put(actions.map { Record(source: $0.source, kind: .murmur, actor: "murmur", at: $0.at, title: "Murmur did this for you",
-                                 text: $0.what, entities: ["Murmur"], prior: 0.9) })
+        lock.lock(); defer { lock.unlock() }
+        let records = actions.map { Record(source: $0.source, kind: .murmur, actor: "murmur", at: $0.at, title: "Murmur did this for you",
+                                           text: $0.what, entities: ["Murmur"], prior: 0.9) }
+        // Only what changed is written (this runs before every question).
+        let have = Dictionary(db.rows("SELECT source, text FROM recall_record WHERE source LIKE 'murmur:%'", []).map { ($0[0], $0[1]) },
+                              uniquingKeysWith: { first, _ in first })
+        if writeAll(records.filter { have[$0.source] != $0.text }) {
+            prune(prefix: "murmur:", keep: Set(records.map(\.source)))
+        }
     }
 
     // MARK: The stores, as records
@@ -363,24 +429,26 @@ extension MemoryIndex {
     func loopRecords() -> [Record] {
         db.rows("SELECT id, summary, person, status, first, due FROM loop", []).compactMap { row in
             guard row.count == 6 else { return nil }
+            let open = row[3] == "open"
             var text = row[1] + (row[2].isEmpty ? "" : " (with \(row[2]))") + ", \(row[3])"
             if let due = date(row[5]) { text += ", due " + due.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)) }
-            return Record(source: "loop:\(row[0])", kind: .promise, actor: "me", at: date(row[4]), title: row[1], text: text,
-                          entities: [row[2]].filter { !$0.isEmpty }, prior: 0.7)
+            // A promise kept or dropped is still remembered, but isn't owed: `owed()` finds the user's open ones only.
+            return Record(source: "loop:\(row[0])", kind: .promise, actor: open ? "me" : "closed", at: date(row[4]), title: row[1],
+                          text: text, entities: [row[2]].filter { !$0.isEmpty }, prior: open ? 0.7 : 0.5)
         }
     }
 
     /// Windows as they were on screen, new or changed since `since`: the evidence under everything, found when what
     /// was read from it missed the point.
-    func snapshotRecords(since: Double) -> [Record] {
-        db.rows("SELECT id, app, title, domain, text, first, authored FROM snapshot WHERE last > ?", [since]).compactMap { row in
-            guard row.count == 7 else { return nil }
+    func snapshotRecords(since: Double) -> [(record: Record, last: Double)] {
+        db.rows("SELECT id, app, title, domain, text, first, authored, last FROM snapshot WHERE last > ?", [since]).compactMap { row in
+            guard row.count == 8, let last = Double(row[7]) else { return nil }
             let app = ScreenText.appName(row[1])
-            let authored = row[6].replacingOccurrences(of: ScreenText.unconfirmed, with: "")
+            let authored = ScreenText.confirmed(row[6])
             let text = (authored.isEmpty ? "" : "You wrote and sent here: \(authored.prefix(800))\n") + row[4].prefix(2500)
-            return Record(source: "snapshot:\(row[0])", kind: .saw, actor: authored.isEmpty ? "other" : "me", at: date(row[5]),
-                          title: "\(app): \(ScreenText.cleanTitle(row[2]))".prefix(200).description, text: text,
-                          entities: [app, row[3]].filter { !$0.isEmpty }, prior: authored.isEmpty ? 0.3 : 0.45)
+            return (Record(source: "snapshot:\(row[0])", kind: .saw, actor: authored.isEmpty ? "other" : "me", at: date(row[5]),
+                           title: "\(app): \(ScreenText.cleanTitle(row[2]))".prefix(200).description, text: text,
+                           entities: [app, row[3]].filter { !$0.isEmpty }, prior: authored.isEmpty ? 0.3 : 0.45), last)
         }
     }
 }

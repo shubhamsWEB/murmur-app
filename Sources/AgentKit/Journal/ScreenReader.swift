@@ -43,7 +43,7 @@ public enum ScreenReader {
     /// The front window as it is now, and what's being written in it (the focused message box or document, not yet
     /// sent), or nil when it isn't read (or there's nothing in it).
     @MainActor
-    public static func capture(rules: Rules, plugged: Bool) async -> (capture: Journal.Capture, draft: String)? {
+    public static func capture(rules: Rules, plugged: Bool) async -> (capture: Journal.Capture, draft: String, boxes: [String])? {
         guard let app = NSWorkspace.shared.frontmostApplication, let bundle = app.bundleIdentifier,
               !neverRead.contains(bundle) else { return nil }
         let element = AXUIElementCreateApplication(app.processIdentifier)
@@ -57,7 +57,8 @@ public enum ScreenReader {
         let domain = Journal.Capture(app: "", bundle: "", title: "", url: url, text: "").domain
         guard skip(bundle: bundle, title: title, domain: domain, rules: rules) == nil else { return nil }
         let name = ScreenText.appName(app.localizedName ?? bundle)
-        var text = ScreenText.clean(Self.text(of: window))
+        var boxes: [String] = []
+        var text = ScreenText.clean(Self.text(of: window, boxes: &boxes))
         var via = "text", labels = ""
         // Little text to go on: a picture of the window, read on this Mac.
         if words(text) < 25, rules.pictures, let read = await picture(of: app, accurate: plugged) {
@@ -70,10 +71,11 @@ public enum ScreenReader {
         guard words(text) >= 5 || !labels.isEmpty else { return nil }
         let kind = WindowKind.of(app: name, domain: domain, url: url, title: title, text: text)
         // A terminal's newest lines are at the bottom: keep those (the top is old scrollback). Elsewhere, the top.
-        let kept = ItemReader.terminals.contains(name) ? String(text.suffix(16_000)) : String(text.prefix(16_000))
+        // Its secrets (keys exported, a .env printed) are taken out before anything is kept.
+        let kept = ItemReader.terminals.contains(name) ? BrainModel.redact(String(text.suffix(16_000))) : String(text.prefix(16_000))
         let capture = Journal.Capture(app: name, bundle: bundle, title: ScreenText.appName(title), url: url, text: kept,
                                       via: via, labels: labels, kind: kind.rawValue, document: document)
-        return (capture, rules.authored ? draft(in: element) : "")
+        return (capture, rules.authored ? draft(in: element) : "", boxes)
     }
 
     /// What's in the focused text box (a message being written, a document being edited), never a password field.
@@ -108,12 +110,14 @@ public enum ScreenReader {
     @MainActor
     static func windowExists(_ key: String) -> Bool {
         let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
-        guard parts.count == 2,
-              let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == parts[0] }) else { return false }
+        guard parts.count == 2, let app = NSWorkspace.shared.runningApplications.first(where: {
+            ScreenText.appName($0.localizedName ?? "") == parts[0]
+        }) else { return false }
         let element = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.3)
         let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
-        return windows.contains { (attribute($0, kAXTitleAttribute) as String?) == parts[1] }
+        // Titles compared as read (a compose window titled with an emoji has invisible joiners in it).
+        return windows.contains { ScreenText.appName((attribute($0, kAXTitleAttribute) as String?) ?? "") == ScreenText.appName(parts[1]) }
     }
 
     /// What's in the focused text box of the front app, alone (a glance, not a read of the window).
@@ -146,6 +150,13 @@ public enum ScreenReader {
     /// The window's words, top to bottom: static text, text areas, headings, links, buttons' titles. At most 2,500
     /// elements and 16,000 characters, within half a second; password fields are skipped.
     static func text(of window: AXUIElement) -> String {
+        var boxes: [String] = []
+        return text(of: window, boxes: &boxes)
+    }
+
+    /// The same, and what's in the window's text boxes (`boxes`): a message being written is in the window's text too,
+    /// and isn't sent while it's still in its box.
+    static func text(of window: AXUIElement, boxes: inout [String]) -> String {
         var lines: [(text: String, control: Bool)] = []
         var seen = Set<String>()
         // A page that marks its main content (most do): only that, not the app around it.
@@ -163,7 +174,15 @@ public enum ScreenReader {
             var parts: [String] = []
             switch role {
             case "AXStaticText", "AXTextArea", "AXTextField", "AXHeading", "AXCell":
-                if let value: String = attribute(element, kAXValueAttribute) { parts.append(value) }
+                if let value: String = attribute(element, kAXValueAttribute) {
+                    parts.append(value)
+                    // Only a box that can be typed in (some apps show messages in read-only text areas).
+                    var editable = DarwinBoolean(false)
+                    if role == "AXTextArea" || role == "AXTextField", boxes.count < 20, !value.isEmpty,
+                       AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &editable) == .success, editable.boolValue {
+                        boxes.append(String(value.prefix(4000)))
+                    }
+                }
             case "AXLink", "AXButton", "AXMenuButton", "AXTab", "AXRadioButton", "AXCheckBox":
                 if let title: String = attribute(element, kAXTitleAttribute) { parts.append(title) }
             default: break

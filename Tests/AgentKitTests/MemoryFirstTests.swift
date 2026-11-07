@@ -78,12 +78,23 @@ struct MemoryFirstTests {
         let now = Date()
         let terminal = Journal.Snapshot(id: 2, app: "Terminal", title: "~/IdeaProjects/murmur — -zsh", url: nil, domain: "",
                                         text: "shubham@mac murmur % git tag v1.7.0\nshubham@mac murmur % git push origin v1.7.0\n"
+                                            + "To github.com:shubhamsWEB/murmur-app.git\n * [new tag]         v1.7.0 -> v1.7.0\n"
                                             + "shubham@mac murmur % git tag -l\nv1.6.0\nv1.7.0",
                                         first: now, last: now, seconds: 30, sightings: 1)
         let releases = ItemReader.read(terminal, me: []).filter { $0.kind == .release }
         #expect(releases.count == 1)
         #expect(releases.first?.fields["version"] == "1.7.0")
         #expect(releases.first?.project == "murmur")
+        // Not a release: a push that was rejected, an assistant suggesting the command, the command in a document.
+        func released(_ app: String, _ text: String) -> Bool {
+            ItemReader.read(Journal.Snapshot(id: 3, app: app, title: "murmur", url: nil, domain: "", text: text, first: now, last: now,
+                                             seconds: 30, sightings: 1), me: []).contains { $0.kind == .release }
+        }
+        #expect(!released("Terminal", "% git push origin v2.0.0\nTo github.com:me/app.git\n ! [rejected]        v2.0.0 -> v2.0.0 (already exists)"))
+        #expect(!released("Terminal", "⏺ When you're ready, you can run gh release create v2.1.0 --notes-file notes.md"))
+        #expect(!released("Cursor", "To release:\n git tag v18.3.1\n * [new tag]         v18.3.1 -> v18.3.1"))
+        // gh's release address is proof too.
+        #expect(released("Terminal", "% gh release create v1.7.1\nhttps://github.com/shubhamsWEB/murmur-app/releases/tag/v1.7.1"))
     }
 
     // MARK: What was actually on screen on 7 Nov
@@ -162,12 +173,18 @@ struct MemoryFirstTests {
         #expect(releases.first?.fields["status"] == "tagged")
         #expect(releases.first?.title == "Murmur 1.7.0")
         #expect(releases.first?.mine == true)
-        // The terminal that pushed the tag, by its title alone.
+        // The terminal that ran the push, by what git said back (its newest lines are kept), not by its title: a title
+        // names the command while it runs, whether or not it worked.
         let terminal = Journal.Snapshot(id: 7, app: "Terminal",
                                         title: "murmur — git tag -a v1.7.0 -m \"Murmur 1.7.0\" && git push origin v1.7.0 — ssh ◂ git push origin v1.7.0 — 213×59",
-                                        url: nil, domain: "", text: "Last login: Thu Nov  5 18:28:57 on ttys008\n ~  cd ~/IdeaProjects",
+                                        url: nil, domain: "",
+                                        text: "Last login: Thu Nov  5 18:28:57 on ttys008\nTo https://github.com/shubhamsWEB/murmur-app.git\n"
+                                            + " * [new tag]         v1.7.0 -> v1.7.0",
                                         first: now, last: now, seconds: 4, sightings: 1)
         #expect(ItemReader.read(terminal, me: []).contains { $0.kind == .release && $0.fields["version"] == "1.7.0" })
+        let running = Journal.Snapshot(id: 8, app: "Terminal", title: terminal.title, url: nil, domain: "",
+                                       text: "Last login: Thu Nov  5 18:28:57 on ttys008", first: now, last: now, seconds: 4, sightings: 1)
+        #expect(!ItemReader.read(running, me: []).contains { $0.kind == .release })
     }
 
     // MARK: Answering
@@ -359,5 +376,174 @@ struct BrainRecallTests {
         let names = [Grounding.Name("Harshal", what: "you wrote to them on email")]
         let result = Grounding.ground("Is there any reply from Herschel", names: names, isWord: { ["herschel", "reply", "there", "from"].contains($0) })
         #expect(result.text == "Is there any reply from Harshal")
+    }
+}
+
+/// What the 1.7.1 review found, each case as it was found.
+struct ReviewFixesTests {
+    // MARK: Commands stay commands
+
+    @Test func tellingAndRemindingAreThingsToDo() {
+        #expect(MemoryRoute.classify("Tell the team on Slack that we shipped 1.7") == nil)
+        #expect(MemoryRoute.classify("Remind me to write the release notes") == nil)
+        #expect(MemoryRoute.classify("Remember my flight is on Friday") == nil)
+        #expect(MemoryRoute.classify("Tell me what we released yesterday") == .question)
+        #expect(MemoryRoute.classify("Remind me when my flight is") == .question)
+        // No ready answer for something to do, even with a release in memory.
+        let graph = MemoryGraph(url: FileManager.default.temporaryDirectory.appendingPathComponent("tell-\(UUID().uuidString).sqlite"))
+        graph.store(MemoryItem(kind: .release, key: "release|murmur|1.7.0", title: "Murmur 1.7.0", body: "Release: Murmur 1.7.0",
+                               project: "Murmur", when: Date(), fields: ["version": "1.7.0", "name": "Murmur"], mine: true),
+                    snapshot: 1, seen: Date())
+        #expect(MemoryRecall.directAnswer("Tell the team on Slack that we shipped 1.7", graph: graph) == nil)
+    }
+
+    @Test func onlyQuestionsAboutWhatTheUserDidShutTheWeb() {
+        for open in ["Tell me how to change my wallpaper", "How much is a flight to Goa for me next week?",
+                     "Did India win the match yesterday? I didn't watch it.", "Has Apple released iOS 19 yet? My phone hasn't updated.",
+                     "Do I have any unread messages on LinkedIn?", "Has my Amazon order shipped?",
+                     "What did we ship yesterday? Post it on LinkedIn.", "Check LinkedIn whether we posted it"] {
+            #expect(!MemoryRoute.shutsOutTheWeb(open), "\(open)")
+        }
+        for shut in ["What all release we did and have we notified on the LinkedIn and WhatsApp?",
+                     "Did we send an update in LinkedIn regarding the new Murmur launch version?",
+                     "We what our releases we did and have we notified on LinkedIn and WhatsApp",
+                     "Did Tanay reply?", "What did I send to Tanay on email today"] {
+            #expect(MemoryRoute.shutsOutTheWeb(shut), "\(shut)")
+        }
+    }
+
+    @Test func anOfferAloneIsNoAnswerToACommand() {
+        #expect(MemoryRoute.answer(from: "NOT_IN_MEMORY. Want me to check LinkedIn?") == nil)
+        #expect(MemoryRoute.answer(from: "I haven't seen a LinkedIn post about it. Want me to check?") == nil)
+        // To a question about the user's past, "not seen" is the answer.
+        #expect(MemoryRoute.answer(from: "I haven't seen a LinkedIn post about it since 5 Nov.", notSeenAnswers: true)
+                == "I haven't seen a LinkedIn post about it since 5 Nov.")
+        #expect(MemoryRoute.answer(from: "You released Murmur 1.7.0 today. I haven't seen a LinkedIn post about it.")
+                == "You released Murmur 1.7.0 today. I haven't seen a LinkedIn post about it.")
+    }
+
+    // MARK: Hearing names, not rewriting words
+
+    @Test func addressesCodeAndMessagesKeepTheirWords() {
+        let names = HearingTests.names + [Grounding.Name("Harshal", what: "person")]
+        let isWord = HearingTests.isWord
+        #expect(Grounding.ground("Open github.com/tanai/ledgr", names: names, isWord: isWord).text == "Open github.com/tanai/ledgr")
+        // The name to whom is heard right; what's to be said is the user's.
+        let told = Grounding.ground("Tell Tanai that the Herschel deal is done", names: names, isWord: isWord)
+        #expect(told.text == "Tell Tanay that the Herschel deal is done")
+        #expect(Grounding.ground("Is there any reply from Herschel", names: names, isWord: isWord).text == "Is there any reply from Harshal")
+    }
+
+    // MARK: Secrets
+
+    @Test func secretsInTerminalsAndRecoveryPhrasesAreHidden() {
+        #expect(!BrainModel.redact("export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCY").contains("wJalr"))
+        #expect(!BrainModel.redact("GH_TOKEN=ghx_abcdef1234567890 gh release create").contains("abcdef1234"))
+        #expect(!BrainModel.redact("token github_pat_11ABCDEFG0123456789_abcdefghij").contains("github_pat_11"))
+        #expect(!BrainModel.redact("DATABASE_URL=postgres://admin:hunter22@db.local/app").contains("hunter22"))
+        let phrase = "abandon ability able about above absent absorb abstract absurd abuse access accident"
+        #expect(!BrainModel.redact("Wallet: \(phrase) and more").contains("absorb"))
+        #expect(!BrainModel.redact("card 4111 1111 1111 1111 exp 12/29").contains("4111 1111"))
+        #expect(!BrainModel.redact("password: correcthorse").contains("correcthorse"))
+        // Ordinary words, and numbers that aren't cards, are left alone.
+        for kept in ["We shipped Murmur 1.7 today, and the launch post went out on LinkedIn in the evening.",
+                     "The Mac test build passed, so the password-field fix compiles.",
+                     "Kimi K2.7 does agentic coding, with a 1M token context window.",
+                     "Secret Channel Exposed", "no API key needed",
+                     "linkedin.com/feed/update/urn:li:activity:7392481234567890123",
+                     String(repeating: "word ", count: 30)] {
+            #expect(BrainModel.redact(kept) == kept, "\(kept)")
+        }
+    }
+
+    // MARK: What was sent and posted
+
+    @Test func aDraftLeftInItsBoxIsNotSent() {
+        let draft = "Congratulations on the launch, this is a great milestone for the team"
+        // The box still holds it (the user clicked elsewhere): the page's text has it only because the box does.
+        #expect(ScreenText.posted(before: draft, now: "", in: "Comments\n\(draft)\nPost", boxes: [draft]) == nil)
+        #expect(ScreenText.sent(before: "Sure, I'll send it Thursday night.", now: "", in: "Sure, I'll send it Thursday night.",
+                                boxes: ["Sure, I'll send it Thursday night."]) == nil)
+        // The box emptied and it's on the page: posted.
+        #expect(ScreenText.posted(before: draft, now: "", in: "Shubham Agrawal\n\(draft)\nLike", boxes: [""]) == draft)
+    }
+
+    @Test func someoneElsesPostIsNotTheUsers() {
+        let draft = "I'm happy to share that I'm starting a new position"
+        let theirs = "I'm happy to share that I'm starting a new position as Staff Engineer at Acme Corp!"
+        // What's kept is what the user wrote, never the other person's longer line.
+        #expect(ScreenText.posted(before: draft, now: "", in: "Priya Shah\n\(theirs)\nLike") != theirs)
+        // A "post shared" that was on the page before says nothing about this draft.
+        let page = "Post shared\nFeed"
+        #expect(ScreenText.posted(before: draft, now: "", in: page, earlier: page) == nil)
+    }
+
+    // MARK: The second look
+
+    @Test func theSecondLookStaysFixed() {
+        // "that" right after the verb is what's sent.
+        #expect(Grounding.ground("Send that to Tanai", names: HearingTests.names, isWord: HearingTests.isWord).text == "Send that to Tanay")
+        // Messages and reminders, not questions.
+        #expect(MemoryRoute.classify("Tell Priya what we shipped this week") == nil)
+        #expect(MemoryRoute.classify("Remind me about the dentist tomorrow at 5") == nil)
+        #expect(MemoryRoute.classify("Remind me of the standup at 10") == nil)
+        #expect(MemoryRoute.classify("Tell me about Project Phoenix") == .question)
+        // Something to do if not: its tools stay open.
+        #expect(!MemoryRoute.shutsOutTheWeb("Did we post about 1.7? If not, post it on LinkedIn"))
+        #expect(!MemoryRoute.shutsOutTheWeb("Have we told the group? Otherwise send them the link"))
+        #expect(MemoryRoute.shutsOutTheWeb("What was I working on yesterday?"))
+        // A recap that names what, not when, isn't only the last day.
+        #expect(BrainRecall.read("What did we do about the Harshal deal?", names: [], now: BrainRecallTests.now).span == nil)
+        // Money isn't a version.
+        #expect(BrainRecall.highestVersion(in: "Murmur 1.7.0 released. Price USD 4.99") == "1.7.0")
+        #expect(BrainRecall.highestVersion(in: "Total 2499.00") == nil)
+        // A post with a mention in it, and a long post shown cut short, still count as posted.
+        let congrats = "Congrats Priya Sharma, well deserved on the new role!"
+        #expect(ScreenText.posted(before: congrats, now: "", in: "Comments\nCongrats\nPriya Sharma\n, well deserved on the new role!") == congrats)
+        let long = String(repeating: "Murmur 1.7 is out for Mac and Windows, free and open source, and it runs on your own computer. ", count: 3)
+        #expect(ScreenText.posted(before: long, now: "", in: "Shubham Agrawal\n" + long.prefix(140) + "…more\nLike") == long.trimmingCharacters(in: .whitespaces))
+    }
+
+    // MARK: Memory search
+
+    @Test func whatMurmurDidIsEachItsOwn() {
+        let index = BrainRecallTests.index()
+        index.putMurmur([(BrainRecallTests.now, "sent a message to Roma on WhatsApp", "murmur:1:0"),
+                         (BrainRecallTests.now, "sent a message to Tanay on WhatsApp", "murmur:2:0"),
+                         (BrainRecallTests.now, "sent a message to Jason on WhatsApp", "murmur:3:0")])
+        let found = BrainRecall(index: index, vectors: nil).recall("What messages did Murmur send for me?", names: [], now: BrainRecallTests.now)
+        #expect(found.found.filter { $0.record.source.hasPrefix("murmur:") }.count == 3)
+        // Forgotten in Murmur's history: gone from the index.
+        index.putMurmur([(BrainRecallTests.now, "sent a message to Roma on WhatsApp", "murmur:1:0")])
+        #expect(index.id(of: "murmur:2:0") == nil && index.id(of: "murmur:1:0") != nil)
+    }
+
+    @Test func aPromiseKeptIsNoLongerOwed() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("owed-\(UUID().uuidString).sqlite")
+        let journal = Journal(url: url)
+        journal.take([Journal.Promise(summary: "Send Tanay the deck", person: "Tanay")], evidence: [])
+        let index = MemoryIndex(url: url)
+        index.sync()
+        #expect(index.owed().count == 1)
+        // Done without anything else about it changing (the same length of status, the same last-seen time).
+        if let loop = journal.loops(status: "open", limit: 5).first { journal.set(loop: loop.id, status: "done") }
+        index.sync()
+        #expect(index.owed().isEmpty)
+        #expect(index.count() == 1)   // still remembered
+    }
+
+    @Test func aPriceIsNotAVersion() {
+        #expect(BrainRecall.highestVersion(in: "Release plan: budget ₹2,499.00") == nil)
+        #expect(BrainRecall.highestVersion(in: "Meet at 10.30 tomorrow") == nil)
+        #expect(BrainRecall.highestVersion(in: "Releasing Murmur 1.7.0") == "1.7.0")
+        #expect(BrainRecall.highestVersion(in: "tagged v1.6.2 and v1.7.1") == "1.7.1")
+    }
+
+    @Test func whatDidIDoMeansTheLastDay() {
+        let reading = BrainRecall.read("What did I do?", names: [], now: BrainRecallTests.now)
+        #expect(reading.recap && reading.span != nil)
+        #expect(!BrainRecall(index: BrainRecallTests.memory(), vectors: nil).recall("What did I do?", names: [], now: BrainRecallTests.now).isEmpty)
+        // "What's new?" asks; it isn't a word to search for.
+        #expect(BrainRecall.read("What's new?", names: [], now: BrainRecallTests.now).terms.isEmpty)
     }
 }

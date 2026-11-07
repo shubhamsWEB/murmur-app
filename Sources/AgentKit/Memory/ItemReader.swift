@@ -333,29 +333,41 @@ public enum ItemReader {
     /// create v1.7.0", typed by the user or run by a coding agent ("Bash(git tag v1.7.0)"). The project is the folder the
     /// terminal is in. Listing or deleting tags isn't a release.
     static func taggedReleases(in window: Journal.Snapshot) -> [MemoryItem] {
-        guard terminals.contains(window.app) || editors.contains(window.app) else { return [] }
-        let pattern = #"\b(?:git\s+tag\s+(?:-[as]\s+)?|gh\s+release\s+create\s+|git\s+push\s+(?:-u\s+)?[\w.-]+\s+(?:refs/tags/)?)v?(\d+\.\d+\.\d+(?:-[\w.]+)?)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        // A terminal (where git and gh run), and only what they said back when it worked: git's "* [new tag] v1.7.0 ->
+        // v1.7.0" after a push, or the release's address gh prints. A command in a document, a suggestion in an
+        // assistant's answer, or a push that was rejected ("! [rejected]") isn't a release.
+        guard terminals.contains(window.app) else { return [] }
+        let version = #"v?(\d+\.\d+\.\d+(?:-[\w.]+)?)"#
+        guard let pushed = try? NSRegularExpression(pattern: #"^\s*\*\s+\[new tag\]\s+"# + version + #"\s+->"#),
+              let published = try? NSRegularExpression(pattern: #"github\.com/[\w.-]+/([\w.-]+)/releases/tag/"# + version + #"\b"#),
+              let remote = try? NSRegularExpression(pattern: #"^To\s+\S*?([\w.-]+?)(?:\.git)?/?\s*$"#) else { return [] }
         let project = work(in: window)?.project ?? ""
         var seen = Set<String>(), out: [MemoryItem] = []
-        // The title too: Terminal names its window after the command running ("murmur — git push origin v1.7.0").
-        for line in ([window.title] + window.text.split(separator: "\n").map(String.init)) where line.count < 400 {
+        var repository = ""
+        for line in window.text.split(separator: "\n").map(String.init) where line.count < 400 {
             let range = NSRange(line.startIndex..., in: line)
-            for match in regex.matches(in: line, range: range) {
-                guard let versionRange = Range(match.range(at: 1), in: line) else { continue }
-                let version = String(line[versionRange])
-                guard seen.insert(version).inserted else { continue }
-                let name = project.isEmpty ? "Release" : project
-                let core = BrainModel.projectCore(name)
-                let command = String(line.trimmingCharacters(in: .whitespaces).prefix(200))
-                out.append(MemoryItem(kind: .release, key: "release|\(core.isEmpty ? "terminal" : core)|\(version.lowercased())|tag",
-                                      title: "\(name) \(version)",
-                                      body: "Release: \(name) \(version)\nTagged in \(window.app): \(command)", actor: "me",
-                                      // No day: the scrollback is read again and again; the first sighting is when.
-                                      project: name, when: nil,
-                                      fields: ["version": version, "name": name, "source": "terminal", "command": command],
-                                      mine: true))
+            func group(_ match: NSTextCheckingResult, _ i: Int) -> String? { Range(match.range(at: i), in: line).map { String(line[$0]) } }
+            // "To github.com:owner/murmur-app.git": the repository the tags after it went to.
+            if let match = remote.firstMatch(in: line, range: range), let name = group(match, 1) { repository = name; continue }
+            var found: (version: String, repository: String)?
+            if let match = pushed.firstMatch(in: line, range: range), let tag = group(match, 1) { found = (tag, repository) }
+            // A release page's address counts for this project's repository only (an assistant can print another
+            // project's release in the same terminal).
+            if let match = published.firstMatch(in: line, range: range), let name = group(match, 1), let tag = group(match, 2),
+               project.isEmpty || BrainModel.projectCore(name) == BrainModel.projectCore(project) {
+                found = (tag, name)
             }
+            guard let found, seen.insert(found.version).inserted else { continue }
+            let name = project.isEmpty ? (found.repository.isEmpty ? "Release" : found.repository) : project
+            let core = BrainModel.projectCore(name)
+            let said = String(line.trimmingCharacters(in: .whitespaces).prefix(200))
+            out.append(MemoryItem(kind: .release, key: "release|\(core.isEmpty ? "terminal" : core)|\(found.version.lowercased())|tag",
+                                  title: "\(name) \(found.version)",
+                                  body: "Release: \(name) \(found.version)\nTagged in \(window.app): \(said)", actor: "me",
+                                  // No day: the scrollback is read again and again; the first sighting is when.
+                                  project: name, when: nil,
+                                  fields: ["version": found.version, "name": name, "source": "terminal", "command": said],
+                                  mine: true))
         }
         return out
     }
@@ -511,9 +523,10 @@ public enum ItemReader {
 
     /// What the user published on a feed (a post, a comment), seen leaving the box they wrote it in.
     static func posts(in window: Journal.Snapshot) -> [MemoryItem] {
-        guard !window.authored.isEmpty, let platform = platform(of: window.domain),
+        let authored = ScreenText.confirmed(window.authored)
+        guard !authored.isEmpty, let platform = platform(of: window.domain),
               WindowKind.of(window) != .conversation else { return [] }
-        let lines = window.authored.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = authored.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.split(separator: " ").count >= 3 }
         return lines.suffix(4).map { raw in
             let unsure = raw.hasPrefix(ScreenText.unconfirmed)
@@ -577,7 +590,7 @@ public enum ItemReader {
         // On a feed it's a post, not a message (posts(in:)).
         if platform(of: window.domain) != nil, WindowKind.of(window) != .conversation { return [] }
         let with = conversationName(window)
-        let lines: [String] = window.authored.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines: [String] = ScreenText.confirmed(window.authored).split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.count >= 2 }
         let to = with.isEmpty ? "" : " to \(with)"
         let people: [String] = with.isEmpty ? [] : [with]

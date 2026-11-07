@@ -50,6 +50,22 @@ public enum MemoryRoute: Equatable, Sendable {
                 || text.contains(" do you remember ") else {
             return nil
         }
+        // "Tell the team we shipped 1.7", "remind me to write the notes", "remember my flight is on Friday": something
+        // to do. Only "tell me what…", "remind me when…", "remember when…" ask.
+        if ["tell", "remind", "remember"].contains(first), !mentionsMemory, !askedInside {
+            let wh: Set<String> = ["what", "when", "where", "who", "whom", "which", "how", "whether", "if", "why"]
+            let second = words.count > 1 ? words[1] : "", third = words.count > 2 ? words[2] : ""
+            let asking: Bool
+            switch first {
+            // "Tell me what…", "tell me about…" (not "tell Priya what we shipped": that's a message to Priya).
+            case "tell": asking = ["me", "us"].contains(second) && (wh.contains(third) || third == "about")
+            // "Remind me when…" (not "remind me about the dentist at 5": that's a reminder).
+            case "remind": asking = ["me", "us"].contains(second) && wh.contains(third)
+            // "Remember when we…" (not "remember my flight is on Friday").
+            default: asking = wh.contains(second)
+            }
+            guard asking else { return nil }
+        }
         let theirs = [" my ", " i ", " i'm ", " i've ", " i'll ", " me ", " we ", " we've ", " our ", " us ", " mine "]
             .contains(where: text.contains) || mentionsMemory
             // "Did Tanay reply?", "has Priya written back?": about someone the user wrote to.
@@ -122,14 +138,48 @@ public enum MemoryRoute: Equatable, Sendable {
         return text.range(of: look, options: .regularExpression) != nil
     }
 
-    /// A question about what happened or what the user did ("did we post it?", "what did we release?", "has Priya
-    /// replied?"), not how to do something ("how do I change my wallpaper?", which the web may well answer).
+    /// A question about what the user did ("did we post it?", "what did we release?", "have I told Priya?", "has
+    /// Tanay replied?"): the user (or someone they wrote to) doing something in the past. Not a question about the
+    /// world ("did India win?", "has my order shipped?") or how to do something ("how do I change my wallpaper?"),
+    /// which the web may well answer.
     public static func aboutThePast(_ utterance: String) -> Bool {
-        let words = Set(spoken(utterance))
-        let past: Set<String> = ["did", "have", "has", "had", "was", "were", "we've", "i've", "sent", "posted", "released",
-                                 "shipped", "launched", "told", "notified", "announced", "shared", "replied", "yesterday",
-                                 "last", "earlier", "ago", "recently", "already", "promised"]
-        return !words.isDisjoint(with: past) || MemoryRecall.isAboutTheUsersWork(utterance)
+        let text = " " + spoken(utterance).joined(separator: " ") + " "
+        let done = "did|do|sent|send|posted|post|released|release|shipped|launched|told|tell|notified|notify|announced|shared|share|"
+            + "replied|promised|emailed|messaged|wrote|published|tagged|pushed|said|made|worked|finished|completed"
+        let patterns = [
+            #" did (we|i) "#, #" (we|i) (\#(done)) "#, #" (have|had) (we|i) "#, #" (we've|i've|we'd|i'd) "#,
+            #" (was|were) (we|i) "#,
+            #" what all (we|i) "#,
+            // Someone the user wrote to answering: "did Tanay reply?", "has Priya written back?".
+            #" (did|has|have) (\w+ ){1,2}(reply|replied|respond|responded|write back|written back|wrote back|get back|got back) "#,
+        ]
+        return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    /// Something to do in the same breath ("what did we ship yesterday? Post it on LinkedIn"): its tools stay open.
+    public static func hasAction(_ utterance: String) -> Bool {
+        let clauses = utterance.components(separatedBy: CharacterSet(charactersIn: ".?!;\n"))
+            .flatMap { $0.components(separatedBy: " and then ") }.flatMap { $0.components(separatedBy: " then ") }
+        // A clause after the first that tells Murmur to do something ("…? Post it on LinkedIn", "…and then remind me").
+        let more: Set<String> = ["post", "publish", "tweet", "announce", "notify", "forward", "remind", "tell"]
+        // "If not, post it", "otherwise send them the link": the condition goes, what's to do stays.
+        let conditions: [[String]] = [["if", "not"], ["if", "no"], ["if", "so"], ["if", "yes"], ["otherwise"], ["else"],
+                                      ["if", "we", "haven't"], ["if", "i", "haven't"], ["if", "we", "didn't"], ["if", "i", "didn't"],
+                                      ["if", "not", "then"], ["then"]]
+        return clauses.contains { clause in
+            var words = spoken(clause)
+            for condition in conditions.sorted(by: { $0.count > $1.count }) where Array(words.prefix(condition.count)) == condition {
+                words.removeFirst(condition.count)
+                break
+            }
+            return startsWithAction(words) || (words.first.map(more.contains) == true && words.dropFirst().first != "me")
+        }
+    }
+
+    /// The web and the browser stay shut for this request: a question about the user's own past that doesn't ask
+    /// Murmur to go and look, and has nothing to do in it.
+    public static func shutsOutTheWeb(_ utterance: String) -> Bool {
+        classify(utterance) == .question && aboutThePast(utterance) && !asksToLook(utterance) && !hasAction(utterance)
     }
 
     /// Tools that go outside memory to the web or a browser: shut for a question about the user's own past.
@@ -138,7 +188,7 @@ public enum MemoryRoute: Equatable, Sendable {
 
     /// "Open…", "send…", "search…": something to do, not a question to answer.
     static func startsWithAction(_ words: [String]) -> Bool {
-        guard let first = words.first else { return false }
+        guard !words.isEmpty else { return false }
         let actions: Set<String> = ["open", "send", "message", "text", "call", "email", "mail", "play", "pause", "search",
                                     "google", "find", "look", "go", "visit", "create", "make", "write", "draft", "book",
                                     "buy", "order", "set", "turn", "start", "stop", "close", "quit", "show", "type",
@@ -181,14 +231,22 @@ public enum MemoryRoute: Equatable, Sendable {
         return "Now: \(when).\n\nQuestion: \(utterance)\(watched)\n\nWhat Murmur remembers that may answer it:\n\(memory)"
     }
 
-    /// The model's answer, or nil when it said memory doesn't cover the question (or said nothing).
-    public static func answer(from text: String) -> String? {
-        // A partial answer that also wrote the word somewhere still answers what it could: only the word alone hands
-        // the question back.
+    /// The model's answer, or nil when it said memory doesn't cover the question (or said nothing). An answer that
+    /// only says what wasn't seen or offers to check ("I haven't seen that. Want me to check LinkedIn?") answers a
+    /// question about the user's past (`notSeenAnswers`: "did we post it?" → "I haven't seen a post since 5 Nov");
+    /// for anything else it answers nothing, and the agent takes the request, which may well be something to do.
+    public static func answer(from text: String, notSeenAnswers: Bool = false) -> String? {
         let clean = ModelOutput.answer(text).replacingOccurrences(of: notInMemory, with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
         guard clean.split(separator: " ").count >= 3 else { return nil }
-        return ModelOutput.answer(text).replacingOccurrences(of: notInMemory, with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let nothing = #"(?i)^(want me to|should i|shall i|do you want me|would you like me|i can check|let me know)|haven'?t seen|have not seen|don'?t see|do not see|didn'?t see|no record|not in (my |murmur'?s )?memory|doesn'?t show|does not show|nothing (about|on|in)"#
+        let sentences = clean.components(separatedBy: CharacterSet(charactersIn: ".?!\n"))
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard notSeenAnswers || sentences.contains(where: { $0.range(of: nothing, options: .regularExpression) == nil }) else {
+            return nil
+        }
+        // As the model wrote it, without the word and without what it left in front (". Want me to…").
+        let written = ModelOutput.answer(text).replacingOccurrences(of: notInMemory, with: "")
+        return String(written.drop { $0.isWhitespace || $0.isPunctuation }).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

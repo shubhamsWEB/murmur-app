@@ -95,6 +95,9 @@ public enum MemoryRecall {
     /// did on a day, and what was seen answers it exactly. Nil when a model has to put it together.
     public static func directAnswer(_ question: String, graph: MemoryGraph, now: Date = Date(),
                                     calendar: Calendar = .current) -> String? {
+        // Only something asked of memory gets a ready answer ("what did I do yesterday?" is the brief's): "tell the team
+        // we shipped 1.7" is something to do.
+        guard MemoryRoute.classify(question) != nil else { return nil }
         let lower = question.lowercased()
         // Several questions at once: a ready answer to one would drop the others; the model answers them all.
         if MemoryRoute.isCompound(question) { return nil }

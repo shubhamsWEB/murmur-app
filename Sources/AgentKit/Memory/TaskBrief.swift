@@ -15,7 +15,7 @@ import Foundation
 public enum TaskBrief {
     public static func make(_ grounding: Grounding.Result, graph: MemoryGraph, brain: BrainStore,
                             prefs: CommandMemory.Preferences, now: Date = Date(), calendar: Calendar = .current,
-                            limit: Int = 1400) -> String? {
+                            limit: Int = 1000) -> String? {
         var parts: [String] = []
         if let note = grounding.note { parts.append(note) }
         let text = grounding.text

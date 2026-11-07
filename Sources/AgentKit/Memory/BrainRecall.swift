@@ -91,11 +91,16 @@ public final class BrainRecall: @unchecked Sendable {
         "newest", "now", "then", "than", "very", "really", "thing", "things", "uh", "um", "okay", "ok", "yeah", "hey",
         "into", "onto", "out", "up", "if", "whether", "not", "no", "yes", "check", "find", "show", "remind", "recall",
         "remember", "memory", "anything", "something", "someone", "anyone", "one", "ever",
+        // When is the span's to say ("today", "this week"), not the words'.
+        "today", "yesterday", "tonight", "tomorrow", "week", "month", "morning", "afternoon", "evening",
     ]
 
     /// A question as it will be searched.
     public static func read(_ text: String, names: [String], now: Date = Date(), calendar: Calendar = .current) -> Reading {
-        let words = MemoryRoute.spoken(text)
+        // "What's", "didn't", "I'm": the word without its contraction ("what", "did", "i"), so it reads as asking.
+        let words = MemoryRoute.spoken(text).map {
+            $0.replacingOccurrences(of: #"(n['’]t|['’](s|m|re|ve|ll|d))$"#, with: "", options: .regularExpression)
+        }.filter { !$0.isEmpty }
         let lower = " " + words.joined(separator: " ") + " "
         let terms = words.filter { $0.count > 1 && !asking.contains($0) && $0.range(of: #"^[\d.]+$"#, options: .regularExpression) == nil }
         var seen = Set<String>()
@@ -106,16 +111,20 @@ public final class BrainRecall: @unchecked Sendable {
         // Asking what's owed, "need" and "pending" say how it's asked, not what about.
         let owing: Set<String> = ["need", "needs", "pending", "owe", "owed", "due", "deadline", "plate", "follow", "waiting", "todo"]
         let content = owed ? unique.filter { !owing.contains($0) } : unique
-        return Reading(text: text, terms: content, versions: MemoryIndex.versionKeys(text),
-                       span: MemoryRecall.span(of: text, now: now, calendar: calendar),
+        let recap = lower.range(of: #" (summary|summari[sz]e|recap|wrap up|what did i do|what have i done|what did we do|my work|worked on|working on|my day|been doing|spent) "#,
+                                options: .regularExpression) != nil
+        // "What did I do?" names no day and nothing else: the last day is meant. ("What did we do about the Harshal
+        // deal?" names what, not when.)
+        let span = MemoryRecall.span(of: text, now: now, calendar: calendar)
+            ?? (recap && content.isEmpty ? (from: now.addingTimeInterval(-86400), to: now.addingTimeInterval(60)) : nil)
+        return Reading(text: text, terms: content, versions: MemoryIndex.versionKeys(text), span: span,
                        aboutTheUser: [" i ", " we ", " my ", " our ", " me ", " us ", " i've ", " we've "].contains(where: lower.contains),
                        owed: owed,
                        latest: [" latest ", " recent ", " recently ", " newest ", " last ", " new "].contains(where: lower.contains),
                        names: named,
                        telling: lower.range(of: #" (notif\w*|post|posted|posts|posting|shar\w*|sent|send|told|tell|announc\w*|tweet\w*|messag\w*|email\w*|mail\w*|repl\w*|publish\w*|inform\w*|update) "#,
                                             options: .regularExpression) != nil,
-                       recap: lower.range(of: #" (summary|summari[sz]e|recap|wrap up|what did i do|what have i done|what did we do|my work|worked on|working on|my day|been doing|spent) "#,
-                                          options: .regularExpression) != nil)
+                       recap: recap)
     }
 
     /// The questions in what was said: "what did we release, and have we posted about it on LinkedIn?" is two.
@@ -244,8 +253,12 @@ public final class BrainRecall: @unchecked Sendable {
         for (score, record) in scored.sorted(by: { $0.0 > $1.0 }) {
             // The same thing twice (a release read as four episodes, a window seen three times): once. Facts share
             // titles ("About you") and differ by what they say.
-            let key = record.kind.rawValue + ":" + Grounding.key(record.kind == .fact ? record.title + " " + record.text.prefix(80)
-                                                                                         : record.title).prefix(90)
+            // Facts ("About you"), what Murmur did ("Murmur did this for you"), and items and conversations (two emails
+            // with one subject) share titles and differ by what they say.
+            let byText = record.kind == .fact || record.kind == .murmur || record.source.hasPrefix("item:")
+                || record.source.hasPrefix("thread:")
+            let key = record.kind.rawValue + ":" + Grounding.key(byText ? record.title + " " + record.text.prefix(80)
+                                                                        : record.title).prefix(90)
             guard !titles.contains(key), perKind[record.kind, default: 0] < (record.kind == .saw ? 3 : 4) else { continue }
             titles.insert(key)
             perKind[record.kind, default: 0] += 1
@@ -271,11 +284,15 @@ public final class BrainRecall: @unchecked Sendable {
         return held / (Double(terms.count) + 0.5 * Double(topic.count) + (versions.isEmpty ? 0 : 1))
     }
 
-    /// The highest version a text mentions ("1.7.0" in "Releasing Murmur 1.7.0").
+    /// The highest version a text mentions ("1.7.0" in "Releasing Murmur 1.7.0"): a number after a name, a "v" or a
+    /// word like "release" or "version", not a price ("₹2,499.00") or a time ("at 10.30").
     static func highestVersion(in text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"\b\d+\.\d+(?:\.\d+)?\b"#) else { return nil }
+        let money = "USD|INR|EUR|GBP|AED|SGD|Rs|Total|Subtotal|Price|Amount|Balance|Fee|Fees|Cost|Paid|Due|Tax|GST"
+        let pattern = #"(?:\bv|\b(?i:release[sd]?|releasing|version|tag(?:ged)?|ship(?:ped)?)\b[^\d\n.!?;]{0,20}|\b(?!(?:"#
+            + money + #")\b)[A-Z][\w-]*\s)(\d+\.\d+(?:\.\d+)?)\b(?![.,]\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let found = regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
-            Range($0.range, in: text).map { String(text[$0]) }
+            Range($0.range(at: 1), in: text).map { String(text[$0]) }
         }
         return found.max { ItemReader.newerVersion($1, than: $0) }
     }

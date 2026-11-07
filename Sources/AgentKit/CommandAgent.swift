@@ -143,6 +143,12 @@ public final class CommandAgent {
     /// memory is searched with and the request is routed by. The user's own words still go to the model, with the
     /// corrections beside them.
     private var grounded = Grounding.Result(text: "")
+    /// What `grounded` was made from (a resumed task routes a different prompt: its memory is searched with that).
+    private var groundedFrom = ""
+    /// The names memory holds, for hearing names right: read once a minute or two, not for every command.
+    private var vocabulary: (at: Date, names: [Grounding.Name])?
+    /// The words were typed as dictation (a guessed command that only answered): nothing else is shown over them.
+    private var typedInstead = false
     /// The model is working this command (not the quick path).
     private var routing = false
     /// Files offered to the model to pick from in this command: opening one of them is its choice, not a stale memory.
@@ -375,13 +381,16 @@ public final class CommandAgent {
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
         prefs = CommandMemory.preferences()
         memoryHadNothing = false
-        grounded = Grounding.ground(utterance, names: Grounding.vocabulary(brain: Brain.shared.store, graph: Brain.shared.graph,
-                                                                           prefs: prefs))
+        typedInstead = false
+        if vocabulary.map({ Date().timeIntervalSince($0.at) > 120 }) ?? true {
+            vocabulary = (Date(), Grounding.vocabulary(brain: Brain.shared.store, graph: Brain.shared.graph, prefs: prefs))
+        }
+        grounded = Grounding.ground(utterance, names: vocabulary?.names ?? [])
+        groundedFrom = utterance
         if !grounded.fixes.isEmpty {
             host.log("command: heard as " + grounded.fixes.map { "\"\($0.heard)\" → \"\($0.meant)\"" }.joined(separator: ", "))
         }
-        pastQuestion = MemoryRoute.classify(grounded.text) == .question && MemoryRoute.aboutThePast(grounded.text)
-            && !MemoryRoute.asksToLook(grounded.text)
+        pastQuestion = MemoryRoute.shutsOutTheWeb(grounded.text)
         inputTarget = await captureInputTarget()
         if let selection, !selection.isEmpty, let task = Self.selectionTask(utterance) {
             await transform(selection, instruction: utterance, show: task.shows || !editable)
@@ -461,9 +470,17 @@ public final class CommandAgent {
             return
         }
         await route(utterance, frontApp: frontApp, selection: selection, explicit: explicit)
-        // A question the agent finished without answering ("done" and no reply, as on 7 Nov): memory answers it, or
-        // says it has nothing, so a question is never met with silence.
-        if shown.answer == nil, !stoppedEarly, MemoryRoute.classify(grounded.text) == .question || pastQuestion {
+        // A question about the user's past that the agent finished without answering ("done" and no reply, as on
+        // 7 Nov): memory answers it, or says it has nothing, so it's never met with silence. Not after something was
+        // done or typed: a reminder made or a message sent ends quietly, as it should.
+        let changing: Set<String> = ["send_message", "type_text", "insert_text", "write_in_app", "replace_selection",
+                                     "paste_clipboard", "copy_text", "press_keys", "click", "click_at", "click_on", "browser_click",
+                                     "browser_type", "run_command", "run_applescript", "run_shortcut", "note", "remember",
+                                     "forget_fact", "use_app", "use_skill", "quit_app", "hide_app", "set_volume", "change_volume",
+                                     "mute", "brightness", "set_brightness", "set_bluetooth", "set_wifi", "lock_screen",
+                                     "media_control", "ask_claude", "ask_codex", "coding_followup", "build_with_agent"]
+        let acted = did.contains { changing.contains($0.tool) }
+        if shown.answer == nil, !stoppedEarly, pastQuestion, !acted, !typedInstead {
             host.log("command: finished a question without an answer; answering from memory")
             let answered = memoryHadNothing ? false : await fromMemory(.question)
             if !answered {
@@ -710,7 +727,8 @@ public final class CommandAgent {
         let brain = Brain.shared
         switch kind {
         case .forget:
-            let named = brain.store.entities(namedIn: grounded.text)
+            // As said, never as corrected: forgetting the wrong person can't be undone.
+            let named = brain.store.entities(namedIn: utterance)
             guard !named.isEmpty else { return false }
             for row in named { brain.forget(entity: row.id) }
             let names = named.map(\.name)
@@ -765,7 +783,7 @@ public final class CommandAgent {
                                                                                        memory: String(found.prefix(8000)),
                                                                                        coverage: coverage))],
                                                tools: [])
-            guard let answer = reply.flatMap({ MemoryRoute.answer(from: $0.text) }) else {
+            guard let answer = reply.flatMap({ MemoryRoute.answer(from: $0.text, notSeenAnswers: pastQuestion) }) else {
                 host.log("command: memory route → memory doesn't cover it (\(found.split(separator: "\n").count) notes looked at); the agent takes it")
                 memoryHadNothing = true
                 return false
@@ -791,7 +809,7 @@ public final class CommandAgent {
         context += "\nFront app (where the user is): \(frontApp ?? "unknown")."
         if let title = ScreenControl.frontWindowTitle(), !title.isEmpty { context += " Its window: \"\(title.prefix(150))\"." }
         if let picked = MacActions.finderSelection() { context += "\nSelected in Finder:\n\(picked)" }
-        if memoryHadNothing {
+        if memoryHadNothing, pastQuestion {
             context += "\nMurmur's memory was checked first and has nothing on this question. It's about the user's own "
                 + "past, so say first that memory doesn't show it. If an app or site could show it (LinkedIn, WhatsApp, "
                 + "Mail), offer to check it there, and open it only if the user's request asked you to check."
@@ -801,11 +819,12 @@ public final class CommandAgent {
         }
         // The brief for this task: what was misheard, who and what it names and how the user reaches them, what
         // they did that it touches. Every request, every model.
-        if let brief = TaskBrief.make(grounded.text == "" ? Grounding.Result(text: utterance) : grounded,
-                                      graph: Brain.shared.graph, brain: Brain.shared.store, prefs: prefs) {
+        // A resumed task routes its own prompt (the request and the user's answer): memory is searched with that.
+        let heard = utterance == groundedFrom ? grounded : Grounding.Result(text: utterance)
+        if let brief = TaskBrief.make(heard, graph: Brain.shared.graph, brain: Brain.shared.store, prefs: prefs) {
             context += "\nMemory for this task (the user's words win, then the screen, then this):\n\(brief)"
         }
-        if let known = await Brain.shared.context(for: grounded.text.isEmpty ? utterance : grounded.text, limit: 2000) {
+        if let known = await Brain.shared.context(for: heard.text, limit: 1600) {
             context += "\nWhat Murmur knows about the people and things this may be about (from the user's Contacts, "
                 + "Calendar, Reminders, Notes and Mail; use it, but the user's words win):\n\(known)"
         }
@@ -947,6 +966,7 @@ public final class CommandAgent {
             if !explicit, step == 0, onlyAnswers {
                 // A guessed command that only answers: it was dictation. Type the words.
                 host.log("command: guessed command only answered; typing the words instead")
+                typedInstead = true
                 host.insert(utterance)
                 return
             }
