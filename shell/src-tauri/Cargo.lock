@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-shell"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "cpal",
  "drag",
