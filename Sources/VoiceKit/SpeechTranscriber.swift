@@ -146,9 +146,29 @@ public actor SpeechTranscriber {
         get async { await whisper?.lastTimings }
     }
 
-    public func transcribe(_ samples: [Float]) async throws -> String {
-        if let parakeet { return try await parakeet.transcribe(samples) }
+    /// `vocabulary`: words to listen for (Parakeet English only). `pad`: Parakeet gets half a second of silence after
+    /// the audio (off only to compare with how it was).
+    public func transcribe(_ samples: [Float], vocabulary: [String] = [], pad: Bool = true) async throws -> String {
+        if let parakeet { return try await parakeet.transcribe(samples, vocabulary: vocabulary, pad: pad) }
         if let whisper { return try await whisper.transcribe(samples) }
         return ""
+    }
+
+    /// Whether this model can listen for particular words (Parakeet English).
+    public nonisolated var takesVocabulary: Bool { model == .english }
+
+    /// Loads the word spotter (downloaded once, about 106 MB), when the model takes vocabulary.
+    public func prepareVocabulary() async throws {
+        if let parakeet { try await parakeet.prepareVocabulary() }
+    }
+
+    /// The last transcription's words with how sure Parakeet was of each (Parakeet only).
+    public var lastHeard: [DictationVocabulary.HeardWord] {
+        get async { await parakeet?.lastHeard ?? [] }
+    }
+
+    /// The swaps the spotter proposed for the last transcription, not made.
+    public var lastSwaps: [DictationVocabulary.Replacement] {
+        get async { await parakeet?.lastSwaps ?? [] }
     }
 }

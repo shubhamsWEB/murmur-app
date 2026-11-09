@@ -197,6 +197,32 @@ public final class CommandAgent {
     /// The model has looked at a screenshot in this command: after a click or scroll at a point it gets a fresh one,
     /// since that's how it's finding its way.
     private var usingVision = false
+    /// Whether this command has done what was asked on the screen, and how often it was sent back for finishing
+    /// early (FinishCheck).
+    private var finish = FinishCheck.Run(wantsScreenWork: false, changedTheScreen: false)
+    /// Steps that changed the screen and didn't fail, for more steps while a long job is getting somewhere.
+    private var stepProgress = StepProgress()
+    /// What this command worked out on the way (command outputs), kept for the next command in the same window.
+    private var workedOut: [String] = []
+    /// The last reply held back (not shown) and nothing shown since: if the run then ends with done, it's shown,
+    /// rather than ending with nothing said ("Want me to go ahead?" held back, then done).
+    private var unshownReply = ""
+
+    /// Tools that do something in an app or on the screen (typing, clicking, sending, scripting an app), as opposed
+    /// to looking, opening, or working something out. run_command counts only when it changes the user's things.
+    private static let actingTools: Set<String> = [
+        "click", "press_keys", "type_text", "insert_text", "write_in_app", "replace_selection", "paste_clipboard",
+        "browser_click", "browser_type", "click_at", "click_on", "send_message", "run_applescript", "run_shortcut",
+        "use_app", "open_file", "media_control", "set_volume", "change_volume", "mute", "brightness", "set_brightness",
+        "set_bluetooth", "set_wifi", "lock_screen", "quit_app", "hide_app", "copy_text", "build_with_agent",
+        "coding_followup", "ask_claude", "ask_codex",
+    ]
+
+    /// Murmur's own keyboard shortcut (search): pressed from a command, it would start Murmur again instead of doing
+    /// anything in the user's app.
+    private static var ownShortcuts: [String] {
+        [UserDefaults.standard.string(forKey: "hotkey") ?? "cmd+shift+space"]
+    }
     private var visionHintShown = false
     /// The model working this command (it can change to the local one when a cloud model fails).
     private var activeRouter: Router?
@@ -363,6 +389,11 @@ public final class CommandAgent {
         stoppedEarly = false
         readWholePage = false
         wholePageChecks = 0
+        lookedAtScreen = false
+        finish = FinishCheck.Run(wantsScreenWork: false, changedTheScreen: false)
+        stepProgress = StepProgress()
+        workedOut = []
+        unshownReply = ""
         activeRouter = nil
         trace = TaskTrace()
         shown.answer = nil
@@ -379,6 +410,14 @@ public final class CommandAgent {
             return
         }
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
+        // What the model worked on in this window, for the next command here ("do it", "the rest", "all of it").
+        defer {
+            if routing {
+                RecentWork.record(.init(request: self.utterance, window: "\(app ?? "") — \(window ?? "")",
+                                        answer: shown.answer, workedOut: workedOut + notes.suffix(2),
+                                        acted: finish.changedTheScreen))
+            }
+        }
         prefs = CommandMemory.preferences()
         memoryHadNothing = false
         typedInstead = false
@@ -817,6 +856,18 @@ public final class CommandAgent {
         if let memory = CommandMemory.workingSet(for: utterance) {
             context += "\nMemory (what \"she\", \"him\", \"it\", \"also\", \"again\" and \"that\" refer to):\n\(memory)"
         }
+        // The last commands in this same window and what they worked out: a follow-up builds on them.
+        let here = "\(ScreenControl.workingApp()?.localizedName ?? frontApp ?? "") — \(ScreenControl.frontWindowTitle() ?? "")"
+        let earlierHere = RecentWork.recent(in: here)
+        if let earlier = RecentWork.context(earlierHere) {
+            context += "\n" + earlier
+        }
+        // A request to change something on the screen (fill in, enter, solve, tick, "do it" after one) isn't done
+        // until something there is changed: FinishCheck holds the model to it. Decided from the user's request, not
+        // the prompt a resumed task is routed with.
+        let userRequest = self.utterance
+        let changesScreen = FinishCheck.asksToChangeScreen(userRequest) && !Self.asksForInformation(userRequest)
+        let screenTask = Self.pointsAtScreen(userRequest) || earlierHere.contains { $0.acted || $0.workedOut.isEmpty == false }
         // The brief for this task: what was misheard, who and what it names and how the user reaches them, what
         // they did that it touches. Every request, every model.
         // A resumed task routes its own prompt (the request and the user's answer): memory is searched with that.
@@ -909,10 +960,18 @@ public final class CommandAgent {
                 system = Self.systemPrompt(helpers: helpers, groups: groups) + skills.text + "\n\n" + context
                 tools = offered(groups)
             }
-            // A task list buys a few steps per item; nothing runs past the time cap.
-            if !plan.isEmpty { budget = min(stepCap, max(maxSteps, plan.count * 6 + 10)) }
-            // A long task list gets longer: going through a dozen emails takes more than eight minutes.
-            let timeLimit = plan.count >= 5 ? timeCap * 2 : timeCap
+            // A task list buys a few steps per item, and a job that's getting somewhere (every recent step changed the
+            // screen and nothing failed) a dozen more at a time; nothing runs past the time cap.
+            let planned = plan.isEmpty ? maxSteps : min(stepCap, max(maxSteps, plan.count * 6 + 10))
+            budget = min(stepCap, planned + stepProgress.extended)
+            // A long task list gets longer: going through a dozen emails takes more than eight minutes. So does a long
+            // job of entries that keeps making progress.
+            let timeLimit = plan.count >= 5 || stepProgress.extended > 0 ? timeCap * 2 : timeCap
+            if step >= budget, Date().timeIntervalSince(began) <= timeLimit,
+               let more = stepProgress.moreSteps(by: 12, limit: stepCap - planned) {
+                budget = min(stepCap, budget + more)
+                host.log("command: still getting somewhere at step \(step + 1); \(more) more steps (budget \(budget))")
+            }
             if step >= budget || Date().timeIntervalSince(began) > timeLimit {
                 host.log("command: stopped at step \(step + 1) (budget \(budget), \(Int(Date().timeIntervalSince(began))) s)")
                 await wrapUp(router: router, system: system, turns: turns, tools: tools)
@@ -985,6 +1044,19 @@ public final class CommandAgent {
                         + "again from the list. Only when a step truly can't be done, mark it in plan and say why."))
                     continue
                 }
+                // An answer that ends a job on the screen before it's done ("I solved it but haven't filled it in",
+                // "Shall I go on?"): back to work, with the screen as it is.
+                finish.wantsScreenWork = changesScreen && (screenTask || lookedAtScreen)
+                if !text.isEmpty, let back = FinishCheck.verdict(.text, reply: text, request: userRequest, run: &finish) {
+                    host.log("command: answered in text before the job was done; going on")
+                    unshownReply = text
+                    var screen = ""
+                    if back.withScreen { screen = await screenAfterChange("") }
+                    turns.append(.assistant(text: reply.text, calls: []))
+                    turns.append(.user(back.message + screen))
+                    host.progress("Not done yet; carrying on…")
+                    continue
+                }
                 if !text.isEmpty { host.showAnswer(text); return }
                 // Nothing at all: ask once more rather than stop silently half-way.
                 if nudgedForTools { await wrapUp(router: router, system: system, turns: turns, tools: tools); return }
@@ -998,6 +1070,10 @@ public final class CommandAgent {
             var stepLog: [(tool: String, result: String)] = []
             var changedScreen = false
             var looked = false
+            var actedThisStep = false
+            var failedThisStep = false
+            /// A reply in this response that wasn't shown (held back to read more, or because the job isn't done).
+            var heldBack = false
             for (index, call) in reply.calls.enumerated() {
                 // Stopped while the model was thinking: nothing more is done, not even the step it chose.
                 if stopRequested || Task.isCancelled {
@@ -1008,9 +1084,11 @@ public final class CommandAgent {
                 // A summary of a page (or a question about all of it), answered from the part read so far: Murmur
                 // reads the whole page first, once, and the model answers from all of it.
                 if call.name == "reply" || call.name == "done", !readWholePage, wholePageChecks == 0,
+                   !(call.name == "reply" && FinishCheck.isQuestion(call.arguments["text"]?.description ?? "")),
                    PageDigest.wantsWholePage(QuickCommands.clean(utterance)),
                    let page = await readWhole() {
                     wholePageChecks += 1
+                    if call.name == "reply" { heldBack = true; unshownReply = call.arguments["text"]?.description ?? "" }
                     host.log("command: \(call.name) before the whole page was read; reading all of it first")
                     turns.append(.toolResult(callID: call.id, name: call.name, content:
                         "Not yet: that was from part of the page only. " + page
@@ -1020,6 +1098,7 @@ public final class CommandAgent {
                 // The task list still has open steps: done, or a final reply, would leave the request half done.
                 if call.name == "done" || call.name == "reply", planChecks < 3, plan.contains(where: { !$0.done }) {
                     planChecks += 1
+                    if call.name == "reply" { heldBack = true; unshownReply = call.arguments["text"]?.description ?? "" }
                     let open = plan.filter { !$0.done }.map { "[ ] \($0.text)" }.joined(separator: "\n")
                     host.log("command: \(call.name) with \(plan.filter { !$0.done }.count) steps open; going on")
                     turns.append(.toolResult(callID: call.id, name: call.name, content:
@@ -1031,12 +1110,15 @@ public final class CommandAgent {
                 // An answer about all of a list, chat, inbox or feed ("how many unread", "the cheapest", "every
                 // invoice") from what was in view: Murmur scrolls through the rest first, once, and the model goes on
                 // from all of it (it may still have something to click or answer).
+                // Not a question for the user ("Do you want me to solve it, or tell you about it?"): that goes to them.
                 if call.name == "reply" || call.name == "done", everythingChecks == 0, !sawEverything, !readWholePage,
+                   !(call.name == "reply" && FinishCheck.isQuestion(call.arguments["text"]?.description ?? "")),
                    !plan.contains(where: { !$0.done }), !openedAnItem,
                    lookedAtScreen || Self.pointsAtScreen(utterance),
                    PageDigest.wantsEverything(QuickCommands.clean(utterance)),
                    let all = await everything(fromTop: !inChat()), all.screens > 1 {
                     everythingChecks += 1
+                    if call.name == "reply" { heldBack = true; unshownReply = call.arguments["text"]?.description ?? "" }
                     host.log("command: \(call.name) from one screenful; read all \(all.screens) screens first")
                     turns.append(.toolResult(callID: call.id, name: call.name, content:
                         "Not yet: that was from the part on screen only, and there's more of it out of view. All of "
@@ -1052,10 +1134,30 @@ public final class CommandAgent {
                         + "with its exact path, or reply that none of them is it."))
                     continue
                 }
+                if call.name == "done", heldBack {
+                    // The reply before it in this same response wasn't shown (it's being finished from more of the
+                    // page, or more steps): done now would end the command with nothing said.
+                    host.log("command: done right after a reply that was held back; going on")
+                    turns.append(.toolResult(callID: call.id, name: call.name, content:
+                        "Not finished: your reply in this step wasn't shown (see why above). Do what that says, then "
+                        + "reply with the answer, or call done once the request is done."))
+                    continue
+                }
                 if call.name == "done" {
-                    if checksBeforeDone < 2, let why = notDoneYet(utterance, step: step, checks: checksBeforeDone,
-                                                                  didMoreThanOpen: didMoreThanOpen,
-                                                                  hasMoreSteps: hasMoreSteps, wantsAnswer: wantsAnswer) {
+                    // A job on the screen: done only once something there changed, and the screen matches the request.
+                    finish.wantsScreenWork = changesScreen && (screenTask || lookedAtScreen)
+                    if let back = FinishCheck.verdict(.done, reply: "", request: userRequest, run: &finish) {
+                        host.log("command: done at step \(step + 1) before the job on the screen was done; going on")
+                        var screen = ""
+                        if back.withScreen { screen = await screenAfterChange("") }
+                        turns.append(.toolResult(callID: call.id, name: call.name, content: back.message + screen))
+                        host.progress("Checking it's all done…")
+                        continue
+                    }
+                    if !finish.wantsScreenWork, checksBeforeDone < 2,
+                       let why = notDoneYet(utterance, step: step, checks: checksBeforeDone,
+                                            didMoreThanOpen: didMoreThanOpen,
+                                            hasMoreSteps: hasMoreSteps, wantsAnswer: wantsAnswer) {
                         // Check before stopping: show the model the request, where things stand and the screen.
                         checksBeforeDone += 1
                         host.log("command: done at step \(step + 1), checking it first (\(checksBeforeDone))")
@@ -1066,6 +1168,12 @@ public final class CommandAgent {
                     }
                     turns.append(.toolResult(callID: call.id, name: call.name, content: "ok"))
                     finishedNow = true
+                    // Ending with nothing said, after a reply that was held back: that reply is the best answer there is.
+                    if !unshownReply.isEmpty {
+                        host.log("command: finished after a reply that wasn't shown; showing it")
+                        host.showAnswer(unshownReply)
+                        unshownReply = ""
+                    }
                     continue
                 }
                 // A reply after a step that failed in this same response ("Unknown tool", "Couldn't…") would report
@@ -1088,6 +1196,23 @@ public final class CommandAgent {
                         "Noted as progress, not shown as the answer: reply finishes the command, so keep it for the final answer."))
                     continue
                 }
+                // The final reply to a job on the screen that isn't done ("I'll enter them next", "Shall I continue?",
+                // nothing entered at all): not shown; back to work, with the screen as it is.
+                if call.name == "reply" {
+                    finish.wantsScreenWork = changesScreen && (screenTask || lookedAtScreen)
+                    let said = call.arguments["text"]?.description ?? ""
+                    if let back = FinishCheck.verdict(.reply, reply: said, request: userRequest, run: &finish) {
+                        heldBack = true
+                        unshownReply = said
+                        host.log("command: reply before the job on the screen was done; going on")
+                        var screen = ""
+                        if back.withScreen { screen = await screenAfterChange("") }
+                        turns.append(.toolResult(callID: call.id, name: call.name, content:
+                            "Not shown. " + back.message + screen))
+                        host.progress("Not done yet; carrying on…")
+                        continue
+                    }
+                }
                 if !Self.openingTools.contains(call.name) { didMoreThanOpen = true }
                 // An action meant to change the page (a click, an address, a search): the page before it, so an
                 // action that quietly did nothing is said to have failed, rather than reported as done.
@@ -1095,12 +1220,28 @@ public final class CommandAgent {
                     || (call.name == "browser_type" && call.arguments["submit"]?.description == "true")
                 let before = expectsChange ? await pageMark() : nil
                 var outcome = await execute(call.name, call.arguments)
+                if outcome.shown { unshownReply = "" }
+                var unchanged = false
                 if let before, !outcome.finished, await pageUnchanged(since: before) {
+                    unchanged = true
                     host.log("command:   ↳ nothing changed on the page")
                     outcome = Outcome(result: outcome.result + "\nNothing changed: the page is still “\(before.title)” "
                         + "(\(before.url)). That didn't work, so don't repeat it: try another way (the exact address with "
                         + "open_url, the site's own search, a keyboard shortcut, or read_screen and click).",
                         finished: outcome.finished, shown: outcome.shown)
+                }
+                // What the step did: something changed in an app or on the screen (and worked), or a command's
+                // answer worked out on the way (kept for a follow-up in this window).
+                let worked = !unchanged && !TaskHealth.isFailure(outcome.result)
+                let command = call.name == "run_command" ? call.arguments["command"]?.description ?? "" : ""
+                if worked, Self.actingTools.contains(call.name) || FinishCheck.commandChangesThings(command) {
+                    finish.changedTheScreen = true
+                    actedThisStep = true
+                }
+                if !worked { failedThisStep = true }
+                if call.name == "run_command" {
+                    finish.ranCommands = true
+                    if worked { workedOut = Array((workedOut + [String(outcome.result.prefix(1500))]).suffix(3)) }
                 }
                 stepLog.append((call.name, outcome.result))
                 // A tool from a set the model wasn't given still runs, and its set comes with the next step; a page
@@ -1152,9 +1293,26 @@ public final class CommandAgent {
                 turns.append(.toolResult(callID: call.id, name: call.name, content: content))
             }
             if !results.isEmpty { host.progress(results.last ?? "") }
+            // A step that only looked (a screenshot, the screen or page read again; scrolling is progress, so it
+            // isn't one of these).
+            let lookingTools: Set<String> = ["look", "read_screen", "browser_read", "read_whole_page", "read_everything",
+                                             "wait", "browser_tabs"]
+            stepProgress.record(changed: actedThisStep, failed: failedThisStep,
+                                onlyLooked: reply.calls.allSatisfy { lookingTools.contains($0.name) })
             // Finished only when the model says so (done, or a tool that finishes: an answer, pasted text).
             // A step of actions alone ("open YouTube") is a step, not the end: the model goes on from what it sees.
             if finishedNow { return }
+            // Looking and looking, never acting: told once to act on what it has read; then stopped, saying what it
+            // found, rather than looking until the time runs out.
+            if stepProgress.lookingStreak >= StepProgress.lookingStopAt {
+                host.log("command: \(stepProgress.lookingStreak) steps of only looking; stopping")
+                await wrapUp(router: router, system: system, turns: turns, tools: tools)
+                return
+            }
+            if stepProgress.lookingStreak == StepProgress.lookingNudgeAt {
+                host.log("command: \(StepProgress.lookingNudgeAt) steps of only looking; told to act")
+                turns = ContextBudget.appendingState(StepProgress.lookingNudge, to: turns)
+            }
             // Going round in circles (the same calls again and again): stop rather than loop to the limit.
             let signature = reply.calls.map { call in
                 call.name + call.arguments.keys.sorted().map { "\($0)=\(call.arguments[$0]?.description ?? "")" }.joined(separator: ",")
@@ -1865,20 +2023,67 @@ public final class CommandAgent {
             if text("submit") == "true", !(await mayPressReturn("return")) {
                 return Outcome(result: "You chose not to send it.", finished: true)
             }
+            let submitted = text("submit") == "true" ? " and pressed Return" : ""
+            let focusBefore = ScreenControl.focusSignature()
+            // Where the keyboard focus isn't a text field (a grid cell, a game, a button), pasted text goes nowhere:
+            // those listen for key presses. Short plain text is pressed as keys there.
+            if ScreenControl.focusTakesText() == false, let keys = FinishCheck.keysForTyping(words) {
+                host.log("command: typing \(keys.count) keys, not pasting: the focus isn't a text field (\(focusBefore.prefix(80)))")
+                for key in keys {
+                    _ = ScreenControl.press(key)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                }
+                if !submitted.isEmpty {
+                    _ = ScreenControl.press("return")
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                }
+                return Outcome(result: "Typed \(words.count) characters as key presses\(submitted) (the focus isn't a text field).")
+            }
             host.pasteHere(words)
             try? await Task.sleep(nanoseconds: 350_000_000)
-            if text("submit") == "true" {
+            // Pasted and nothing where the focus is changed: said so, rather than "Typed", so the model doesn't
+            // go on as if it were there.
+            let focusAfter = ScreenControl.focusSignature()
+            let unseen = !focusBefore.isEmpty && focusBefore == focusAfter
+            if unseen { host.log("command:   ↳ pasted, and nothing at the focus changed (\(focusBefore.prefix(80)))") }
+            if !submitted.isEmpty {
                 _ = ScreenControl.press("return")
                 try? await Task.sleep(nanoseconds: 600_000_000)
             }
-            return Outcome(result: "Typed \(words.count) characters\(text("submit") == "true" ? " and pressed Return" : "").")
-        case "press_keys":
-            guard await mayPressReturn(text("keys")) else {
-                return Outcome(result: "You chose not to send it.", finished: true)
+            if unseen {
+                return Outcome(result: "Pasted \(words.count) characters\(submitted), but nothing where the keyboard focus "
+                    + "is (\(focusBefore.prefix(80))) changed. If the text isn't there, this place takes key presses, not "
+                    + "pasted text: use press_keys (a sequence: \"4 tab 9\").")
             }
-            let result = ScreenControl.press(text("keys"))
+            return Outcome(result: "Typed \(words.count) characters\(submitted).")
+        case "press_keys":
+            // "5 tab 7 tab 2": a sequence, pressed in order, so many entries go in one step.
+            let keys = FinishCheck.keySequence(text("keys"))
+            guard !keys.isEmpty else { return Outcome(result: "No keys given.") }
+            if let own = keys.first(where: { FinishCheck.isOwnShortcut($0, shortcuts: Self.ownShortcuts) }) {
+                host.log("command: not pressing \(own): it's Murmur's own shortcut")
+                return Outcome(result: "Couldn't press \(own): that's Murmur's own shortcut, so it would start Murmur, not do "
+                    + "anything in \(ScreenControl.workingApp()?.localizedName ?? "the app"). Use the app's own keys, "
+                    + "or read_screen and click.")
+            }
+            var pressed: [String] = []
+            for key in keys {
+                if stopRequested || Task.isCancelled { break }
+                guard await mayPressReturn(key) else {
+                    return Outcome(result: (pressed.isEmpty ? "" : "Pressed \(pressed.joined(separator: " ")). ")
+                        + "You chose not to send it.", finished: true)
+                }
+                let result = ScreenControl.press(key)
+                guard result.hasPrefix("Pressed") else {
+                    return Outcome(result: (pressed.isEmpty ? "" : "Pressed \(pressed.joined(separator: " ")), then stopped: ")
+                        + result)
+                }
+                pressed.append(key)
+                if keys.count > 1 { try? await Task.sleep(nanoseconds: 60_000_000) }
+            }
             try? await Task.sleep(nanoseconds: 300_000_000)
-            return Outcome(result: result)
+            return Outcome(result: keys.count == 1 ? "Pressed \(keys[0])."
+                : "Pressed \(pressed.count) keys in order: \(pressed.joined(separator: " ")).")
         case "wait":
             let seconds = min(max(args["seconds"]?.number ?? 1, 0.2), 6)
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -2121,25 +2326,35 @@ public final class CommandAgent {
         "browser_click", "click", "open_url", "web_search", "site_search", "browser_back", "click_at", "click_on",
     ]
 
-    /// Where the browser is and what its page holds, cheaply: the address, the title and a sign of the text.
+    /// Where the browser is and what its page holds, cheaply: the address, the title, a sign of the text, and the
+    /// state of its controls (what has focus, how many things are checked, pressed or selected). A click on a cell
+    /// or a switch changes the state but not the text; it used to look like nothing changed.
     struct PageMark: Equatable {
         let url: String
         let title: String
-        let text: Int
+        let text: String
+        let state: String
     }
+
+    private static let pageStateScript = """
+        (function(){var a=document.activeElement;var d=a?(a.tagName+'|'+(a.getAttribute('aria-label')||a.id||'')+'|'+\
+        (a.value||'')+'|'+(a.getAttribute('aria-checked')||a.getAttribute('aria-pressed')||'')):'';\
+        var c=document.querySelectorAll('input:checked,[aria-checked="true"],[aria-pressed="true"],[aria-selected="true"]').length;\
+        return (document.body?document.body.innerText.length:0)+'#'+c+'#'+d;})()
+        """
 
     private func pageMark() async -> PageMark? {
         guard let browser = BrowserControl.inFront() ?? (openedPage ? BrowserControl.running(browserInUse) : nil),
               let tab = await BrowserControl.currentTab(in: browser) else { return nil }
-        var text = 0
+        var text = ""
         if pageAccess[browser.bundleID] == true,
-           case .success(let length) = await BrowserControl.evaluate(
-               "String(document.body ? document.body.innerText.length : 0)", in: browser) {
-            text = Int(length) ?? 0
+           case .success(let sign) = await BrowserControl.evaluate(Self.pageStateScript, in: browser) {
+            text = sign
         } else if let page = await ScreenControl.readPage(limit: 4000) {
-            text = page.hashValue
+            // Read through Accessibility, which now carries each named control's state ("Notes (switch, off)").
+            text = String(page.hashValue)
         }
-        return PageMark(url: tab.url, title: tab.title, text: text)
+        return PageMark(url: tab.url, title: tab.title, text: text, state: ScreenControl.focusSignature())
     }
 
     /// The page is just as it was (looked at twice, a second apart, in case it was still loading).
@@ -2612,6 +2827,13 @@ public final class CommandAgent {
                 + "tools don't cover. After an action that changes the screen you are shown the new screen with its "
                 + "[n] numbers; use only numbers from the latest screen. Keep going until the whole request is done, "
                 + "then call done."),
+            (nil, "- Doing it, not just working it out: when the user asks you to fill in, enter, solve, complete or "
+                + "change something on the screen, the job is done only when the screen shows it. Work out everything "
+                + "first (a command can compute it), then put it all in, many per step: click a field or cell by its "
+                + "[n], then press_keys with a sequence (\"5 tab 7 tab 2\", \"3 right 9 right right 4\"), or several "
+                + "click and type calls in one response. If something on the page gets in the way (a mode that's on, "
+                + "a pop-up, a setting), change it and carry on. Don't stop part-way to report progress or ask whether "
+                + "to go on: the user already asked. Finish with done once the screen shows all of it."),
             (nil, "- When read_screen can't see it (little text, an icon without words, a canvas, a game, a remote "
                 + "desktop, an image, a chart): look gives a screenshot's contents with positions; click_on clicks a "
                 + "thing by description; click_at and scroll_at act at a position on the latest look. Prefer [n] "
@@ -2777,6 +2999,8 @@ public final class CommandAgent {
             "You are Murmur, a voice assistant on the user's Mac. Carry out the user's spoken command with tool calls, "
                 + "step by step, until all of it is done, then call done. Use reply to tell the user what they asked "
                 + "to know or what you found. If the request is unclear, reply with one short question.",
+            "Asked to fill in, enter, solve or change something on the screen: it's done only when the screen shows "
+                + "it. Put it all in (press_keys takes a sequence, \"5 tab 7\"), without stopping to ask.",
         ]
         let more = ToolGroup.moreToolsHint(loaded: groups)
         if !more.isEmpty { lines.append("More tools with more_tools: \(more).") }
@@ -2912,10 +3136,12 @@ public final class CommandAgent {
                  + "latest\", \"unread\", a long list or conversation",
                  ["from": ("string", "top (default) or here (from where it's scrolled to now, e.g. in a chat)")],
                  required: []),
-            tool("type_text", "Type text into the front app (optionally into field [n] first; submit presses Return)",
+            tool("type_text", "Type text into the front app (optionally into field [n] first; submit presses Return). "
+                 + "Into a text field it's pasted; where the focus isn't one (a grid cell, a game), short text is pressed as keys",
                  ["text": ("string", "what to type"), "into": ("number", "field number from read_screen, optional"),
                   "submit": ("boolean", "press Return afterwards")], required: ["text"]),
-            tool("press_keys", "Press a key or shortcut in the front app", ["keys": ("string", "e.g. return, cmd+l, down")]),
+            tool("press_keys", "Press a key or shortcut in the front app, or several in order (separated by spaces) to "
+                 + "enter many things in one step", ["keys": ("string", "e.g. return, cmd+l, down; or a sequence: \"5 tab 7 tab 2\", \"down down return\"")]),
             tool("wait", "Wait for a page or app to load", ["seconds": ("number", "0.5 to 6")]),
             tool("write_in_app", "Open an app (Notes, TextEdit, Pages…), start a new note or document, and type the text",
                  ["app": ("string", "app name"), "text": ("string", "the full finished text to write"),
