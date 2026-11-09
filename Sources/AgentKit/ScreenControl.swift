@@ -730,11 +730,87 @@ public enum ScreenControl {
                 texts.append("[image: \(text)]")
                 length += text.count + 10
             }
+            // A named control (a grid cell, a switch, a field): its name and state, not only the text inside it.
+            if let line = controlLine(node, role: role) {
+                texts.append(line)
+                length += line.count + 1
+                continue
+            }
             stack.append(contentsOf: children(node).reversed())
         }
         guard length > 0 else { return nil }
         let title = string(page, kAXTitleAttribute).map { "Page: \($0)\n" } ?? ""
         return title + String(texts.joined(separator: "\n").prefix(limit))
+    }
+
+    /// A control on a web page as one line, "Row 1, column 3, empty (cell)", "Notes (switch, off)", "Email (text
+    /// field: \"a@b.com\")"; nil for one without a name, or with a lot of text in it (read as text, as before).
+    private static func controlLine(_ node: AXUIElement, role: String) -> String? {
+        let subrole = string(node, kAXSubroleAttribute) ?? ""
+        let kind = ["AXSwitch", "AXToggle"].contains(subrole) ? subrole : role
+        guard PageLines.kinds[kind] != nil else { return nil }
+        let name = longString(node, kAXDescriptionAttribute, max: 160) ?? longString(node, kAXTitleAttribute, max: 160)
+        guard let name else { return nil }
+        var state: String?
+        switch kind {
+        case "AXCheckBox", "AXSwitch", "AXToggle", "AXRadioButton":
+            state = PageLines.toggleState((value(node, kAXValueAttribute) as? NSNumber)?.intValue)
+        case "AXTextField", "AXComboBox":
+            state = longString(node, kAXValueAttribute, max: 200) ?? ""
+        case "AXSlider":
+            state = (value(node, kAXValueAttribute) as? NSNumber).map { "\($0)" }
+        default:
+            break
+        }
+        return PageLines.control(role: kind, name: name, inner: innerText(node), state: state)
+    }
+
+    /// The text inside an element, a few levels down, joined (up to about 100 characters: past that it's not a
+    /// control's label but a block of text).
+    private static func innerText(_ node: AXUIElement) -> String {
+        var texts: [String] = []
+        var level = children(node)
+        var seen = 0
+        for _ in 0..<4 where !level.isEmpty {
+            var next: [AXUIElement] = []
+            for child in level {
+                seen += 1
+                if seen > 40 { return texts.joined(separator: " ") + " …" }
+                if string(child, kAXRoleAttribute) == "AXStaticText", let text = string(child, kAXValueAttribute) {
+                    texts.append(text)
+                    if texts.joined(separator: " ").count > 100 { return texts.joined(separator: " ") }
+                }
+                next.append(contentsOf: children(child))
+            }
+            level = next
+        }
+        return texts.joined(separator: " ")
+    }
+
+    /// What has the keyboard focus in the front app, with its state ("cell \"Row 1, column 3, empty\"", "checkbox
+    /// \"Notes\" off"): part of telling whether a click did anything, when the page's text stays the same.
+    /// Whether the element with the keyboard focus takes typed text (a text field or area, or inside an editable
+    /// part of a web page). False for a cell, a button, a game's page; nil when it can't be told.
+    public static func focusTakesText() -> Bool? {
+        guard AXIsProcessTrusted() else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        guard let focused = element(system, kAXFocusedUIElementAttribute) else { return nil }
+        let role = string(focused, kAXRoleAttribute) ?? ""
+        guard !role.isEmpty else { return nil }
+        if ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(role) { return true }
+        if element(focused, "AXEditableAncestor") != nil { return true }
+        return false
+    }
+
+    public static func focusSignature() -> String {
+        guard AXIsProcessTrusted() else { return "" }
+        let system = AXUIElementCreateSystemWide()
+        guard let focused = element(system, kAXFocusedUIElementAttribute) else { return "" }
+        var parts = [describe(focused) ?? ""]
+        if let number = value(focused, kAXValueAttribute) as? NSNumber { parts.append("\(number)") }
+        else if let text = string(focused, kAXValueAttribute) { parts.append(text) }
+        if let selected = value(focused, kAXSelectedAttribute) as? NSNumber { parts.append("selected \(selected)") }
+        return parts.joined(separator: " ")
     }
 
     /// The text in a picture of the app's front window (Vision, on this Mac). Nil without Screen Recording
