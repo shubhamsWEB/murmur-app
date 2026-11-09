@@ -60,6 +60,50 @@ public actor ParakeetTranscriber {
     private var manager: AsrManager?
     private var loading: Task<AsrManager, Error>?
 
+    /// Silence after the recording. Parakeet is a transducer: it emits each word a little after hearing it, and at
+    /// the very end of the audio the last word can be dropped. Silence after it costs nothing and lets it out (in
+    /// one endpoint-detection study, padding cut word errors 14.9 % → 13.6 %, deletions at the end: 2401.08916).
+    static let trailingSilence = 8_000   // half a second at 16 kHz
+
+    /// Vocabulary (English): FluidAudio's word spotter (Parakeet CTC 110M, about 106 MB, downloaded once) proposes
+    /// swaps toward the listed words; DictationVocabulary decides which to make, from how sure Parakeet was of each
+    /// word. Until the spotter is here, dictation runs without it.
+    private var spotter: CtcModels?
+    private var spotterLoading: Task<CtcModels, Error>?
+    private var boosting: (terms: [String], session: VocabularyBoostingSession)?
+    /// The last transcription's words with how sure Parakeet was of each, and the spotter's proposed swaps.
+    public private(set) var lastHeard: [DictationVocabulary.HeardWord] = []
+    public private(set) var lastSwaps: [DictationVocabulary.Replacement] = []
+
+    /// Whether the word spotter is on this Mac already.
+    public static var vocabularyModelIsDownloaded: Bool {
+        CtcModels.modelsExist(at: CtcModels.defaultCacheDirectory(for: .ctc110m))
+    }
+
+    /// Downloads (first time only) and loads the word spotter. English only; safe to call more than once.
+    public func prepareVocabulary() async throws {
+        guard model == .english, spotter == nil else { return }
+        if let spotterLoading { _ = try await spotterLoading.value; return }
+        let task = Task { try await CtcModels.downloadAndLoad(variant: .ctc110m) }
+        spotterLoading = task
+        do {
+            spotter = try await task.value
+            spotterLoading = nil
+        } catch {
+            spotterLoading = nil
+            throw error
+        }
+    }
+
+    /// The spotter's session for these terms (made once per list).
+    private func boostingSession(for terms: [String], models: CtcModels) async throws -> VocabularyBoostingSession {
+        if let boosting, boosting.terms == terms { return boosting.session }
+        let vocabulary = CustomVocabularyContext(terms: terms.map { CustomVocabularyTerm(text: $0) })
+        let made = try await VocabularyBoostingSession(vocabulary: vocabulary, ctcModels: models)
+        boosting = (terms, made)
+        return made
+    }
+
     public init(model: Model = .english) {
         self.model = model
         self.version = model.version
@@ -83,13 +127,29 @@ public actor ParakeetTranscriber {
         _ = try await loadedManager(progress: progress)
     }
 
-    public func transcribe(_ samples: [Float]) async throws -> String {
+    /// Parakeet's own text, always. `vocabulary`: words to listen for (English, once the spotter is here); the
+    /// spotter's proposals go to `lastSwaps` and Parakeet's word confidences to `lastHeard`, for the caller to
+    /// decide. `pad`: half a second of silence after the audio (off only to compare with how it was).
+    public func transcribe(_ samples: [Float], vocabulary: [String] = [], pad: Bool = true) async throws -> String {
         let manager = try await loadedManager()
-        // Parakeet wants at least a second of audio: pad short clips with silence.
         var audio = samples
+        if pad { audio += [Float](repeating: 0, count: Self.trailingSilence) }
+        // Parakeet wants at least a second of audio: pad short clips with silence.
         if audio.count < 16_000 { audio += [Float](repeating: 0, count: 16_000 - audio.count) }
         var state = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let result = try await manager.transcribe(audio, decoderState: &state)
+        let timings = result.tokenTimings ?? []
+        lastHeard = DictationVocabulary.words(fromPieces: timings.map { ($0.token, $0.confidence) })
+        lastSwaps = []
+        guard model == .english, !vocabulary.isEmpty, let spotter, !timings.isEmpty else { return result.text }
+        // Any failure here keeps Parakeet's text as it is.
+        guard let session = try? await boostingSession(for: vocabulary, models: spotter),
+              let output = await session.rescore(text: result.text, tokenTimings: timings, audioSamples: audio),
+              output.wasModified
+        else { return result.text }
+        lastSwaps = output.replacements.filter(\.shouldReplace).compactMap { swap in
+            swap.replacementWord.map { DictationVocabulary.Replacement(original: swap.originalWord, replacement: $0) }
+        }
         return result.text
     }
 

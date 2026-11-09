@@ -6,15 +6,28 @@ import Foundation
 ///
 /// Steps: remove DC offset → high-pass at 80 Hz (rumble and fan hum, which would otherwise be boosted too) → measure
 /// the speech level (the loudest 5 % of 20 ms frames) and the noise floor (the quietest 10 %) → when there's
-/// background noise and macOS hasn't already cleaned the sound, take it out (NoiseReduction) and measure again → apply
-/// one gain that brings speech to about −20 dBFS, capped at `maxGainDB` → lift words said more quietly than the rest
-/// (trailing off, turning away from the mic) toward the same level, a few dB at a time and never in the pauses →
-/// soft-limit peaks so nothing clips.
+/// background noise and macOS hasn't already cleaned the sound, take it out (NoiseReduction), mix some of the
+/// original back in (a tenth to a quarter), and measure again → apply one gain that brings speech to about −20 dBFS, capped at `maxGainDB`
+/// → soft-limit peaks so nothing clips.
 ///
 /// Soft speech in a noisy room is the case this is for: a voice only a few dB above a fan used to get no more than
 /// +6 dB, as if it were only noise, and reached the model too faint to be heard. Now the noise goes first, and only a
 /// recording with nothing above the noise at all (under 3 dB) is held back.
+///
+/// What it doesn't do, from the research on speech models: change the voice more than it must. Noise removal leaves
+/// small distortions in the voice, and those cost a modern speech model more than the noise did (Iwamoto et al.,
+/// Interspeech 2022; studies of Whisper and Parakeet found denoised audio recognised worse in every case tested).
+/// Mixing some of the original back ("observation adding", from the same paper) takes most of that cost away. A
+/// word-by-word boost that was here (soft words raised up to 12 dB) went for the same reason: it reshaped every
+/// word, and one steady gain is all the model needs.
 enum AudioLevel {
+    /// How much of the original goes back under noise-reduced sound: a quarter when the voice stands 10 dB or more
+    /// above the noise, down to a tenth when it barely stands out (there the noise, not the distortion, is what
+    /// costs the most).
+    static func observationShare(speechOverNoiseDB: Float) -> Float {
+        0.10 + 0.15 * min(1, max(0, (speechOverNoiseDB - 3) / 7))
+    }
+
     struct Result {
         let samples: [Float]
         let speechDB: Float
@@ -78,9 +91,13 @@ enum AudioLevel {
         if !cleaned, noiseDB + boost > -55, speechDB - noiseDB < 30 {
             let reduced = NoiseReduction.reduce(samples)
             if reduced.reducedDB > 1 {
-                samples = reduced.samples
-                reducedDB = reduced.reducedDB
+                // Observation adding: some of the original under the cleaned sound.
+                let share = observationShare(speechOverNoiseDB: speechDB - noiseDB)
+                let original = samples
+                samples = zip(reduced.samples, original).map { (1 - share) * $0 + share * $1 }
                 (levels, speech, noise) = measure(samples)
+                // How much quieter the background really is, with the original mixed back.
+                reducedDB = max(0, noiseDB - 20 * log10(noise))
             }
         }
         let cleanSpeechDB = 20 * log10(speech)
@@ -93,29 +110,9 @@ enum AudioLevel {
         if cleanSpeechDB - cleanNoiseDB < 3 { gainDB = min(gainDB, 6) }
         let gain = powf(10, gainDB / 20)
 
-        // Word by word: a 20 ms frame of speech (well above the noise) that's quieter than the target gets up to
-        // 12 dB more, rising over ~60 ms and falling back at once for loud frames and gently in pauses, so soft words
-        // reach the model at a level it hears, without pumping up the noise between them.
-        let wordTarget: Float = 0.06            // about −24 dBFS
-        let maxLift: Float = 4                  // +12 dB
-        let speechFloor = max(noise * 2, 0.0005) * gain
-        var lifts = [Float](repeating: 1, count: levels.count)
-        var current: Float = 1
-        for k in levels.indices {
-            let level = levels[k] * gain
-            let want: Float = level > speechFloor ? min(maxLift, max(1, wordTarget / max(level, 1e-6))) : 1
-            if want < current { current = want } else { current += (want - current) * (level > speechFloor ? 0.35 : 0.08) }
-            lifts[k] = current
-        }
-
-        // Apply gain (the frame lifts blended sample by sample) with a soft limiter above 0.8 so peaks round off
-        // instead of clipping.
+        // One gain, with a soft limiter above 0.8 so peaks round off instead of clipping.
         for i in 0..<samples.count {
-            let position = Float(i) / Float(frame) - 0.5
-            let k = min(max(Int(position), 0), lifts.count - 1)
-            let next = min(k + 1, lifts.count - 1)
-            let t = min(max(position - Float(k), 0), 1)
-            let v = samples[i] * gain * (lifts[k] + (lifts[next] - lifts[k]) * t)
+            let v = samples[i] * gain
             let a = abs(v)
             if a > 0.8 {
                 let over = (a - 0.8) / 0.2

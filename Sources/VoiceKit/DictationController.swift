@@ -52,6 +52,8 @@ public final class DictationController: ObservableObject {
     private var previousApp: NSRunningApplication?
     /// At the key press: whether a text field had the focus, and what was selected.
     private var focusAtPress = IntentClassifier.Focus.unknown
+    /// The words to listen for in this dictation (DictationVocabulary), from the window it started in.
+    private var vocabularyAtPress: [String] = []
     private var selectionAtPress: String?
     /// Audio is coming in for this recording.
     private var micLive = false
@@ -108,6 +110,14 @@ public final class DictationController: ObservableObject {
     private static let microphoneDefault = "dictation.microphone"
     private static let preferBuiltInDefault = "dictation.preferBuiltInMic"
     private static let clearVoiceDefault = "dictation.clearVoice"
+    /// Set once Clear voice's default changed to off (it was on): a Mac that had it on only by default goes off.
+    private static let clearVoiceOffByDefault = "dictation.clearVoiceOffByDefault"
+    private static let micReadyDefault = "dictation.micReady"
+    private static let wordsDefault = "dictation.words"
+    private static let screenWordsDefault = "dictation.screenWords.v2"
+    /// Developer switch (no setting): each dictation is also transcribed the old way (no half second before the key,
+    /// no silence after, no vocabulary) and both are logged, to compare. Logs what you said.
+    private static let compareDefault = "dictation.compare"
     private static let lowLevelWarnedDefault = "dictation.lowLevelWarned"
     private static let showLogoDefault = "dictation.showLogo"
     private static let aiCleanupDefault = "dictation.aiCleanup"
@@ -136,15 +146,83 @@ public final class DictationController: ObservableObject {
     }
 
     /// Clear voice: macOS's voice processing on the microphone (as FaceTime uses): background noise and echo out,
-    /// your level evened out, before Murmur hears it. On unless turned off.
+    /// your level evened out, before Murmur hears it. Off unless turned on: it's made for people listening on a call,
+    /// and what it does to a voice costs a speech model more than a quiet room's noise does (it also cut pauses to
+    /// digital silence, and a whole command once came back empty). For a noisy room or speakers playing.
     public var clearVoice: Bool {
-        get { UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? false }
         set {
             UserDefaults.standard.set(newValue, forKey: Self.clearVoiceDefault)
             recorder.clearVoice = newValue
             log("dictation: clear voice \(newValue ? "on" : "off")")
             objectWillChange.send()
         }
+    }
+
+    /// The microphone stays ready for a minute after a dictation, so the next one starts at once and with the half
+    /// second before the key (the first word, often begun as the key goes down, arrives whole). On unless turned
+    /// off; macOS shows the microphone in use for that minute.
+    public var micStaysReady: Bool {
+        get { UserDefaults.standard.object(forKey: Self.micReadyDefault) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.micReadyDefault)
+            recorder.readySeconds = newValue ? 60 : 0
+            log("dictation: microphone stays ready \(newValue ? "for a minute" : "off")")
+            objectWillChange.send()
+        }
+    }
+
+    /// Words the speech model should get right (names, products, jargon), as typed in Settings, separated by commas.
+    public var dictationWords: String {
+        get { UserDefaults.standard.string(forKey: Self.wordsDefault) ?? "" }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.wordsDefault)
+            objectWillChange.send()
+            prepareVocabularyIfWanted()
+        }
+    }
+
+    /// Also listen for the distinctive words in the window's title (a page, a project, a person). On unless turned
+    /// off: only a word Parakeet was unsure of can be swapped for one (DictationVocabulary).
+    public var listensForScreenWords: Bool {
+        get { UserDefaults.standard.object(forKey: Self.screenWordsDefault) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.screenWordsDefault)
+            objectWillChange.send()
+            prepareVocabularyIfWanted()
+        }
+    }
+
+    /// Whether vocabulary is in use (your words, or the window's), and the model can take it.
+    private var wantsVocabulary: Bool {
+        transcriber.takesVocabulary
+            && (listensForScreenWords || !DictationVocabulary.userWords(from: dictationWords).isEmpty)
+    }
+
+    /// The word spotter, downloaded (once, about 106 MB) and loaded in the background when vocabulary is wanted.
+    private func prepareVocabularyIfWanted() {
+        guard wantsVocabulary else { return }
+        let transcriber = transcriber
+        let downloaded = ParakeetTranscriber.vocabularyModelIsDownloaded
+        Task { [weak self] in
+            let started = Date()
+            do {
+                try await transcriber.prepareVocabulary()
+                self?.log(String(format: "dictation: word spotter ready in %.1f s%@", Date().timeIntervalSince(started),
+                                 downloaded ? "" : " (downloaded)"))
+            } catch {
+                self?.log("dictation: word spotter couldn't load: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The words for a dictation starting now, in the front window.
+    private func vocabularyNow() -> [String] {
+        guard wantsVocabulary else { return [] }
+        let title = listensForScreenWords ? Self.frontWindowTitle() : nil
+        let app = listensForScreenWords ? NSWorkspace.shared.frontmostApplication?.localizedName : nil
+        return DictationVocabulary.terms(windowTitle: title, appName: app,
+                                         userWords: DictationVocabulary.userWords(from: dictationWords))
     }
 
     /// The microphones to choose from, and the one dictation would use now.
@@ -307,7 +385,14 @@ public final class DictationController: ObservableObject {
         }
         recorder.chosenUID = UserDefaults.standard.string(forKey: Self.microphoneDefault)
         recorder.preferBuiltIn = UserDefaults.standard.object(forKey: Self.preferBuiltInDefault) as? Bool ?? true
-        recorder.clearVoice = UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? true
+        // Clear voice was on by default; it's off by default now. Once: a Mac where it was on goes off (it can be
+        // turned back on in Settings).
+        if !UserDefaults.standard.bool(forKey: Self.clearVoiceOffByDefault) {
+            UserDefaults.standard.set(true, forKey: Self.clearVoiceOffByDefault)
+            UserDefaults.standard.removeObject(forKey: Self.clearVoiceDefault)
+        }
+        recorder.clearVoice = UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? false
+        recorder.readySeconds = (UserDefaults.standard.object(forKey: Self.micReadyDefault) as? Bool ?? true) ? 60 : 0
         hud.onVisible = { [weak self] frame in self?.logo.pillMoved(frame) }
         // With the Murmur button on screen, the listening pill grows out of it (one pill, not two).
         hud.anchor = { [weak self] in self?.logo.anchor }
@@ -623,6 +708,7 @@ public final class DictationController: ObservableObject {
             begin(handsFree: doubleTap)
             focusAtPress = Self.focus()
             selectionAtPress = Self.selectedText()
+            vocabularyAtPress = vocabularyNow()
         default:
             break
         }
@@ -722,8 +808,10 @@ public final class DictationController: ObservableObject {
             micLive = true
             let name = result.device.map { "\($0.name) (\($0.kind))" } ?? "the default microphone"
             let level = result.inputVolume.map { String(format: ", input level %.0f%%", $0 * 100) } ?? ""
-            log(String(format: "dictation: listening with %@%@%@, on in %.2f s", name, result.cleaned ? " (clear voice)" : "",
-                       level, result.took))
+            let ready = result.wasReady
+                ? String(format: " (ready, with %.1f s from before the key)", result.preRollSeconds) : ""
+            log(String(format: "dictation: listening with %@%@%@, on in %.2f s%@", name, result.cleaned ? " (clear voice)" : "",
+                       level, result.took, ready))
             if let fellBack = result.fellBack { log("dictation: used the default microphone instead of \(fellBack)") }
             onListening?()
             if let problem = result.clearVoiceProblem { log("dictation: clear voice isn't available with \(name): \(problem)") }
@@ -775,6 +863,7 @@ public final class DictationController: ObservableObject {
             begin(handsFree: true)
             focusAtPress = Self.focus()
             selectionAtPress = Self.selectedText()
+            vocabularyAtPress = vocabularyNow()
         default:
             break
         }
@@ -821,17 +910,40 @@ public final class DictationController: ObservableObject {
         let pressedSelection = selectionAtPress
         let focus = focusAtPress
         let detect = detectCommands
+        let vocabulary = vocabularyAtPress
+        let compare = UserDefaults.standard.bool(forKey: Self.compareDefault)
+        // The old way, to compare: without the moment before the key.
+        let preRoll = min(samples.count, Int(recorder.lastPreRollSeconds * 16_000))
+        let withoutPreRoll = compare ? Array(samples[preRoll...]) : []
         Task { [weak self] in
             guard let self else { return }
             let ready = await transcriber.isReady
             hud.show(ready ? .transcribing : .working(modelStatus))
             let started = Date()
             do {
-                let raw = try await transcriber.transcribe(samples)
+                var raw = try await transcriber.transcribe(samples, vocabulary: vocabulary)
+                // The spotter's proposals: made only over words Parakeet was unsure of.
+                let swaps = await transcriber.lastSwaps
+                if !swaps.isEmpty {
+                    let heard = await transcriber.lastHeard
+                    let made = DictationVocabulary.believable(swaps, heard: heard)
+                    let kept = swaps.filter { !made.contains($0) }
+                    raw = DictationVocabulary.apply(made, to: raw)
+                    log("dictation: vocabulary"
+                        + (made.isEmpty ? "" : " changed \(made.map(\.description).joined(separator: ", "))")
+                        + (kept.isEmpty ? "" : "; kept Parakeet's \(kept.map(\.description).joined(separator: ", "))")
+                        + "; unsure words: \(DictationVocabulary.unsure(heard).isEmpty ? "none" : DictationVocabulary.unsure(heard))")
+                }
                 let text = TextCleanup.basic(raw)
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
                            seconds, text.count, Date().timeIntervalSince(started)))
+                if compare {
+                    let unsure = DictationVocabulary.unsure(await transcriber.lastHeard)
+                    let old = (try? await transcriber.transcribe(withoutPreRoll, pad: false)) ?? ""
+                    log("dictation: compare · before: \"\(TextCleanup.basic(old))\" · now: \"\(text)\""
+                        + " · unsure words now: \(unsure.isEmpty ? "none" : unsure)")
+                }
                 if let detail = await transcriber.lastDetail { log("dictation: whisper \(detail)") }
                 if keepRecordings {
                     keep(samples, text: text, model: transcriber.model, took: Date().timeIntervalSince(started))
@@ -1057,6 +1169,7 @@ public final class DictationController: ObservableObject {
             modelStatus = "Speech model ready (\(model.short), on device)"
             speechModelState = .ready
             log(String(format: "dictation: %@ ready in %.1f s", model.engine, Date().timeIntervalSince(started)))
+            prepareVocabularyIfWanted()
             if modelInPill, phase == .idle { hud.flash("\(model.short) is ready", tone: .done) }
         } catch {
             stopPreparingClock()

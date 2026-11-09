@@ -947,8 +947,8 @@ private struct SettingsPage: View {
                     .padding(.vertical, 14)
                 RowDivider()
                 SettingRow(title: "Clear voice",
-                           detail: "Takes out background noise and echo at the microphone, as FaceTime does, and evens out your level. "
-                               + "Music playing on the Mac is barely turned down while you speak. Turn it off if a microphone sounds worse with it.") {
+                           detail: "Takes out background noise and echo at the microphone, as FaceTime does. For a noisy room or "
+                               + "speakers playing: in a quiet room Murmur hears you better without it.") {
                     MurmurSwitch(label: "Clear voice",
                                  isOn: state.bind(get: { dictation.clearVoice }, set: { dictation.clearVoice = $0 }))
                 }
@@ -957,6 +957,32 @@ private struct SettingsPage: View {
                     MurmurSwitch(label: "Quiet voice",
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
+                RowDivider()
+                SettingRow(title: "Catch your first word",
+                           detail: "Keeps the microphone ready for a minute after you dictate, so the next dictation starts at once "
+                               + "and includes the half second before you pressed the key. Nothing is kept beyond that half second.") {
+                    MurmurSwitch(label: "Catch your first word",
+                                 isOn: state.bind(get: { dictation.micStaysReady }, set: { dictation.micStaysReady = $0 }))
+                }
+                RowDivider()
+                SettingRow(title: "Words on screen",
+                           detail: "Listens for the names in the window's title, like a page or project. Only a word Murmur "
+                               + "wasn't sure it heard is corrected. English only; a one-time download, about 106 MB.") {
+                    MurmurSwitch(label: "Words on screen",
+                                 isOn: state.bind(get: { dictation.listensForScreenWords },
+                                                  set: { dictation.listensForScreenWords = $0 }))
+                }
+                RowDivider()
+                SettingRow(title: "Your words",
+                           detail: "Names and terms Murmur should spell right, separated by commas. Only a word Murmur "
+                               + "wasn't sure it heard is corrected.") {
+                    TextField("Copico, Parakeet, Sudoku", text: state.bind(get: { dictation.dictationWords },
+                                                                         set: { dictation.dictationWords = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12.5))
+                        .frame(width: 230)
+                }
+
                 SpeechAccuracyRows(dictation: dictation)
             }
             CleanupSettings(dictation: dictation)
