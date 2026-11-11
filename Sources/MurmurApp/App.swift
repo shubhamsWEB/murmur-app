@@ -1,8 +1,11 @@
 import AppKit
+import UserNotifications
 
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var app: AppController?
+    /// A notification clicked before Murmur had finished starting (the click launched it): opened once it has.
+    private var openedNotification: String?
 
     static func main() {
         signal(SIGPIPE, SIG_IGN)   // a helper that just exited must surface as a write error, not kill the app
@@ -19,11 +22,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.run()
     }
 
+    /// Before launch finishes, so a click on a notification that launched Murmur still reaches it.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        var replaced: String?
         if let other = otherRunningCopy() {
+            // Started by a click on a notification while another copy runs (two copies share Murmur's ID, and macOS
+            // opens the installed one for the click): the running copy has the click already. Bring it forward and
+            // step aside, rather than closing the window it just opened. On 11 Nov the installed copy replaced the
+            // running one this way, which looked like a crash.
+            if notification.userInfo?[NSApplication.launchUserNotificationUserInfoKey] != nil {
+                other.activate(options: [.activateAllWindows])
+                NSApp.terminate(nil)
+                return
+            }
             // Another Murmur is running (an older install, or the dev build): the one you just opened takes over, so
             // you always get the copy you chose, and only one listens to the fn key.
-            log("launch: replacing the Murmur already running (\(other.bundleURL?.path ?? "?"))")
+            replaced = other.bundleURL.map { tildePath($0.path) } ?? "?"
             other.terminate()
             let deadline = Date().addingTimeInterval(4)
             while !other.isTerminated, Date() < deadline {
@@ -42,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLog.shared.open(in: settings.indexDirectory)
         log("launch pid \(getpid()) from \(tildePath(Bundle.main.bundlePath)): roots \(settings.roots.map { tildePath($0.path) }) · "
             + "index \(tildePath(settings.indexDirectory.path)) · models \(tildePath(settings.modelsDirectory.path))")
+        // Only now is the log open: said here, so it's in it.
+        if let replaced { log("launch: replaced the Murmur that was running (\(replaced))") }
         let (atLogin, why) = Launch.atLogin()   // while the open-application event is still the current one
         let showWindow = !atLogin && !DebugHooks.drivesUI
         log("launch: \(atLogin ? "at login" : "opened by hand") (\(why))\(showWindow ? ", showing the window" : "")")
@@ -57,6 +77,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = Self.makeMainMenu(app)
         app.start(showWindow: showWindow)
         DebugHooks.run(app)
+        if let key = openedNotification {
+            openedNotification = nil
+            opened(notification: key)
+        }
+    }
+
+    /// A notification clicked: the brief, the wrap-up and reminders open "Your day", the whole of what they sum up.
+    fileprivate func opened(notification key: String) {
+        guard let app else { openedNotification = key; return }
+        let day = ["brief:", "wrap:", "due:", "eve:"].contains { key.hasPrefix($0) }
+        log("notification: opened \(key.split(separator: ":").first.map(String.init) ?? "?")\(day ? ", showing your day" : "")")
+        app.showHome(day ? .day : nil)
     }
 
     /// Opening the app again (from Finder or Spotlight) while it runs: show its window.
@@ -167,3 +199,18 @@ private protocol ForcedActivation {
 }
 
 extension NSApplication: ForcedActivation {}
+
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse) async {
+        let key = response.notification.request.identifier
+        await MainActor.run { self.opened(notification: key) }
+    }
+
+    /// Shown even while Murmur's window is in front (it would be held back otherwise).
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
+}
