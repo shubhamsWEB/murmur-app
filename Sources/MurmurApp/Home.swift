@@ -9,7 +9,8 @@ import VoiceKit
 
 /// The sections of Murmur's window.
 enum HomeSection: String, CaseIterable, Identifiable {
-    case home, search, dictation, commands, memory, folders, about
+    /// `day` ("Your day") isn't in the sidebar: the morning brief's notification opens it, and the Memory page links it.
+    case home, search, dictation, commands, memory, folders, about, day
 
     var id: String { rawValue }
 
@@ -22,6 +23,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         case .memory: "Memory"
         case .folders: "Folders"
         case .about: "About"
+        case .day: "Your day"
         }
     }
 
@@ -34,6 +36,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         case .memory: "brain"
         case .folders: "folder"
         case .about: "info.circle"
+        case .day: "sun.horizon"
         }
     }
 }
@@ -155,6 +158,7 @@ private struct HomeView: View {
         case .memory: MemoryPage(app: app, state: state)
         case .folders: FoldersPage(app: app, state: state)
         case .about: AboutPage(app: app)
+        case .day: DayPage(app: app, state: state)
         }
     }
 }
@@ -294,7 +298,8 @@ private struct Sidebar: View {
     }
 
     private func item(_ section: HomeSection, accessory: AnyView? = nil) -> some View {
-        let selected = state.section == section
+        // "Your day" belongs to Memory (it isn't in the sidebar itself).
+        let selected = state.section == section || (section == .memory && state.section == .day)
         return Button {
             state.section = section
         } label: {
@@ -1619,8 +1624,14 @@ private struct MemoryPage: View {
         let loops = journal.loops(limit: 20)
         let start = Calendar.current.startOfDay(for: Date())
         let todays = journal.latestNudges(limit: 12).filter { ($0.kind == "brief" || $0.kind == "wrap") && $0.created >= start }
-        if !todays.isEmpty || ScreenMemory.shared.notificationsAllowed == false {
+        // Always: the way to the whole day, then today's brief and wrap-up as sent.
+        if ScreenMemory.shared.settings.enabled {
             SettingsSection("Your day") {
+                SettingRow(title: "Your whole day",
+                           detail: "What’s due and coming up, who’s waiting on you, and what you worked on, in full.") {
+                    Button("Open") { state.section = .day }.buttonStyle(.murmurSecondaryCompact)
+                }
+                if !todays.isEmpty { RowDivider() }
                 ForEach(Array(todays.reversed().enumerated()), id: \.offset) { index, nudge in
                     if index > 0 { RowDivider() }
                     VStack(alignment: .leading, spacing: 4) {
@@ -1634,7 +1645,7 @@ private struct MemoryPage: View {
                     .padding(.vertical, 12)
                 }
                 if ScreenMemory.shared.notificationsAllowed == false {
-                    if !todays.isEmpty { RowDivider() }
+                    RowDivider()
                     SettingRow(title: "Notifications are off for Murmur",
                                detail: "The morning brief, the evening wrap-up and reminders show here until you allow them.") {
                         Button("Open Settings") {
