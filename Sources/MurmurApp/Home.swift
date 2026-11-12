@@ -963,6 +963,13 @@ private struct SettingsPage: View {
                                  isOn: state.bind(get: { dictation.whisperMode }, set: { dictation.whisperMode = $0 }))
                 }
                 RowDivider()
+                SettingRow(title: "Set the microphone level",
+                           detail: "Murmur raises a microphone that’s turned down and adjusts it as you dictate, so your "
+                               + "voice arrives clearly. It changes the input level in System Settings › Sound.") {
+                    MurmurSwitch(label: "Set the microphone level",
+                                 isOn: state.bind(get: { dictation.adjustsMicLevel }, set: { dictation.adjustsMicLevel = $0 }))
+                }
+                RowDivider()
                 SettingRow(title: "Catch your first word",
                            detail: "Keeps the microphone ready for a minute after you dictate, so the next dictation starts at once "
                                + "and includes the half second before you pressed the key. Nothing is kept beyond that half second.") {

@@ -113,6 +113,7 @@ public final class DictationController: ObservableObject {
     /// Set once Clear voice's default changed to off (it was on): a Mac that had it on only by default goes off.
     private static let clearVoiceOffByDefault = "dictation.clearVoiceOffByDefault"
     private static let micReadyDefault = "dictation.micReady"
+    private static let autoLevelDefault = "dictation.autoLevel"
     private static let wordsDefault = "dictation.words"
     private static let screenWordsDefault = "dictation.screenWords.v2"
     /// Developer switch (no setting): each dictation is also transcribed the old way (no half second before the key,
@@ -223,6 +224,28 @@ public final class DictationController: ObservableObject {
         let app = listensForScreenWords ? NSWorkspace.shared.frontmostApplication?.localizedName : nil
         return DictationVocabulary.terms(windowTitle: title, appName: app,
                                          userWords: DictationVocabulary.userWords(from: dictationWords))
+    }
+
+    /// Murmur sets the microphone's input level itself (MicLevel): a level turned down is raised when you dictate, and
+    /// it moves a step after each dictation toward your voice arriving clearly. On unless turned off; not with Clear
+    /// voice (macOS sets the level then).
+    public var adjustsMicLevel: Bool {
+        get { UserDefaults.standard.object(forKey: Self.autoLevelDefault) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.autoLevelDefault)
+            log("dictation: microphone level \(newValue ? "set by Murmur" : "left as it is")")
+            objectWillChange.send()
+        }
+    }
+
+    /// Sets a microphone's level and says so in the log.
+    private func setMicLevel(_ device: AudioDevices.Input, from volume: Float, to level: Float, why: String) -> Bool {
+        guard AudioDevices.setInputVolume(device.id, level) else {
+            log(String(format: "dictation: couldn't set %@'s input level (it's %.0f%%)", device.name, volume * 100))
+            return false
+        }
+        log(String(format: "dictation: %@'s input level %.0f%% → %.0f%% (%@)", device.name, volume * 100, level * 100, why))
+        return true
     }
 
     /// The microphones to choose from, and the one dictation would use now.
@@ -815,7 +838,15 @@ public final class DictationController: ObservableObject {
             if let fellBack = result.fellBack { log("dictation: used the default microphone instead of \(fellBack)") }
             onListening?()
             if let problem = result.clearVoiceProblem { log("dictation: clear voice isn't available with \(name): \(problem)") }
-            if let volume = result.inputVolume { warnIfLow(volume, microphone: result.device?.name) }
+            if let volume = result.inputVolume {
+                // Turned down too far to hear you clearly: raised now, for this dictation too.
+                if adjustsMicLevel, !result.cleaned, let device = result.device, let level = MicLevel.atStart(volume),
+                   setMicLevel(device, from: volume, to: level, why: "too low to hear you clearly") {
+                    lowLevelNotice = nil
+                } else {
+                    warnIfLow(volume, microphone: result.device?.name)
+                }
+            }
             guard case .listening(let handsFree) = phase else { return }
             if showingMicStart {
                 showingMicStart = false
@@ -898,6 +929,14 @@ public final class DictationController: ObservableObject {
         log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, noise −%.0f dB, gain +%.0f dB%@%@",
                    leveled.speechDB, leveled.noiseDB, leveled.noiseReducedDB, leveled.gainDB,
                    recorder.cleaned ? " (clear voice)" : "", whisperMode ? " (quiet voice)" : ""))
+        // The level for next time, from how loud this voice arrived.
+        if adjustsMicLevel, !recorder.cleaned, let device = recorder.device,
+           let volume = AudioDevices.inputVolume(device.id),
+           let level = MicLevel.after(volume: volume, speechDB: leveled.speechDB, noiseDB: leveled.noiseDB,
+                                      peakDB: MicLevel.peakDB(recorded)) {
+            _ = setMicLevel(device, from: volume, to: level,
+                            why: level > volume ? "your voice arrived faint" : "your voice arrived too loud")
+        }
         let samples = leveled.samples
         lastSamples = samples
         // Next to no sound at all: the microphone isn't hearing you (muted, the wrong one, a closed lid).
