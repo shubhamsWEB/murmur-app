@@ -53,6 +53,26 @@ public enum AudioDevices {
         return nil
     }
 
+    /// Sets a microphone's input level (System Settings › Sound › Input level), 0…1: on its main control, or on each
+    /// channel when it only has those. Whether it could.
+    @discardableResult
+    public static func setInputVolume(_ id: AudioDeviceID, _ volume: Float) -> Bool {
+        var value = Float32(min(1, max(0, volume)))
+        var set = false
+        for element in [kAudioObjectPropertyElementMain, 1, 2] {
+            var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
+                                                     mScope: kAudioDevicePropertyScopeInput, mElement: element)
+            guard AudioObjectHasProperty(id, &address) else { continue }
+            var settable = DarwinBoolean(false)
+            guard AudioObjectIsPropertySettable(id, &address, &settable) == noErr, settable.boolValue else { continue }
+            if AudioObjectSetPropertyData(id, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &value) == noErr {
+                set = true
+                if element == kAudioObjectPropertyElementMain { break }
+            }
+        }
+        return set
+    }
+
     /// The system's default microphone (System Settings › Sound › Input).
     public static func defaultInput() -> Input? {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
