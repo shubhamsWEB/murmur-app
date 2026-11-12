@@ -6,15 +6,14 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.7.3</title>
-      <pubDate>Wed, 11 Nov 2026 18:40:52 +0000</pubDate>
-      <sparkle:version>20</sparkle:version>
-      <sparkle:shortVersionString>1.7.3</sparkle:shortVersionString>
+      <title>Murmur 1.7.4</title>
+      <pubDate>Thu, 12 Nov 2026 18:37:18 +0000</pubDate>
+      <sparkle:version>21</sparkle:version>
+      <sparkle:shortVersionString>1.7.4</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new on the Mac</h3>
-<p><b>Your day, in full.</b> Clicking the morning brief or the evening wrap-up now opens a page with everything behind it: what needs you (due and overdue, replies you owe, people to chase), today's plans, your reminders, where you left off, and what you worked on, session by session, with what got done. A night's work reads as one session, not two days. You can also open it from Memory.</p>
-<p><b>Notifications open where you expect.</b> Clicking one no longer closes Murmur's window when another copy of Murmur is installed.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.3/Murmur-1.7.3.dmg" type="application/octet-stream" sparkle:edSignature="TEMqa+qdoPW4y4isaYw6RdJiqSvH6JMOmn7MwLwGzExESbvo1pbFQmAHWdv9KVSpO9dar2wkQNJZDx3RvGjfBQ==" length="17787686"/>
+<p><b>Murmur sets your microphone level.</b> A microphone turned down too far made every word arrive faint, so dictation misheard you unless you spoke up. Murmur now raises a level that's too low when you start dictating, and adjusts it a step after each dictation until your voice comes through clearly. You can turn this off in Settings under <b>Set the microphone level</b>.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.4/Murmur-1.7.4.dmg" type="application/octet-stream" sparkle:edSignature="5hYiIf2YdCXhMlXgYDE9UQy4U3BBiL3QYjxdHn/C2gzNzh7Et9l4dRzzkRDI27cc5GCQ1S6Dv3smx9KQFbaxBA==" length="17793774"/>
     </item>
   </channel>
 </rss>
