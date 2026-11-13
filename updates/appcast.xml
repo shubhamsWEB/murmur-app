@@ -6,14 +6,14 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.7.4</title>
-      <pubDate>Thu, 12 Nov 2026 18:37:18 +0000</pubDate>
-      <sparkle:version>21</sparkle:version>
-      <sparkle:shortVersionString>1.7.4</sparkle:shortVersionString>
+      <title>Murmur 1.7.5</title>
+      <pubDate>Fri, 13 Nov 2026 09:17:32 +0000</pubDate>
+      <sparkle:version>22</sparkle:version>
+      <sparkle:shortVersionString>1.7.5</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new on the Mac</h3>
-<p><b>Murmur sets your microphone level.</b> A microphone turned down too far made every word arrive faint, so dictation misheard you unless you spoke up. Murmur now raises a level that's too low when you start dictating, and adjusts it a step after each dictation until your voice comes through clearly. You can turn this off in Settings under <b>Set the microphone level</b>.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.4/Murmur-1.7.4.dmg" type="application/octet-stream" sparkle:edSignature="5hYiIf2YdCXhMlXgYDE9UQy4U3BBiL3QYjxdHn/C2gzNzh7Et9l4dRzzkRDI27cc5GCQ1S6Dv3smx9KQFbaxBA==" length="17793774"/>
+<p><b>The microphone starts after you switch.</b> After using a different microphone, such as EarPods or AirPods, dictation could fail with "Can't start the microphone" until you quit and reopened Murmur. It now starts with whichever microphone you're using, and if one changes just as it starts, it tries again on its own.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.7.5/Murmur-1.7.5.dmg" type="application/octet-stream" sparkle:edSignature="yGPslApQ9HqiGkBv6oeoHMnNuf3TYPSWqahy7/kRQohvNxxpcv1rxee4j45NBEgC1Nynam+ve8tlR6afN174BQ==" length="17793890"/>
     </item>
   </channel>
 </rss>
