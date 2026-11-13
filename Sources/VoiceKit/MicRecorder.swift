@@ -133,6 +133,8 @@ public final class MicRecorder: @unchecked Sendable {
         public var cleaned = false
         /// Why Clear voice couldn't be used with this microphone, the first time it couldn't.
         public var clearVoiceProblem: String?
+        /// Why the first try failed, when a second one (on a new engine) worked.
+        public var retried: String?
         /// The microphone's input level in System Settings › Sound, 0…1, when it has one.
         public var inputVolume: Float?
         /// It was already on (ready from the last dictation), and the recording starts with the moment before the key.
@@ -148,6 +150,7 @@ public final class MicRecorder: @unchecked Sendable {
             var failure: String?
             var fellBack: String?
             clearVoiceProblem = nil
+            retriedStart = nil
             do { fellBack = try startNow() } catch { failure = error.localizedDescription }
             var result = Start(error: failure, took: Date().timeIntervalSince(started), device: device,
                                fellBack: fellBack)
@@ -155,6 +158,7 @@ public final class MicRecorder: @unchecked Sendable {
             result.preRollSeconds = failure == nil ? lastPreRollSeconds : 0
             result.cleaned = cleaned
             result.clearVoiceProblem = clearVoiceProblem
+            result.retried = retriedStart
             result.inputVolume = device.flatMap { AudioDevices.inputVolume($0.id) }
             Task { @MainActor in done(result) }
         }
@@ -209,10 +213,12 @@ public final class MicRecorder: @unchecked Sendable {
         let systemDefault = AudioDevices.defaultInput()
         // Only a microphone that isn't the system's default is set on the engine.
         let wanted = target.flatMap { $0.uid == systemDefault?.uid ? nil : $0 }
-        if wanted?.uid != engineUID {
-            engine = AVAudioEngine()
-            engineUID = nil
-        }
+        // A fresh engine every time the microphone starts from off. One kept from before remembers the format of the
+        // microphone it last used, and the default microphone changes under it: on 13 Nov, after EarPods (44.1 kHz)
+        // the night before, the built-in microphone (48 kHz) failed every time ("Failed to create tap due to format
+        // mismatch") until Murmur restarted. A new engine costs a few milliseconds.
+        engine = AVAudioEngine()
+        engineUID = nil
         if let wanted {
             do {
                 if engineUID == nil { try point(at: wanted) }
@@ -228,10 +234,22 @@ public final class MicRecorder: @unchecked Sendable {
                 return "\(wanted.name): \(error.localizedDescription)"
             }
         }
-        try begin(hardwareFormat: false, key: "default", device: nil)
+        do {
+            try begin(hardwareFormat: false, key: "default", device: nil)
+        } catch {
+            // Once more, on a new engine in the format the microphone itself reports (it may have changed as this one
+            // started): the error is only for a microphone that really won't start.
+            engine = AVAudioEngine()
+            engineUID = nil
+            try begin(hardwareFormat: true, key: "default", device: nil)
+            retriedStart = error.localizedDescription
+        }
         lock.withLock { lastDevice = systemDefault }
         return nil
     }
+
+    /// Why the first try to start failed, when a second one worked (for the log), set by `startFresh`.
+    private var retriedStart: String?
 
     /// Why Clear voice didn't work this time (for the log), set by `begin`.
     private var clearVoiceProblem: String?

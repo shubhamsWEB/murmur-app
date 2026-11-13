@@ -838,6 +838,7 @@ public final class DictationController: ObservableObject {
             if let fellBack = result.fellBack { log("dictation: used the default microphone instead of \(fellBack)") }
             onListening?()
             if let problem = result.clearVoiceProblem { log("dictation: clear voice isn't available with \(name): \(problem)") }
+            if let retried = result.retried { log("dictation: the microphone started on a second try (first: \(retried))") }
             if let volume = result.inputVolume {
                 // Turned down too far to hear you clearly: raised now, for this dictation too.
                 if adjustsMicLevel, !result.cleaned, let device = result.device, let level = MicLevel.atStart(volume),
