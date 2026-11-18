@@ -8,30 +8,35 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerM
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// The two models, as the engine and the settings name them.
+/// The models, as the engine and the settings name them. Sarvam is the one that isn't on this PC: Sarvam's Saaras,
+/// online with the person's Sarvam key (cloud.rs); nothing to download.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Model {
     English,
     Hinglish,
     Multilingual,
+    Sarvam,
 }
 
 impl Model {
-    pub const ALL: [Model; 3] = [Model::English, Model::Hinglish, Model::Multilingual];
+    pub const ALL: [Model; 4] = [Model::English, Model::Hinglish, Model::Multilingual, Model::Sarvam];
 
     pub fn from_name(name: &str) -> Model {
         match name {
             "multilingual" => Model::Multilingual,
             "hinglish" => Model::Hinglish,
+            "sarvam" => Model::Sarvam,
             _ => Model::English,
         }
     }
+
 
     pub fn name(self) -> &'static str {
         match self {
             Model::English => "english",
             Model::Hinglish => "hinglish",
             Model::Multilingual => "multilingual",
+            Model::Sarvam => "sarvam",
         }
     }
 
@@ -41,6 +46,7 @@ impl Model {
             Model::English => "parakeet-tdt-0.6b-v2-int8",
             Model::Hinglish => "whisper-hinglish-apex-int8",
             Model::Multilingual => "parakeet-tdt-0.6b-v3-int8",
+            Model::Sarvam => "sarvam",
         }
     }
 
@@ -50,6 +56,7 @@ impl Model {
             Model::English => "English (most accurate)",
             Model::Hinglish => "Hinglish (Hindi in English letters)",
             Model::Multilingual => "Other languages (25 European)",
+            Model::Sarvam => "Indian languages (Sarvam, online)",
         }
     }
 
@@ -58,6 +65,7 @@ impl Model {
         match self {
             Model::English | Model::Multilingual => &["tokens.txt", "decoder.int8.onnx", "joiner.int8.onnx", "encoder.int8.onnx"],
             Model::Hinglish => &["tokens.txt", "decoder.int8.onnx", "encoder.int8.onnx"],
+            Model::Sarvam => &[],
         }
     }
 
@@ -71,7 +79,7 @@ impl Model {
     fn longest(self) -> Option<f32> {
         match self {
             Model::Hinglish => Some(28.0),
-            Model::English | Model::Multilingual => None,
+            Model::English | Model::Multilingual | Model::Sarvam => None,
         }
     }
 }
@@ -112,6 +120,7 @@ impl Recognizer {
                 };
                 config.model_config.model_type = Some("nemo_transducer".into());
             }
+            Model::Sarvam => return Err("Sarvam runs online, not on this PC".into()),
             Model::Hinglish => {
                 // As the Mac app runs Apex (WhisperKit, language "en"): Hindi and English, in English letters.
                 config.model_config.whisper = OfflineWhisperModelConfig {
@@ -210,7 +219,7 @@ fn threads(model: Model) -> i32 {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     match model {
         Model::Hinglish => (cores / 2).clamp(1, 8) as i32,
-        Model::English | Model::Multilingual => cores.saturating_sub(1).clamp(1, 8) as i32,
+        Model::English | Model::Multilingual | Model::Sarvam => cores.saturating_sub(1).clamp(1, 8) as i32,
     }
 }
 

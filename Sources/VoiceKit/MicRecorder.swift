@@ -13,17 +13,19 @@ import MurmurObjC
 /// format the hardware reports, and if AVFoundation still objects (it raises an Objective-C exception, which would
 /// quit the app) the recording falls back to the default microphone.
 ///
-/// Clear voice (on unless turned off): the microphone goes through macOS's voice processing, as FaceTime's does. It
+/// Clear voice (off unless turned on): the microphone goes through macOS's voice processing, as FaceTime's does. It
 /// takes out steady background noise and the Mac's own speakers' sound, and evens out the level, before Murmur hears
 /// anything. Other sound playing on the Mac is turned down as little as macOS allows. If a microphone can't do it,
-/// that recording (and the rest of the session, for that microphone) is made without it, as before.
+/// that recording (and the rest of the session, for that microphone) is made without it, as before. Beside it, the
+/// microphone's own sound is recorded too (PlainSound), for a soft voice that voice processing cut.
 ///
 /// Ready between dictations (`readySeconds`, a minute unless turned off): after a dictation the microphone stays on
 /// for a while, keeping only the last half second (PreRoll), and the next dictation starts with that half second.
 /// The first word, often begun as the key goes down, arrives whole, and the next dictation starts at once instead of
-/// waiting up to a second for the microphone. macOS shows the microphone in use for that minute; nothing is kept
-/// beyond the half second, and nothing is written anywhere. Not with Clear voice: voice processing left running
-/// would keep turning other sound on the Mac down.
+/// waiting up to a second for the microphone (with Clear voice, a full second every time: on 17 Nov every dictation
+/// took 0.9–1.5 s to start). macOS shows the microphone in use for that minute; nothing is kept beyond the half
+/// second, and nothing is written anywhere. With Clear voice, other sound on the Mac stays turned down (as little as
+/// macOS allows) for that minute too.
 public final class MicRecorder: @unchecked Sendable {
     private var engine = AVAudioEngine()
     /// The microphone the engine was pointed at (nil: the system default, nothing set).
@@ -59,6 +61,17 @@ public final class MicRecorder: @unchecked Sendable {
     private var settings = (chosenUID: String?.none, preferBuiltIn: true, clearVoice: false, readySeconds: 60.0)
     /// Microphones voice processing didn't work with this session (their UID, or "default").
     private var clearVoiceFailed: Set<String> = []
+    /// The microphone's own sound beside Clear voice's.
+    private let plain = PlainSound()
+    private var lastPlain: [Float] = []
+    /// What the microphone itself heard during the last recording, at 16 kHz, when it went through Clear voice
+    /// (empty otherwise, or when the plain recording couldn't start). Handed over once.
+    public func plainSound() -> [Float] {
+        lock.withLock {
+            defer { lastPlain = [] }
+            return lastPlain
+        }
+    }
     /// Whether the last recording went through voice processing.
     public var cleaned: Bool { lock.withLock { lastCleaned } }
     private var lastCleaned = false
@@ -137,6 +150,8 @@ public final class MicRecorder: @unchecked Sendable {
         public var retried: String?
         /// The microphone's input level in System Settings › Sound, 0…1, when it has one.
         public var inputVolume: Float?
+        /// Why the microphone's own sound couldn't be recorded beside Clear voice's.
+        public var plainProblem: String?
         /// It was already on (ready from the last dictation), and the recording starts with the moment before the key.
         public var wasReady = false
         public var preRollSeconds = 0.0
@@ -151,6 +166,7 @@ public final class MicRecorder: @unchecked Sendable {
             var fellBack: String?
             clearVoiceProblem = nil
             retriedStart = nil
+            plainProblem = nil
             do { fellBack = try startNow() } catch { failure = error.localizedDescription }
             var result = Start(error: failure, took: Date().timeIntervalSince(started), device: device,
                                fellBack: fellBack)
@@ -158,6 +174,7 @@ public final class MicRecorder: @unchecked Sendable {
             result.preRollSeconds = failure == nil ? lastPreRollSeconds : 0
             result.cleaned = cleaned
             result.clearVoiceProblem = clearVoiceProblem
+            result.plainProblem = plainProblem
             result.retried = retriedStart
             result.inputVolume = device.flatMap { AudioDevices.inputVolume($0.id) }
             Task { @MainActor in done(result) }
@@ -184,8 +201,12 @@ public final class MicRecorder: @unchecked Sendable {
                     preRolled = samples.count
                     preRoll.clear()
                     recording = true
+                    lastPlain = []
                 }
                 startedReady = true
+                if lock.withLock({ lastCleaned }) {
+                    if plain.isRunning { plain.resume() } else { startPlain() }
+                }
                 return nil
             }
             shutDown()
@@ -193,6 +214,7 @@ public final class MicRecorder: @unchecked Sendable {
         lock.withLock {
             recording = true
             preRolled = 0
+            lastPlain = []
         }
         do {
             let fellBack = try startFresh()
@@ -200,6 +222,7 @@ public final class MicRecorder: @unchecked Sendable {
                 preRoll.resize(Int(sampleRate * Self.preRollSeconds))
                 readyWith = (lastDevice?.uid, settings.clearVoice)
             }
+            if lock.withLock({ lastCleaned }) { startPlain() }
             return fellBack
         } catch {
             lock.withLock { recording = false }
@@ -247,6 +270,19 @@ public final class MicRecorder: @unchecked Sendable {
         lock.withLock { lastDevice = systemDefault }
         return nil
     }
+
+    /// The microphone's own sound, beside Clear voice's: on the same microphone as the engine (on `queue`).
+    private func startPlain() {
+        let device = engineUID == nil ? nil : lock.withLock { lastDevice }
+        do {
+            try plain.start(device)
+        } catch {
+            plainProblem = error.localizedDescription
+        }
+    }
+
+    /// Why the plain recording didn't start (for the log), set by `startPlain`.
+    private var plainProblem: String?
 
     /// Why the first try to start failed, when a second one worked (for the log), set by `startFresh`.
     private var retriedStart: String?
@@ -368,11 +404,11 @@ public final class MicRecorder: @unchecked Sendable {
         recording = false
         preRoll.clear()
         let ready = settings.readySeconds
-        let cleaned = lastCleaned
         lock.unlock()
-        // Ready for the next dictation for a while, or off now. Not with voice processing (it keeps turning other
-        // sound on the Mac down while it runs).
-        if ready > 0, !cleaned, engine.isRunning {
+        let heard = plain.isRunning ? plain.stop() : []
+        lock.withLock { lastPlain = heard }
+        // Ready for the next dictation for a while, or off now.
+        if ready > 0, engine.isRunning {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, !self.lock.withLock({ self.recording }) else { return }
                 self.shutDown()
@@ -396,6 +432,7 @@ public final class MicRecorder: @unchecked Sendable {
     private func shutDown() {
         cooling?.cancel()
         cooling = nil
+        plain.shutDown()
         guard running else { return }
         let engine = engine
         _ = MurmurCatchException {
@@ -412,13 +449,33 @@ public final class MicRecorder: @unchecked Sendable {
     }
 
     private func append(_ buffer: AVAudioPCMBuffer) {
-        guard let data = buffer.floatChannelData else { return }
+        let decided = lock.withLock { channel }
+        guard let made = Self.mono(buffer, channel: decided) else { return }
+        let (mono, use) = made
+        lock.lock()
+        if decided == nil { channel = use }
+        let collecting = recording
+        // Ready between dictations: only the last half second is kept.
+        if collecting { samples.append(contentsOf: mono) } else { preRoll.append(mono) }
+        lock.unlock()
+        guard collecting else { return }
+        var sum: Float = 0
+        for value in mono { sum += value * value }
+        let rms = (sum / Float(mono.count)).squareRoot()
+        // Log scale from −60 dBFS (silence) to −10 dBFS (loud), so a whisper still moves the meter.
+        let db = 20 * log10(max(rms, 1e-6))
+        onLevel?(min(1, max(0, (db + 60) / 50)))
+    }
+
+    /// A buffer as one channel, and the channel to keep from now on: the loudest one when the others are much quieter
+    /// (a mic on one channel of a two-channel interface or headset: averaging would halve your voice), otherwise -1,
+    /// all of them averaged. `channel` nil: not decided yet (it is on the first buffer with sound).
+    static func mono(_ buffer: AVAudioPCMBuffer, channel: Int?) -> ([Float], Int?)? {
+        guard let data = buffer.floatChannelData else { return nil }
         let frames = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
-        guard frames > 0, channels > 0 else { return }
-        lock.lock()
+        guard frames > 0, channels > 0 else { return nil }
         var use = channel
-        lock.unlock()
         if use == nil {
             var energies = [Float](repeating: 0, count: channels)
             for c in 0..<channels {
@@ -430,9 +487,6 @@ public final class MicRecorder: @unchecked Sendable {
             if energies[loudest] > 1e-7 {
                 // 6 dB or more between channels: one carries the voice. Keep it alone.
                 use = quietest * 4 < energies[loudest] ? loudest : -1
-                lock.lock()
-                channel = use
-                lock.unlock()
             }
         }
         var mono = [Float](repeating: 0, count: frames)
@@ -449,18 +503,7 @@ public final class MicRecorder: @unchecked Sendable {
                 for i in 0..<frames { mono[i] *= scale }
             }
         }
-        lock.lock()
-        let collecting = recording
-        // Ready between dictations: only the last half second is kept.
-        if collecting { samples.append(contentsOf: mono) } else { preRoll.append(mono) }
-        lock.unlock()
-        guard collecting else { return }
-        var sum: Float = 0
-        for value in mono { sum += value * value }
-        let rms = (sum / Float(frames)).squareRoot()
-        // Log scale from −60 dBFS (silence) to −10 dBFS (loud), so a whisper still moves the meter.
-        let db = 20 * log10(max(rms, 1e-6))
-        onLevel?(min(1, max(0, (db + 60) / 50)))
+        return (mono, use)
     }
 }
 

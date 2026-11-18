@@ -5,6 +5,9 @@ public enum RouterChoice: String, CaseIterable, Sendable {
     case local
     case anthropic
     case openai
+    /// Sarvam's Token Factory (api.sarvam.ai/v2): Sarvam 105B and open-weight models hosted in India, OpenAI-style.
+    /// The same Sarvam key also does speech-to-text, when Sarvam is the speech model.
+    case sarvam
 
     public static let key = "routerProvider"
 
@@ -18,6 +21,27 @@ public enum RouterChoice: String, CaseIterable, Sendable {
         case .local: return "Local (Ollama)"
         case .anthropic: return "Claude (\(AnthropicRouter.model))"
         case .openai: return "OpenAI (\(OpenAIRouter.model))"
+        case .sarvam: return "Sarvam (\(ChatCompletions.sarvam.model))"
+        }
+    }
+
+    /// The provider's name, as messages say it.
+    public var provider: String {
+        switch self {
+        case .local: return "Ollama"
+        case .anthropic: return "Anthropic"
+        case .openai: return "OpenAI"
+        case .sarvam: return "Sarvam"
+        }
+    }
+
+    /// The model commands use with this provider.
+    public var model: String {
+        switch self {
+        case .local: return ""
+        case .anthropic: return AnthropicRouter.model
+        case .openai: return OpenAIRouter.model
+        case .sarvam: return ChatCompletions.sarvam.model
         }
     }
 
@@ -27,6 +51,7 @@ public enum RouterChoice: String, CaseIterable, Sendable {
         case .local: return nil
         case .anthropic: return "anthropic"
         case .openai: return "openai"
+        case .sarvam: return "sarvam"
         }
     }
 
@@ -131,10 +156,17 @@ public enum Routers {
     /// A cloud model whose key was just rejected isn't asked again (every command would wait for the same 401) until
     /// a new key is saved.
     public static func current(localModel: String) -> Router {
+        router(for: RouterChoice.current, localModel: localModel)
+    }
+
+    /// The router for one choice (meeting notes can use another AI than commands). Cloud choices without a key, or
+    /// whose key was just rejected, fall back to local.
+    public static func router(for choice: RouterChoice, localModel: String) -> Router {
         let rejected = RouterDiagnostics.isKeyProblem(RouterDiagnostics.lastError)
-        switch RouterChoice.current {
+        switch choice {
         case .anthropic where RouterChoice.anthropic.hasKey && !rejected: return AnthropicRouter()
         case .openai where RouterChoice.openai.hasKey && !rejected: return OpenAIRouter()
+        case .sarvam where RouterChoice.sarvam.hasKey && !rejected: return OpenAIRouter(.sarvam)
         default: return OllamaRouter(model: localModel)
         }
     }
@@ -212,11 +244,11 @@ public struct AnthropicRouter: Router {
     /// `defaults write com.copico.Murmur anthropicModel <id>` to use another model.
     public static var model: String { UserDefaults.standard.string(forKey: "anthropicModel") ?? "claude-haiku-5-5" }
     public var name: String { "Claude" }
-    private let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+    let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
 
     public init() {}
 
-    private func headers() throws -> [String: String] {
+    func headers() throws -> [String: String] {
         guard let key = Keychain.get("anthropic") else { throw RouterError.noKey("Anthropic") }
         var headers = ["x-api-key": key, "anthropic-version": "2023-06-01"]
         if let workspace = AnthropicWorkspace.id { headers["anthropic-workspace-id"] = workspace }
@@ -266,7 +298,7 @@ public struct AnthropicRouter: Router {
         return out
     }
 
-    private func base(system: String, maxTokens: Int) -> [String: Any] {
+    func base(system: String, maxTokens: Int) -> [String: Any] {
         // Fastest settings: no extended thinking, low effort.
         ["model": Self.model, "max_tokens": maxTokens, "system": system,
          "thinking": ["type": "disabled"], "output_config": ["effort": "low"]]
@@ -322,19 +354,92 @@ public struct AnthropicRouter: Router {
 
 // MARK: - OpenAI (GPT-6 Luna by default)
 
+/// A provider that speaks OpenAI's Chat Completions: OpenAI itself, and Sarvam's Token Factory (the same API in
+/// front of the models it hosts). What differs is where to send it, the key, the model, and how to turn reasoning down.
+public struct ChatCompletions: Sendable {
+    public let name: String
+    public let keyAccount: String
+    public let endpoint: URL
+    /// The UserDefaults key holding the model picked, and the model when none is.
+    public let modelKey: String
+    public let defaultModel: String
+    /// Sent with every request.
+    public let extraHeaders: [String: String]
+    /// How to ask for no (or little) reasoning, best first: a router picks tools fast with reasoning off, as Claude
+    /// runs here with thinking off. A model that refuses one is asked with the next, and that's remembered for it.
+    let reasoningSteps: [Reasoning]
+
+    /// One way of asking for little reasoning, as request fields.
+    enum Reasoning: Sendable {
+        /// OpenAI's `reasoning_effort`.
+        case effort(String)
+        /// Nothing about reasoning (the model's own default).
+        case unsaid
+
+        var fields: [String: Any] {
+            switch self {
+            case .effort(let level): return ["reasoning_effort": level]
+            case .unsaid: return [:]
+            }
+        }
+    }
+
+    public var model: String { UserDefaults.standard.string(forKey: modelKey) ?? defaultModel }
+
+    public static let openai = ChatCompletions(
+        name: "OpenAI", keyAccount: "openai", endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
+        modelKey: "openaiModel", defaultModel: "gpt-6-luna", extraHeaders: [:],
+        // GPT-5.4 and later refuse tools alongside reasoning on Chat Completions and reason by default ("set
+        // reasoning_effort to 'none'"); an older model that doesn't take "none" is asked without it.
+        reasoningSteps: [.effort("none"), .unsaid])
+
+    public static let sarvam = ChatCompletions(
+        name: "Sarvam", keyAccount: "sarvam", endpoint: URL(string: "https://api.sarvam.ai/v2/chat/completions")!,
+        modelKey: "sarvamModel", defaultModel: "sarvam-105b", extraHeaders: [:],
+        // Sarvam 105B and DeepSeek turn reasoning off with "none"; GLM 5.3 Flash and Kimi can't (always on).
+        reasoningSteps: [.effort("none"), .unsaid])
+
+    /// The reasoning step each model settled on (by provider and model), for this launch.
+    nonisolated(unsafe) static var settled: [String: Int] = [:]
+    private static let settledLock = NSLock()
+
+    func step(for model: String) -> Int { Self.settledLock.withLock { Self.settled["\(name)|\(model)"] ?? 0 } }
+    func settle(_ model: String, at step: Int) { Self.settledLock.withLock { Self.settled["\(name)|\(model)"] = step } }
+}
+
 public struct OpenAIRouter: Router {
     /// `defaults write com.copico.Murmur openaiModel <id>` to use another model.
-    public static var model: String { UserDefaults.standard.string(forKey: "openaiModel") ?? "gpt-6-luna" }
-    public var name: String { "OpenAI" }
-    private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
-    /// Send `reasoning_effort: "none"` with tools; turned off for this launch if the model refuses that value.
-    nonisolated(unsafe) static var reasoningOff = true
+    public static var model: String { ChatCompletions.openai.model }
+    public let provider: ChatCompletions
+    public var name: String { provider.name }
+    private var endpoint: URL { provider.endpoint }
 
-    public init() {}
+    public init(_ provider: ChatCompletions = .openai) { self.provider = provider }
 
-    private func headers() throws -> [String: String] {
-        guard let key = Keychain.get("openai") else { throw RouterError.noKey("OpenAI") }
-        return ["Authorization": "Bearer \(key)"]
+    func headers() throws -> [String: String] {
+        guard let key = Keychain.get(provider.keyAccount) else { throw RouterError.noKey(provider.name) }
+        return provider.extraHeaders.merging(["Authorization": "Bearer \(key)"]) { _, own in own }
+    }
+
+    /// Posts with as little reasoning as the model takes: the remembered step, or the next when it refuses one.
+    private func post(_ body: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
+        let model = body["model"] as? String ?? provider.model
+        var step = provider.step(for: model)
+        while true {
+            var request = body
+            for (key, value) in provider.reasoningSteps[min(step, provider.reasoningSteps.count - 1)].fields {
+                request[key] = value
+            }
+            do {
+                let json = try await HTTP.postJSON(endpoint, headers: try headers(), body: request, timeout: timeout,
+                                                   provider: provider.name)
+                provider.settle(model, at: step)
+                return json
+            } catch RouterError.http(_, 400, let detail)
+                        where step + 1 < provider.reasoningSteps.count && detail.localizedCaseInsensitiveContains("reason") {
+                step += 1
+            }
+        }
     }
 
     private func messages(system: String, _ turns: [RouterTurn]) -> [[String: Any]] {
@@ -387,24 +492,11 @@ public struct OpenAIRouter: Router {
     }
 
     public func chat(system: String, turns: [RouterTurn], tools: [ToolSpec]) async throws -> RouterReply {
-        var body: [String: Any] = ["model": Self.model, "messages": messages(system: system, turns)]
+        var body: [String: Any] = ["model": provider.model, "messages": messages(system: system, turns)]
         if !tools.isEmpty {
             body["tools"] = toolList(tools)   // an empty list is an error; none means plain text
-            // GPT-5.4 and later refuse tools alongside reasoning on Chat Completions ("Function tools with
-            // reasoning_effort are not supported … set reasoning_effort to 'none'"), and reason by default. A router
-            // picks tools fast with reasoning off, as Claude runs here with thinking off.
-            if Self.reasoningOff { body["reasoning_effort"] = "none" }
         }
-        let json: [String: Any]
-        do {
-            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 60, provider: "OpenAI")
-        } catch RouterError.http(_, 400, let detail) where body["reasoning_effort"] != nil
-                    && detail.localizedCaseInsensitiveContains("reasoning_effort") {
-            // An older model that doesn't take "none" (gpt-5 takes minimal…high): ask without it, and remember.
-            Self.reasoningOff = false
-            body["reasoning_effort"] = nil
-            json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: 60, provider: "OpenAI")
-        }
+        let json = try await post(body, timeout: 60)
         let message = ((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]) ?? [:]
         let calls = (message["tool_calls"] as? [[String: Any]] ?? []).compactMap { call -> RouterCall? in
             guard let function = call["function"] as? [String: Any], let name = function["name"] as? String else {
@@ -421,25 +513,15 @@ public struct OpenAIRouter: Router {
         let schema: [String: Any] = ["type": "object", "properties": [field: ["type": "string", "enum": options]],
                                      "required": [field]]
         let tool = ToolSpec(name: "answer", description: "Give the answer", parameters: schema)
-        var body: [String: Any] = [
-            "model": Self.model,
+        let body: [String: Any] = [
+            "model": provider.model,
             "messages": [["role": "system", "content": system], ["role": "user", "content": user]],
             "tools": toolList([tool]),
             "tool_choice": ["type": "function", "function": ["name": "answer"]] as [String: Any],
         ]
-        if Self.reasoningOff { body["reasoning_effort"] = "none" }   // tools + reasoning: see `chat`
         let json: [String: Any]
         do {
-            do {
-                json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
-                                               provider: "OpenAI")
-            } catch RouterError.http(_, 400, let detail) where body["reasoning_effort"] != nil
-                        && detail.localizedCaseInsensitiveContains("reasoning_effort") {
-                Self.reasoningOff = false
-                body["reasoning_effort"] = nil
-                json = try await HTTP.postJSON(endpoint, headers: try headers(), body: body, timeout: timeout,
-                                               provider: "OpenAI")
-            }
+            json = try await post(body, timeout: timeout)
             RouterDiagnostics.lastError = nil
         } catch {
             RouterDiagnostics.lastError = error.localizedDescription
@@ -551,7 +633,7 @@ public enum KeyCheck {
         }
         if code == 404 || lower.contains("does not exist") || lower.contains("model_not_found")
             || lower.contains("not_found_error") && lower.contains("model") {
-            let model = provider == "OpenAI" ? OpenAIRouter.model : AnthropicRouter.model
+            let model = RouterChoice.allCases.first { $0.provider == provider }?.model ?? AnthropicRouter.model
             return "\(provider) can't use the model “\(model)” with this key (\(code)). Choose another model under "
                 + "Commands & AI → API keys."
         }
@@ -574,6 +656,12 @@ public enum KeyCheck {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             body = ["model": OpenAIRouter.model, "max_completion_tokens": 16,
                     "messages": [["role": "user", "content": "Reply with OK."]]]
+        case .sarvam:
+            let sarvam = ChatCompletions.sarvam
+            request = URLRequest(url: sarvam.endpoint)
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            body = ["model": sarvam.model, "max_tokens": 64, "reasoning_effort": "none",
+                    "messages": [["role": "user", "content": "Reply with OK."]]]
         case .anthropic:
             request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
             request.setValue(key, forHTTPHeaderField: "x-api-key")
@@ -590,7 +678,7 @@ public enum KeyCheck {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 20
-        let provider = choice == .openai ? "OpenAI" : "Anthropic"
+        let provider = choice.provider
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let code = (response as? HTTPURLResponse)?.statusCode else {
             return "Couldn't reach \(provider) to check the key. Check your internet connection."

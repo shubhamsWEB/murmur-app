@@ -71,8 +71,18 @@ function renderDictation() {
   const about = { english: "Only English. The most accurate for it, accents included.",
                   multilingual: "Spanish, French, German and 22 more European languages, detected as you speak.",
                   hinglish: "Hindi and English, mixed as you like. Typed in English letters. A bigger model (about "
-                    + "1 GB), so it takes a moment longer than English." };
+                    + "1 GB), so it takes a moment longer than English.",
+                  sarvam: "Hindi, English and 20 more Indian languages, mixed as you like. Online: your recordings go "
+                    + "to Sarvam with your Sarvam key (Settings → Commands & AI). Nothing to download." };
   $("speech-about").textContent = about[d.model] || "";
+  // Sarvam: how it writes, and the language to expect.
+  const sarvam = d.model === "sarvam";
+  $("sarvam-output-row").hidden = !sarvam;
+  $("sarvam-language-row").hidden = !sarvam;
+  if (sarvam) {
+    fill($("sarvam-output"), (d.sarvamOutputs || []).map((o) => [o.id, o.title]), d.sarvamOutput);
+    fill($("sarvam-language"), (d.sarvamLanguages || []).map((l) => [l.id, l.title]), d.sarvamLanguage);
+  }
 }
 
 /// The speech model's line: ready, or how its download goes, or why it stopped.
@@ -89,16 +99,21 @@ function renderSpeechModel() {
     missing: dictation.enabled ? "Not downloaded yet" : "Downloaded when dictation is on",
   };
   const unloaded = state.state === "failed" && /load|stopped/i.test(String(state.message || ""));
-  $("speech-status").textContent = unloaded ? "The model didn't load" : lines[state.state] || "";
+  const online = dictation.model === "sarvam";
+  if (online) {
+    lines.ready = "Ready · online";
+    lines.failed = dictation.sarvamKey ? "Sarvam couldn't start" : "Needs a Sarvam key";
+  }
+  $("speech-status").textContent = unloaded && !online ? "The model didn't load" : lines[state.state] || "";
   $("speech-bar").hidden = !["downloading", "checking", "loading", "waiting"].includes(state.state);
   $("speech-bar").classList.toggle("busy", state.state !== "downloading" || percent == null);
   $("speech-fill").style.width = state.state === "downloading" && percent != null ? `${percent}%` : "";
   $("speech-detail").textContent = state.state === "downloading" && state.total > 0
     ? `${megabytes(state.bytes)} of ${megabytes(state.total)}`
     : state.state === "failed" ? String(state.message || "")
-    : state.state === "ready" && dictation.folder ? shown(dictation.folder) : "";
+    : state.state === "ready" && dictation.folder && !online ? shown(dictation.folder) : "";
   const download = $("speech-download");
-  download.hidden = !["missing", "failed"].includes(state.state);
+  download.hidden = online || !["missing", "failed"].includes(state.state);
   download.textContent = state.state === "failed" ? "Try Again" : "Download";
 }
 
@@ -137,6 +152,8 @@ $("dictation-key").addEventListener("change", () => choose("key", $("dictation-k
 $("speech-model").addEventListener("change", () => choose("model", $("speech-model").value));
 $("microphone").addEventListener("change", () => choose("microphone", $("microphone").value));
 $("speech-download").onclick = () => { invoke("download_speech_model").catch(fail); };
+$("sarvam-output").addEventListener("change", () => choose("sarvamOutput", $("sarvam-output").value));
+$("sarvam-language").addEventListener("change", () => choose("sarvamLanguage", $("sarvam-language").value));
 
 // The model's download and loading as they go (and any change made elsewhere).
 tauri.event.listen("dictation", ({ payload }) => {
@@ -169,6 +186,7 @@ function renderGeneral() {
 /// Updates: the daily check, and this version or the one waiting (updates.rs).
 function renderUpdates() {
   $("update-checks").checked = info.updateChecks;
+  $("hide-sharing").checked = info.hideFromSharing !== false;
   $("update-info").textContent = "Once a day Murmur asks GitHub for its newest version; nothing about your files is sent. "
     + (info.installsUpdates ? "Updates install with one click."
       : "A new version is downloaded from its release page and installed as this one was.");
@@ -220,6 +238,7 @@ wire($("login"), "set_open_at_login");
 wire($("center"), "set_center_panel");
 wire($("processor"), "set_processor_only");
 wire($("update-checks"), "set_update_checks");
+wire($("hide-sharing"), "set_hide_from_sharing");
 for (const choice of document.querySelectorAll('input[name="tray-click"]')) {
   choice.addEventListener("change", () => {
     $("problem").hidden = true;

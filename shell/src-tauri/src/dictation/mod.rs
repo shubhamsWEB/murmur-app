@@ -12,6 +12,7 @@
 //! step, opening out of the Murmur button (logo.rs) when it's on.
 
 pub mod audio;
+pub mod cloud;
 pub mod cursor;
 pub mod fit;
 pub mod history;
@@ -63,6 +64,8 @@ pub struct Config {
     pub keep_history: bool,
     /// Every recording and what was heard, saved to Documents\Murmur Recordings (off by default).
     pub keep_recordings: bool,
+    /// How Sarvam writes and which language it expects (with the Sarvam model).
+    pub sarvam: cloud::Sarvam,
 }
 
 /// Hold the key to talk; a press shorter than this is a tap, not a dictation (as on the Mac).
@@ -249,7 +252,27 @@ impl Dictation {
         if config.model != before.model || (config.enabled && !before.enabled) {
             self.inner.prepare();
         }
+        if let Some(engine) = self.inner.recognizer.lock().unwrap().as_ref() {
+            engine.set_sarvam(config.sarvam.clone());
+        }
         self.inner.changed();
+    }
+
+    /// The speech model as it's loaded now (meeting notes transcribe with it), if it is.
+    pub fn engine(&self) -> Option<Arc<worker::Engine>> {
+        self.inner.recognizer.lock().unwrap().clone()
+    }
+
+    /// Loads the speech model if it's there and isn't loaded (meeting notes need it with dictation off).
+    pub fn ensure_loaded(&self) {
+        if self.inner.recognizer.lock().unwrap().is_none() && !self.inner.loading.load(Ordering::SeqCst) {
+            self.inner.prepare();
+        }
+    }
+
+    /// The microphone chosen for dictation ("" for the default).
+    pub fn microphone(&self) -> String {
+        self.config().microphone
     }
 
     /// Settings' Download (or Try Again). After a model that was there didn't load, its files are fetched afresh.
@@ -400,6 +423,7 @@ impl Inner {
             match result {
                 // Still the model chosen (Settings may have changed it meanwhile).
                 Ok(recognizer) if inner.config().model == model => {
+                    recognizer.set_sarvam(inner.config().sarvam);
                     *inner.recognizer.lock().unwrap() = Some(Arc::new(recognizer));
                     inner.set_model(json!({"state": "ready"}));
                 }
@@ -448,6 +472,11 @@ impl Inner {
             "floatingButton": config.floating_button,
             "keepHistory": config.keep_history,
             "keepRecordings": config.keep_recordings,
+            "sarvamOutput": config.sarvam.output.name(),
+            "sarvamLanguage": if config.sarvam.language.is_empty() { "unknown" } else { config.sarvam.language.as_str() },
+            "sarvamOutputs": cloud::Output::ALL.iter().map(|o| json!({"id": o.name(), "title": o.title()})).collect::<Vec<_>>(),
+            "sarvamLanguages": cloud::LANGUAGES.iter().map(|(id, title)| json!({"id": id, "title": title})).collect::<Vec<_>>(),
+            "sarvamKey": cloud::has_key("sarvam"),
             "history": if config.keep_history { json!(self.history.counts()) } else { json!([]) },
             "recordingsFolder": history::recordings_folder().map(|folder| folder.display().to_string()),
             "phase": *self.phase.lock().unwrap(),
@@ -553,6 +582,11 @@ impl Inner {
         }
         self.note(if hands_free { "key pressed: hands-free" } else { "key pressed" });
         if self.recognizer.lock().unwrap().is_none() {
+            // Sarvam without its key: nothing to download, only the key to add.
+            if config.model == speech::Model::Sarvam && !cloud::has_key("sarvam") {
+                pill::flash(&self.app, "Sarvam needs its API key · add it in Settings → Commands & AI", "problem", 4.0);
+                return;
+            }
             let state = self.model.lock().unwrap().clone();
             let text = match state["state"].as_str().unwrap_or_default() {
                 "downloading" => match (state["bytes"].as_f64(), state["total"].as_f64()) {
@@ -681,6 +715,12 @@ impl Inner {
         }
         let text = match recognizer.words(&leveled.samples, rate) {
             Ok(text) => text,
+            // Sarvam refused or couldn't be reached: said, and the next dictation tries again.
+            Err(error) if !recognizer.is_local() => {
+                self.note(&format!("Sarvam: {error}"));
+                pill::flash(&self.app, &format!("Sarvam: {}", crate::ai::cut(&error, 120)), "problem", 5.0);
+                return;
+            }
             Err(error) => {
                 // The worker stopped (Hinglish): Murmur carries on, and the model loads again on the next press.
                 self.note(&format!("{error}: see speech-worker.log"));

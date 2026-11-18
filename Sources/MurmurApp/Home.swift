@@ -10,7 +10,7 @@ import VoiceKit
 /// The sections of Murmur's window.
 enum HomeSection: String, CaseIterable, Identifiable {
     /// `day` ("Your day") isn't in the sidebar: the morning brief's notification opens it, and the Memory page links it.
-    case home, search, dictation, commands, memory, folders, about, day
+    case home, search, meetings, dictation, commands, memory, folders, about, day
 
     var id: String { rawValue }
 
@@ -18,6 +18,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "Home"
         case .search: "Search"
+        case .meetings: "Meetings"
         case .dictation: "Settings"
         case .commands: "Commands & AI"
         case .memory: "Memory"
@@ -31,6 +32,7 @@ enum HomeSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "house"
         case .search: "magnifyingglass"
+        case .meetings: "person.2.wave.2"
         case .dictation: "gearshape"
         case .commands: "sparkles"
         case .memory: "brain"
@@ -153,6 +155,7 @@ private struct HomeView: View {
         switch state.section {
         case .home: HomePage(app: app, state: state)
         case .search: EmptyView()   // drawn full-size above
+        case .meetings: MeetingsPage(app: app, state: state)
         case .dictation: SettingsPage(app: app, state: state)
         case .commands: CommandsPage(dictation: app.dictation, state: state)
         case .memory: MemoryPage(app: app, state: state)
@@ -244,6 +247,7 @@ private struct Sidebar: View {
                     Text(app.model.hotkey?.display ?? "⇧⌘Space")
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(Theme.ink3)))
+                item(.meetings)
             }
             .padding(.horizontal, 10)
             SectionLabel("Make it yours")
@@ -518,7 +522,7 @@ private struct HomePage: View {
     private var commandsState: ModelCard.State {
         switch RouterChoice.current {
         case .local: .done("Ollama · \(dictation.localRouterModel)")
-        case .anthropic, .openai:
+        case .anthropic, .openai, .sarvam:
             !RouterChoice.current.hasKey ? .problem("Needs an API key")
                 : AnthropicWorkspace.isNeeded(RouterDiagnostics.lastError) ? .problem("Needs a workspace ID")
                 : RouterDiagnostics.isKeyProblem(RouterDiagnostics.lastError) ? .problem("Key was rejected")
@@ -831,6 +835,53 @@ private struct SpeechAccuracyRows: View {
                          isOn: Binding(get: { dictation.showLogo }, set: { dictation.showLogo = $0 }))
         }
         RowDivider()
+        SettingRow(title: "Meeting notes",
+                   detail: "When Zoom, Teams, Meet or another call turns on the microphone, Murmur offers to listen: it "
+                       + "writes down both sides, keeps notes and action items, and drafts an answer once someone has "
+                       + "finished asking a question (⌥⌘↩ answers at once). Its panel is kept out of screen sharing. "
+                       + "Saved in Documents › Murmur Meetings.") {
+            HStack(spacing: 10) {
+                Button("Start now") { dictation.startMeetingNotes() }.buttonStyle(.murmurSecondary)
+                MurmurSwitch(label: "Offer meeting notes",
+                             isOn: Binding(get: { dictation.offersMeetingNotes }, set: { dictation.offersMeetingNotes = $0 }))
+            }
+        }
+        RowDivider()
+        SettingRow(title: "Speech for meetings",
+                   detail: "Turns what's said in meetings into text, apart from the AI that answers. Sarvam or OpenAI "
+                       + "transcribe in the cloud, so it doesn't run on this Mac.") {
+            Picker("Speech for meetings", selection: Binding(get: { dictation.meetingSpeech },
+                                                             set: { dictation.meetingSpeech = $0 })) {
+                ForEach(MeetingMode.Speech.allCases, id: \.self) { choice in
+                    Text(choice.display + (choice.hasKey ? "" : " · needs API key")).tag(choice)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 260)
+        }
+        RowDivider()
+        SettingRow(title: "AI for meetings",
+                   detail: "Writes the answers and notes. A cloud AI (Claude, OpenAI, Sarvam) keeps the work, and the "
+                       + "fan, off this Mac; the meeting's words go to that provider. A local model keeps them here.") {
+            Picker("AI for meetings", selection: Binding(get: { dictation.meetingAI }, set: { dictation.meetingAI = $0 })) {
+                Text("Same as commands").tag(RouterChoice?.none)
+                ForEach(RouterChoice.allCases, id: \.self) { choice in
+                    Text(choice.meetingDisplay + (choice != .local && !choice.hasKey ? " · needs API key" : ""))
+                        .tag(Optional(choice))
+                }
+            }
+            .labelsHidden()
+            .frame(width: 260)
+        }
+        RowDivider()
+        SettingRow(title: "Hide from screen sharing",
+                   detail: "Leaves Murmur's pill, answers and windows out when you share or record your screen, so others "
+                       + "don't see what you dictate. On macOS 15 and later, some apps can still show them.") {
+            MurmurSwitch(label: "Hide from screen sharing",
+                         isOn: Binding(get: { dictation.hidesFromScreenSharing },
+                                       set: { dictation.hidesFromScreenSharing = $0 }))
+        }
+        RowDivider()
         SettingRow(title: "Fit to the sentence",
                    detail: "Adds the space before what you say, and leaves out the capital and full stop when it goes into "
                        + "the middle of a sentence. Your words are never changed.") {
@@ -950,10 +1001,36 @@ private struct SettingsPage: View {
                 LanguageChoice(dictation: dictation)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
+                if dictation.speechModel == .sarvam {
+                    RowDivider()
+                    SettingRow(title: "Sarvam listens for",
+                               detail: "“Detect automatically” handles any of its languages, mixed as you speak.") {
+                        Picker("Sarvam language", selection: state.bind(
+                            get: { UserDefaults.standard.string(forKey: "sarvamLanguage") ?? "unknown" },
+                            set: { UserDefaults.standard.set($0, forKey: "sarvamLanguage") })) {
+                            ForEach(SarvamAudio.languages, id: \.0) { Text($0.1).tag($0.0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 200)
+                    }
+                    RowDivider()
+                    SettingRow(title: "Write it",
+                               detail: "How Sarvam types what you say: Hindi in English letters, in Devanagari, or "
+                                   + "translated to English.") {
+                        Picker("Sarvam output", selection: state.bind(
+                            get: { UserDefaults.standard.string(forKey: "sarvamOutput") ?? SarvamAudio.Output.standard.rawValue },
+                            set: { UserDefaults.standard.set($0, forKey: "sarvamOutput") })) {
+                            ForEach(SarvamAudio.Output.allCases, id: \.self) { Text($0.display).tag($0.rawValue) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 280)
+                    }
+                }
                 RowDivider()
                 SettingRow(title: "Clear voice",
-                           detail: "Takes out background noise and echo at the microphone, as FaceTime does. For a noisy room or "
-                               + "speakers playing: in a quiet room Murmur hears you better without it.") {
+                           detail: "Takes out background noise and echo at the microphone, as FaceTime does, and evens out "
+                               + "your level. If it cuts a soft voice, Murmur uses what the microphone itself heard. "
+                               + "Turn it off if a microphone sounds worse with it.") {
                     MurmurSwitch(label: "Clear voice",
                                  isOn: state.bind(get: { dictation.clearVoice }, set: { dictation.clearVoice = $0 }))
                 }
@@ -972,7 +1049,8 @@ private struct SettingsPage: View {
                 RowDivider()
                 SettingRow(title: "Catch your first word",
                            detail: "Keeps the microphone ready for a minute after you dictate, so the next dictation starts at once "
-                               + "and includes the half second before you pressed the key. Nothing is kept beyond that half second.") {
+                               + "and includes the half second before you pressed the key. Nothing is kept beyond that half second. "
+                               + "With Clear voice on, other sound on the Mac stays turned down a little for that minute.") {
                     MurmurSwitch(label: "Catch your first word",
                                  isOn: state.bind(get: { dictation.micStaysReady }, set: { dictation.micStaysReady = $0 }))
                 }
@@ -1295,6 +1373,7 @@ private struct MemoryPage: View {
     @State private var kind: BrainModel.EntityKind = .person
     @State private var open: Int64?
     @State private var showAllScreen = false
+    @State private var openProblem: String?
 
     private var brain: Brain { Brain.shared }
 
@@ -1330,6 +1409,7 @@ private struct MemoryPage: View {
             list("Murmur noticed", items: noticed,
                  empty: "Patterns in what you ask show up here, like who you message where. Nothing yet.")
             list("Recent commands", items: recent, empty: "Commands you give appear here.")
+            learnedFromMistakes
             HStack(spacing: 12) {
                 MurmurSwitch(label: "Remember commands",
                              isOn: state.bind(get: { CommandMemory.remembersCommands },
@@ -1344,6 +1424,7 @@ private struct MemoryPage: View {
         .alert("Forget everything?", isPresented: $confirmingClear) {
             Button("Forget Everything", role: .destructive) {
                 CommandMemory.forget(all: true, facts: true)
+                SelfImprovement.shared.forgetAll()
                 brain.forgetAll()
                 ScreenMemory.shared.forgetAll()
                 answers = nil
@@ -1514,7 +1595,7 @@ private struct MemoryPage: View {
                                                                   set: { value in memory.update { $0.rules.pictures = value } }))
                 }
                 if let cloud = cloudReaderChoice {
-                    let name = cloud == .anthropic ? "Claude" : "OpenAI"
+                    let name = cloud == .anthropic ? "Claude" : cloud.provider
                     RowDivider()
                     SettingRow(title: "Read with \(name)",
                                detail: "Faster, and while you work: each finished stretch of your work is read by \(name) with "
@@ -1911,7 +1992,7 @@ private struct MemoryPage: View {
     /// Which cloud model could read screen memory: the one picked for commands when it has a key, else whichever has one.
     private var cloudReaderChoice: RouterChoice? {
         if RouterChoice.current != .local, RouterChoice.current.hasKey { return RouterChoice.current }
-        return [RouterChoice.anthropic, .openai].first { $0.hasKey }
+        return [RouterChoice.anthropic, .openai, .sarvam].first { $0.hasKey }
     }
 
     /// What's left to read: how many episodes of work (each read once, as a whole), what the reader is doing, the
@@ -2087,6 +2168,132 @@ private struct MemoryPage: View {
             .padding(.vertical, 14)
     }
 
+    // MARK: Learned from mistakes
+
+    /// The self-improvement memory: each problem a command ran into, the rule Murmur follows for it now, and the
+    /// rules tried before, with how each did, by model.
+    private var learnedFromMistakes: some View {
+        let problems = SelfImprovement.shared.problems.reversed()
+        return SettingsSection("Learned from mistakes") {
+            HStack(spacing: 12) {
+                MurmurSwitch(label: "Learn from mistakes",
+                             isOn: state.bind(get: { SelfImprovement.isOn }, set: { SelfImprovement.isOn = $0 }))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Learn from mistakes").font(.system(size: 13.5)).foregroundStyle(Theme.ink)
+                    Text("When a command goes wrong, or you correct it, your commands’ AI works out why and writes a rule "
+                         + "for next time. Rules that don’t help are turned off.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            if problems.isEmpty {
+                RowDivider()
+                note("Nothing yet. What Murmur learns from commands that went wrong shows up here.")
+            }
+            ForEach(Array(problems)) { problem in
+                RowDivider()
+                problemRow(problem)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func problemRow(_ problem: SelfImprovement.Problem) -> some View {
+        let expanded = openProblem == problem.id
+        let current = problem.current
+        let cause = problem.rootCause.prefix(1).uppercased() + String(problem.rootCause.dropFirst())
+        let caption = cause + " · " + (current.map { results($0) } ?? "no rule in use")
+        HStack(alignment: .center, spacing: 10) {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { openProblem = expanded ? nil : problem.id }
+            } label: {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.ink3)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(current?.rule ?? problem.rootCause)
+                            .font(.system(size: 13.5)).foregroundStyle(current == nil ? Theme.ink3 : Theme.ink)
+                            .lineLimit(expanded ? nil : 2)
+                            .fixedSize(horizontal: false, vertical: expanded)
+                        Text(caption)
+                            .font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Button {
+                SelfImprovement.shared.forget(problem.id)
+                state.revision += 1
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.ink3)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Forget this")
+            .accessibilityLabel("Forget \(problem.rootCause)")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        if expanded {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(problem.attempts.enumerated().reversed()), id: \.element.id) { index, attempt in
+                    attemptDetail(attempt, number: index + 1)
+                }
+            }
+            .padding(.leading, 38)
+            .padding(.trailing, 18)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func attemptDetail(_ attempt: SelfImprovement.Attempt, number: Int) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Rule \(number) · " + (attempt.retired == nil ? "in use" : "retired")
+                 + " · from “\(attempt.trigger.prefix(60))”, \(attempt.created.formatted(.relative(presentation: .named)))")
+                .font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.ink3)
+            Text(attempt.rule).font(.system(size: 13)).foregroundStyle(attempt.retired == nil ? Theme.ink : Theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+            detailLine("Why", attempt.rationale)
+            detailLine("Expected", attempt.prediction)
+            detailLine("Results", results(attempt))
+            if !attempt.notFor.isEmpty { detailLine("Off for", attempt.notFor.joined(separator: ", ")) }
+            if let retired = attempt.retired { detailLine("Retired", retired) }
+        }
+    }
+
+    @ViewBuilder
+    private func detailLine(_ label: String, _ text: String) -> some View {
+        if !text.isEmpty {
+            (Text(label + ": ").foregroundColor(Theme.ink2) + Text(text).foregroundColor(Theme.ink3))
+                .font(.system(size: 12))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// "helped 4 of 5 times (claude-haiku-5-5 4/4, gpt-5-mini 0/1)"
+    private func results(_ attempt: SelfImprovement.Attempt) -> String {
+        let all = attempt.tally()
+        guard all.of > 0 else { return "not needed yet" }
+        let models = Set(attempt.observed.map(\.model)).sorted()
+        let byModel = models.count > 1
+            ? " (" + models.map { model in
+                let here = attempt.tally(model: model)
+                return "\(model) \(here.worked)/\(here.of)"
+            }.joined(separator: ", ") + ")"
+            : ""
+        return "worked \(all.worked) of \(all.of) times" + byModel
+    }
+
     // MARK: Commands and what you told it
 
     private func list(_ title: String, items: [CommandMemory.Item], empty: String) -> some View {
@@ -2161,7 +2368,8 @@ private struct CommandsPage: View {
                        subtitle: "Common commands like “open Slack” run instantly with no model. Everything else goes to the model you pick here.")
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel("Model for commands")
-                HStack(alignment: .top, spacing: 12) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12, alignment: .top)], alignment: .leading,
+                          spacing: 12) {
                     ForEach(RouterChoice.allCases, id: \.self) { choice in modelCard(choice) }
                 }
             }
@@ -2200,6 +2408,35 @@ private struct CommandsPage: View {
                         }
                         .buttonStyle(.murmurSecondary)
                     }
+                }
+                RowDivider()
+                SettingRow(title: "Sarvam", detail: keyDetail(.sarvam) + ". One key for speech-to-text and commands.") {
+                    HStack(spacing: 8) {
+                        keyPill(.sarvam)
+                        if RouterChoice.sarvam.hasKey {
+                            Button("Test") { dictation.testKey(.sarvam) }.buttonStyle(.murmurSecondary)
+                        }
+                        Button(RouterChoice.sarvam.hasKey ? "Change…" : "Add Key…") {
+                            dictation.askForKey(.sarvam)
+                            state.revision += 1
+                            keysChanged += 1
+                        }
+                        .buttonStyle(.murmurSecondary)
+                    }
+                }
+                RowDivider()
+                SettingRow(title: "Sarvam model",
+                           detail: "A Token Factory model for commands, by its ID: sarvam-105b (the default), "
+                               + "deepseekv4.1-flash-1017, glm5.3-flash or gemma4.") {
+                    TextField(ChatCompletions.sarvam.defaultModel,
+                              text: state.bind(get: { ChatCompletions.sarvam.model }, set: { value in
+                        let trimmed = value.trimmingCharacters(in: .whitespaces)
+                        UserDefaults.standard.set(trimmed.isEmpty ? nil : trimmed, forKey: ChatCompletions.sarvam.modelKey)
+                        RouterDiagnostics.lastError = nil
+                    }))
+                    .frame(width: 230)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
                 }
                 RowDivider()
                 SettingRow(title: "Models", detail: "The model each key uses for commands. Change it if your account names it differently.") {
@@ -2360,6 +2597,7 @@ private struct CommandsPage: View {
         case .local: ("On this Mac", "Ollama · \(dictation.localRouterModel)", ["Free", "Private", "Slower"])
         case .anthropic: ("Claude", Self.pretty(AnthropicRouter.model), ["Fastest", "Your key"])
         case .openai: ("OpenAI", Self.pretty(OpenAIRouter.model), ["Fast", "Your key"])
+        case .sarvam: ("Sarvam", ChatCompletions.sarvam.model, ["Indian languages", "Your key"])
         }
         return Button {
             if choice != .local, !choice.hasKey, !dictation.askForKey(choice) { return }

@@ -1,6 +1,6 @@
 // Settings → Commands & AI (window.html; src-tauri/src/commands): telling commands from dictation, AI clean-up and
-// its style for each kind of app, the model (Ollama on this PC, or Claude or OpenAI with a key kept in Windows'
-// Credential Manager), and what Murmur remembers. In a scope of its own, beside settings.js.
+// its style for each kind of app, the model (Ollama on this PC, or Claude, OpenAI or Sarvam with a key kept in
+// Windows' Credential Manager), and what Murmur remembers. In a scope of its own, beside settings.js.
 (() => {
 "use strict";
 
@@ -33,8 +33,14 @@ async function set(choice, value) {
   await load();
 }
 
-const company = { anthropic: "Anthropic", openai: "OpenAI" };
-const modelKey = { anthropic: "anthropicModel", openai: "openaiModel" };
+const company = { anthropic: "Anthropic", openai: "OpenAI", sarvam: "Sarvam" };
+const modelKey = { anthropic: "anthropicModel", openai: "openaiModel", sarvam: "sarvamModel" };
+const keyPage = {
+  anthropic: "console.anthropic.com → API Keys",
+  openai: "platform.openai.com → API keys",
+  sarvam: "dashboard.sarvam.ai → API Keys (the same key also does Sarvam's speech-to-text)",
+};
+const keyShape = { anthropic: "sk-ant-…", openai: "sk-…", sarvam: "Sarvam API key" };
 
 function render() {
   if (!info) return;
@@ -100,9 +106,8 @@ function render() {
     $("ai-key-title").textContent = `${company[provider]} API key`;
     $("ai-key-about").textContent = saved
       ? `Saved in Windows' Credential Manager: ${saved}. Paste a new one to replace it, or save it empty to remove it.`
-      : `From ${provider === "anthropic" ? "console.anthropic.com → API Keys" : "platform.openai.com → API keys"}. ` +
-        "Kept in Windows' Credential Manager.";
-    $("ai-key").placeholder = saved ? saved : provider === "anthropic" ? "sk-ant-…" : "sk-…";
+      : `From ${keyPage[provider]}. Kept in Windows' Credential Manager.`;
+    $("ai-key").placeholder = saved ? saved : keyShape[provider];
     $("ai-key-check").hidden = !saved;
     if (document.activeElement !== $("ai-workspace")) $("ai-workspace").value = info.workspace || "";
     const field = $("ai-cloud-model");
@@ -130,6 +135,29 @@ function render() {
     return row;
   }));
   $("ai-facts").hidden = facts.length === 0;
+
+  // What commands learned from their mistakes: the rule in use, why, and how it's done; forget any.
+  $("ai-learn").checked = info.learn !== false;
+  const learned = info.learned || [];
+  $("ai-learned").replaceChildren(...learned.map((problem) => {
+    const row = element("div", "row");
+    const text = element("div", "text");
+    const current = problem.attempts.find((a) => !a.retired);
+    text.append(element("span", "name", problem.current || problem.rootCause));
+    const tally = current && current.of ? `worked ${current.worked} of ${current.of} times` : "not needed yet";
+    const earlier = problem.attempts.length - (current ? 1 : 0);
+    text.append(element("span", "path", `${problem.rootCause} · ${current ? tally : "no rule in use"}`
+      + (earlier ? ` · ${earlier} earlier rule${earlier === 1 ? "" : "s"}` : "")));
+    if (current && current.rationale) text.title = `Why: ${current.rationale}\nExpected: ${current.prediction}`;
+    const remove = element("button", "secondary", "Forget");
+    remove.onclick = async () => {
+      await invoke("forget_memory", { id: `learned:${problem.id}` }).catch(fail);
+      await load();
+    };
+    row.append(text, remove);
+    return row;
+  }));
+  $("ai-learned").hidden = learned.length === 0;
 }
 
 let following = null;     // a timer while Murmur Cleanup downloads
@@ -189,6 +217,7 @@ async function loadModels() {
 
 $("ai-detect").addEventListener("change", () => set("detect", $("ai-detect").checked));
 $("ai-cleanup").addEventListener("change", () => set("cleanup", $("ai-cleanup").checked));
+$("ai-learn").addEventListener("change", () => set("learn", $("ai-learn").checked));
 $("ai-cleanup-model").addEventListener("change", () => set("cleanupModel", $("ai-cleanup-model").value));
 $("ai-cleanup-download").onclick = async () => {
   const button = $("ai-cleanup-download");

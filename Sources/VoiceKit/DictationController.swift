@@ -149,7 +149,8 @@ public final class DictationController: ObservableObject {
     /// Clear voice: macOS's voice processing on the microphone (as FaceTime uses): background noise and echo out,
     /// your level evened out, before Murmur hears it. Off unless turned on: it's made for people listening on a call,
     /// and what it does to a voice costs a speech model more than a quiet room's noise does (it also cut pauses to
-    /// digital silence, and a whole command once came back empty). For a noisy room or speakers playing.
+    /// digital silence, a whole command once came back empty, a soft voice was cut to nothing, and it takes a second
+    /// to start). For a noisy room or speakers playing.
     public var clearVoice: Bool {
         get { UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? false }
         set {
@@ -202,7 +203,7 @@ public final class DictationController: ObservableObject {
 
     /// The word spotter, downloaded (once, about 106 MB) and loaded in the background when vocabulary is wanted.
     private func prepareVocabularyIfWanted() {
-        guard wantsVocabulary else { return }
+        guard wantsVocabulary, transcriber.model != .sarvam else { return }
         let transcriber = transcriber
         let downloaded = ParakeetTranscriber.vocabularyModelIsDownloaded
         Task { [weak self] in
@@ -227,8 +228,9 @@ public final class DictationController: ObservableObject {
     }
 
     /// Murmur sets the microphone's input level itself (MicLevel): a level turned down is raised when you dictate, and
-    /// it moves a step after each dictation toward your voice arriving clearly. On unless turned off; not with Clear
-    /// voice (macOS sets the level then).
+    /// it moves a step after each dictation toward your voice arriving clearly. On unless turned off. With Clear voice,
+    /// judged by the microphone's own sound (recorded beside it), since voice processing evens out what it lets
+    /// through but can't bring back a voice the microphone barely heard.
     public var adjustsMicLevel: Bool {
         get { UserDefaults.standard.object(forKey: Self.autoLevelDefault) as? Bool ?? true }
         set {
@@ -261,6 +263,61 @@ public final class DictationController: ObservableObject {
             objectWillChange.send()
         }
     }
+
+    /// Murmur's windows left out of screen sharing and recordings (on by default): PrivateWindows.
+    public var hidesFromScreenSharing: Bool {
+        get { PrivateWindows.isOn }
+        set {
+            PrivateWindows.isOn = newValue
+            log("privacy: Murmur's windows \(newValue ? "hidden from" : "shown in") screen sharing")
+            objectWillChange.send()
+        }
+    }
+
+    /// Meeting notes (MeetingMode): listens to the call and your microphone, keeps notes, drafts answers.
+    public private(set) lazy var meeting = MeetingMode(
+        log: { [weak self] in self?.log($0) },
+        transcriber: { [weak self] in self?.transcriber },
+        router: { [weak self] in
+            guard let self else { return nil }
+            guard let choice = MeetingMode.aiChoice else { return agent.currentRouter() }
+            return Routers.router(for: choice, localModel: agent.routerModel)
+        },
+        microphone: { [weak self] in self?.recorder.currentChoice() })
+
+    /// The AI for meeting answers and notes (nil: the commands' AI).
+    /// Who transcribes meetings: the dictation model, or Sarvam or OpenAI in the cloud.
+    public var meetingSpeech: MeetingMode.Speech {
+        get { MeetingMode.speechChoice }
+        set {
+            meeting.askForKey = { [weak self] in self?.askForKey($0) ?? false }
+            meeting.setSpeech(newValue)
+            objectWillChange.send()
+        }
+    }
+
+    public var meetingAI: RouterChoice? {
+        get { MeetingMode.aiChoice }
+        set {
+            meeting.askForKey = { [weak self] in self?.askForKey($0) ?? false }
+            meeting.setAI(newValue)
+            objectWillChange.send()
+        }
+    }
+
+    /// Offer meeting notes when a meeting app turns on the microphone (on by default).
+    public var offersMeetingNotes: Bool {
+        get { meeting.offers }
+        set {
+            meeting.offers = newValue
+            log("meeting: \(newValue ? "offering" : "not offering") notes when a meeting starts")
+            objectWillChange.send()
+        }
+    }
+
+    public var meetingNotesRunning: Bool { meeting.isOn }
+
+    public func startMeetingNotes() { meeting.start() }
 
     /// AI cleanup (off by default): fillers and stumbles out, self-corrections applied, lists set out, in the style
     /// for the kind of app. Uses Murmur's cleanup model on this Mac (`CleanupModel`), or the commands' model; with
@@ -385,6 +442,12 @@ public final class DictationController: ObservableObject {
         }
     }
 
+    /// Clear voice's sound under this (its speech level, after its own level control evened it out: normal speech
+    /// came through at −12 to −16 dBFS) is a voice it took for noise, and the microphone's own sound is used instead.
+    static let faintThroughClearVoiceDB: Float = -30
+    /// A voice standing at least this far above the noise in the microphone's own sound is worth transcribing.
+    static let voiceOverNoiseDB: Float = 6
+
     /// Quiet Voice: boost soft speech up to 40 dB instead of 30 dB, for whispering or speaking softly. On unless
     /// you turn it off: speaking softly to the Mac is the usual way, and a stronger boost costs nothing at normal
     /// volume. (Named for your voice, not OpenAI's Whisper: speech is always recognised on this Mac. The setting
@@ -416,6 +479,12 @@ public final class DictationController: ObservableObject {
         }
         recorder.clearVoice = UserDefaults.standard.object(forKey: Self.clearVoiceDefault) as? Bool ?? false
         recorder.readySeconds = (UserDefaults.standard.object(forKey: Self.micReadyDefault) as? Bool ?? true) ? 60 : 0
+        PrivateWindows.watch()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            meeting.askForKey = { [weak self] in self?.askForKey($0) ?? false }
+            meeting.watch()
+        }
         hud.onVisible = { [weak self] frame in self?.logo.pillMoved(frame) }
         // With the Murmur button on screen, the listening pill grows out of it (one pill, not two).
         hud.anchor = { [weak self] in self?.logo.anchor }
@@ -531,6 +600,8 @@ public final class DictationController: ObservableObject {
     /// The model to use, chosen by you (a language card's Download, Settings, the menu). Choosing the one already set
     /// that isn't loaded yet (English, on a fresh install) starts it.
     public func setModel(_ model: SpeechModel) {
+        // Sarvam transcribes with your Sarvam key: asked for first, and nothing changes without one.
+        if model == .sarvam, !RouterChoice.sarvam.hasKey, !askForKey(.sarvam) { return }
         UserDefaults.standard.set(true, forKey: "speechModel.chosen")
         guard model != transcriber.model else {
             switch speechModelState {
@@ -573,7 +644,7 @@ public final class DictationController: ObservableObject {
     /// The few dictation items the menu bar menu keeps (everything else is in Murmur's window): fixing
     /// Accessibility, Quiet Voice, and the last dictation again.
     public func compactMenuItems() -> [NSMenuItem] {
-        var items: [NSMenuItem] = []
+        var items: [NSMenuItem] = meetingMenuItems()
         if commandTask != nil {
             items.append(ClosureMenuItem("Stop Command") { [weak self] in self?.stopCommand() })
         }
@@ -595,6 +666,15 @@ public final class DictationController: ObservableObject {
             log("dictation: quiet voice \(whisperMode ? "on" : "off")")
         })
         return items
+    }
+
+    /// Meeting notes: start them, or show and stop them while they run.
+    private func meetingMenuItems() -> [NSMenuItem] {
+        if meeting.isOn {
+            return [ClosureMenuItem("Show Meeting Notes") { [weak self] in self?.meeting.showPanel() },
+                    ClosureMenuItem("Stop Meeting Notes") { [weak self] in self?.meeting.stop() }]
+        }
+        return [ClosureMenuItem("Take Meeting Notes") { [weak self] in self?.startMeetingNotes() }]
     }
 
     public func menuItems() -> [NSMenuItem] {
@@ -678,8 +758,8 @@ public final class DictationController: ObservableObject {
         localItem.submenu = localMenu
         assistants.addItem(localItem)
         assistants.addItem(.separator())
-        for choice in [RouterChoice.anthropic, .openai] {
-            let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
+        for choice in [RouterChoice.anthropic, .openai, .sarvam] {
+            let provider = choice.provider
             let title = choice.hasKey ? "Change \(provider) API Key…" : "Add \(provider) API Key…"
             assistants.addItem(ClosureMenuItem(title) { [weak self] in _ = self?.askForKey(choice) })
         }
@@ -838,10 +918,11 @@ public final class DictationController: ObservableObject {
             if let fellBack = result.fellBack { log("dictation: used the default microphone instead of \(fellBack)") }
             onListening?()
             if let problem = result.clearVoiceProblem { log("dictation: clear voice isn't available with \(name): \(problem)") }
+            if let problem = result.plainProblem { log("dictation: can't record the microphone's own sound beside Clear voice: \(problem)") }
             if let retried = result.retried { log("dictation: the microphone started on a second try (first: \(retried))") }
             if let volume = result.inputVolume {
                 // Turned down too far to hear you clearly: raised now, for this dictation too.
-                if adjustsMicLevel, !result.cleaned, let device = result.device, let level = MicLevel.atStart(volume),
+                if adjustsMicLevel, let device = result.device, let level = MicLevel.atStart(volume),
                    setMicLevel(device, from: volume, to: level, why: "too low to hear you clearly") {
                     lowLevelNotice = nil
                 } else {
@@ -919,6 +1000,8 @@ public final class DictationController: ObservableObject {
 
     private func finishRecording() {
         let recorded = recorder.stop()
+        let cleaned = recorder.cleaned
+        let plain = cleaned ? recorder.plainSound() : []
         showingMicStart = false
         guard recorded.count >= minimumSamples else {
             phase = .idle
@@ -926,19 +1009,42 @@ public final class DictationController: ObservableObject {
             return
         }
         phase = .transcribing
-        let leveled = AudioLevel.normalize(recorded, maxGainDB: whisperMode ? 40 : 30, cleaned: recorder.cleaned)
+        let maxGainDB: Float = whisperMode ? 40 : 30
+        var leveled = AudioLevel.normalize(recorded, maxGainDB: maxGainDB, cleaned: cleaned)
         log(String(format: "dictation: speech %.0f dBFS, noise %.0f dBFS, noise −%.0f dB, gain +%.0f dB%@%@",
                    leveled.speechDB, leveled.noiseDB, leveled.noiseReducedDB, leveled.gainDB,
-                   recorder.cleaned ? " (clear voice)" : "", whisperMode ? " (quiet voice)" : ""))
-        // The level for next time, from how loud this voice arrived.
-        if adjustsMicLevel, !recorder.cleaned, let device = recorder.device,
+                   cleaned ? " (clear voice)" : "", whisperMode ? " (quiet voice)" : ""))
+        // What the microphone itself heard, beside Clear voice's sound.
+        let own = plain.count >= minimumSamples ? AudioLevel.normalize(plain, maxGainDB: maxGainDB) : nil
+        let ownHasVoice = own.map { $0.speechDB - $0.noiseDB >= Self.voiceOverNoiseDB } ?? false
+        if let own {
+            log(String(format: "dictation: the microphone itself heard speech %.0f dBFS, noise %.0f dBFS",
+                       own.speechDB, own.noiseDB))
+        }
+        // The level for next time, from how loud this voice arrived at the microphone.
+        let arrived = cleaned ? own : Optional(leveled)
+        if adjustsMicLevel, let arrived, let device = recorder.device,
            let volume = AudioDevices.inputVolume(device.id),
-           let level = MicLevel.after(volume: volume, speechDB: leveled.speechDB, noiseDB: leveled.noiseDB,
-                                      peakDB: MicLevel.peakDB(recorded)) {
+           let level = MicLevel.after(volume: volume, speechDB: arrived.speechDB, noiseDB: arrived.noiseDB,
+                                      peakDB: MicLevel.peakDB(cleaned ? plain : recorded)) {
             _ = setMicLevel(device, from: volume, to: level,
                             why: level > volume ? "your voice arrived faint" : "your voice arrived too loud")
         }
+        // Clear voice let a soft voice through faint (it takes a whisper for noise): the microphone's own sound
+        // instead, with Murmur's own noise removal and boost.
+        var backup: [Float]?
+        if let own, ownHasVoice {
+            if leveled.speechDB < Self.faintThroughClearVoiceDB {
+                log(String(format: "dictation: Clear voice let your voice through at only %.0f dBFS; using the "
+                           + "microphone's own sound (noise −%.0f dB, gain +%.0f dB)",
+                           leveled.speechDB, own.noiseReducedDB, own.gainDB))
+                leveled = own
+            } else {
+                backup = own.samples
+            }
+        }
         let samples = leveled.samples
+        let ownSound = backup
         lastSamples = samples
         // Next to no sound at all: the microphone isn't hearing you (muted, the wrong one, a closed lid).
         let silent = leveled.speechDB < -55
@@ -974,10 +1080,20 @@ public final class DictationController: ObservableObject {
                         + (kept.isEmpty ? "" : "; kept Parakeet's \(kept.map(\.description).joined(separator: ", "))")
                         + "; unsure words: \(DictationVocabulary.unsure(heard).isEmpty ? "none" : DictationVocabulary.unsure(heard))")
                 }
-                let text = TextCleanup.basic(raw)
+                var text = TextCleanup.basic(raw)
+                // Nothing heard in Clear voice's sound: what the microphone itself heard.
+                if text.isEmpty, let ownSound {
+                    let again = TextCleanup.basic(try await transcriber.transcribe(ownSound, vocabulary: vocabulary))
+                    log("dictation: no words in Clear voice's sound; the microphone's own gave \(again.count) characters")
+                    if !again.isEmpty {
+                        text = again
+                        lastSamples = ownSound
+                    }
+                }
                 let seconds = Double(samples.count) / 16_000
                 log(String(format: "dictation: %.1f s of audio → %ld characters in %.2f s",
                            seconds, text.count, Date().timeIntervalSince(started)))
+                if let note = await transcriber.lastNote { log("dictation: \(note)") }
                 if compare {
                     let unsure = DictationVocabulary.unsure(await transcriber.lastHeard)
                     let old = (try? await transcriber.transcribe(withoutPreRoll, pad: false)) ?? ""
@@ -1025,7 +1141,7 @@ public final class DictationController: ObservableObject {
                 if RouterDiagnostics.isKeyProblem(decision.reason), !warnedAboutKey {
                     // Say it once per launch; the words are still typed below.
                     warnedAboutKey = true
-                    let provider = RouterChoice.current == .openai ? "OpenAI" : "Anthropic"
+                    let provider = RouterChoice.current.provider
                     hud.flash("\(provider) rejected the API key. Change it in Commands & Assistants.", seconds: 4)
                     try? await Task.sleep(nanoseconds: 1_200_000_000)
                 }
@@ -1206,7 +1322,7 @@ public final class DictationController: ObservableObject {
             }
             stopPreparingClock()
             guard transcriber.model == model else { return }
-            modelStatus = "Speech model ready (\(model.short), on device)"
+            modelStatus = "Speech model ready (\(model.short), \(model.isLocal ? "on device" : "online"))"
             speechModelState = .ready
             log(String(format: "dictation: %@ ready in %.1f s", model.engine, Date().timeIntervalSince(started)))
             prepareVocabularyIfWanted()
@@ -1382,17 +1498,20 @@ extension DictationController {
     @discardableResult
     public func askForKey(_ choice: RouterChoice) -> Bool {
         guard let account = choice.keyAccount else { return true }
-        let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
+        let provider = choice.provider
         var problem: String?
         while true {
             let alert = NSAlert()
             alert.messageText = "\(provider) API key"
             alert.informativeText = (problem.map { "\($0)\n\n" } ?? "")
-                + "Used only for commands (your words, the front app's name and any selected text). Speech never "
-                + "leaves your Mac. Stored in your Keychain. Leave empty to remove the key."
+                + (choice == .sarvam
+                    ? "Used for what you pick Sarvam for: speech-to-text (your recordings go to Sarvam) or commands. "
+                        + "From dashboard.sarvam.ai. Stored in your Keychain. Leave empty to remove the key."
+                    : "Used only for commands (your words, the front app's name and any selected text). Speech never "
+                        + "leaves your Mac. Stored in your Keychain. Leave empty to remove the key.")
             if problem != nil { alert.alertStyle = .warning }
             let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
-            field.placeholderString = choice == .anthropic ? "sk-ant-…" : "sk-proj-…"
+            field.placeholderString = choice == .anthropic ? "sk-ant-…" : choice == .sarvam ? "sk_…" : "sk-proj-…"
             alert.accessoryView = field
             alert.addButton(withTitle: "Save")
             alert.addButton(withTitle: "Cancel")
@@ -1445,7 +1564,7 @@ extension DictationController {
 
     /// Checks a saved key with a real (one-token) request to the model commands use, and says how it went.
     public func testKey(_ choice: RouterChoice) {
-        let provider = choice == .anthropic ? "Anthropic" : "OpenAI"
+        let provider = choice.provider
         hud.show(.working("Checking the \(provider) key…"))
         Task { [weak self] in
             let result = await KeyCheck.verify(choice)
@@ -1462,7 +1581,7 @@ extension DictationController {
                 warning.runModal()
             } else {
                 self.log("command: \(provider) key works")
-                self.hud.flash("\(provider) key works with \(choice == .anthropic ? AnthropicRouter.model : OpenAIRouter.model)", seconds: 2.5, tone: .done)
+                self.hud.flash("\(provider) key works with \(choice.model)", seconds: 2.5, tone: .done)
             }
         }
     }

@@ -214,6 +214,7 @@ body { flex-direction: row; background: var(--page); color: var(--ink); }
 .pane .list .empty { padding: 12px 14px; font-size: 12.5px; color: var(--ink2); }
 .pane .row .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pane .row .name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+#ai-learned .row .name { font-weight: 500; }
 .pane .row .path, .pane .row .counts { font-size: 11.5px; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane .row .side { flex: none; text-align: right; }
 .pane .row .indexed { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -300,3 +301,23 @@ body { flex-direction: row; background: var(--page); color: var(--ink); }
 .pane .actions button { padding: 6px 14px; }
 .pane .facts { margin-top: 0; display: block; }
 .pane .row { align-items: center; outline: none; }
+
+/* Meetings (meetings.js): a card per meeting, its notes shown in place. */
+.meetings { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.meeting-card { border: 1px solid var(--line); border-radius: 12px; background: var(--card, var(--surface)); overflow: hidden; }
+.meeting-card > button.meeting-head {
+  width: 100%; display: flex; gap: 12px; align-items: flex-start; text-align: left; border: 0; background: transparent;
+  padding: 12px 14px; cursor: pointer; color: inherit; font: inherit;
+}
+.meeting-head .meeting-text { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.meeting-head b { font-size: 14px; }
+.meeting-head .meeting-sub { color: var(--secondary); font-size: 12.5px; }
+.meeting-head .meeting-gist { color: var(--secondary); font-size: 13px; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.meeting-body { padding: 4px 14px 12px; border-top: 1px solid var(--line); user-select: text; line-height: 1.5; }
+.meeting-body h1 { font-size: 16px; margin: 10px 0 6px; }
+.meeting-body h2 { font-size: 13.5px; margin: 12px 0 4px; }
+.meeting-body ul { margin: 0 0 6px; padding-left: 1.2em; }
+.meeting-body p { margin: 0 0 6px; }
+.meeting-actions { display: flex; gap: 6px; margin-top: 8px; }
+#meetings-search { margin-top: 14px; }

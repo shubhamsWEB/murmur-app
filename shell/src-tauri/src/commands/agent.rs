@@ -135,12 +135,34 @@ pub struct Agent<'a> {
     browser: Option<String>,
     /// It ended because it was stopped.
     stopped: bool,
+    /// Rules learned from earlier mistakes on commands like this (improve.rs), for the instructions.
+    lessons: Option<String>,
+    /// What each step did and whether it worked, and why it was sent back or stopped (for learning from it).
+    steps: Vec<(String, String, bool)>,
+    sent_back: Vec<String>,
+    used_model: bool,
 }
 
 impl<'a> Agent<'a> {
     pub fn new(host: &'a mut dyn Host, memory: &'a Memory, model: &'a dyn Model, local: &'a dyn Model) -> Agent<'a> {
         Agent { host, memory, model, local, utterance: String::new(), prefs: Preferences::default(), did: Vec::new(),
-                answer: None, offered: Vec::new(), awaiting_pick: false, browser: None, stopped: false }
+                answer: None, offered: Vec::new(), awaiting_pick: false, browser: None, stopped: false, lessons: None,
+                steps: Vec::new(), sent_back: Vec::new(), used_model: false }
+    }
+
+    /// Rules learned from earlier mistakes, given to the model with its instructions.
+    pub fn set_lessons(&mut self, lessons: Option<String>) {
+        self.lessons = lessons;
+    }
+
+    /// Each step (tool, what it did, whether it worked), and the times it was sent back.
+    pub fn trace(&self) -> (Vec<(String, String, bool)>, Vec<String>) {
+        (self.steps.clone(), self.sent_back.clone())
+    }
+
+    /// Whether the model ran (not only the quick path).
+    pub fn used_model(&self) -> bool {
+        self.used_model
     }
 
     /// The answer it showed last, if any (a question it asked, say).
@@ -326,7 +348,11 @@ impl<'a> Agent<'a> {
         if let Some(selection) = selection {
             situation += &format!("\nSelected text (what \"this\", \"it\" and \"the selection\" mean):\n\"\"\"\n{}\n\"\"\"", ai::cut(selection, 8000));
         }
-        let system = format!("{}\n\n{situation}", tools::system_prompt());
+        let mut system = format!("{}\n\n{situation}", tools::system_prompt());
+        if let Some(lessons) = &self.lessons {
+            system += &format!("\n\n{lessons}");
+        }
+        self.used_model = true;
         let tools = tools::all();
         let mut model = self.model;
         let mut turns = vec![Turn::User(utterance.to_string())];
@@ -343,6 +369,7 @@ impl<'a> Agent<'a> {
                 return;
             }
             if began.elapsed() > TIME_CAP {
+                self.sent_back.push("ran out of time before finishing".into());
                 self.host.log(&format!("command: stopped at step {} ({} s)", step + 1, began.elapsed().as_secs()));
                 self.wrap_up(model, &system, &turns, &tools);
                 return;
@@ -415,6 +442,7 @@ impl<'a> Agent<'a> {
                 }
                 // Nothing at all: ask once more rather than stop silently half-way.
                 if nudged {
+                    self.sent_back.push("twice replied with nothing at all".into());
                     self.wrap_up(model, &system, &turns, &tools);
                     return;
                 }
@@ -440,6 +468,7 @@ impl<'a> Agent<'a> {
                 if call.name == "done" {
                     if checks_before_done < 1 && more_steps && !did_more_than_open {
                         checks_before_done += 1;
+                        self.sent_back.push("said it was done after only opening something".into());
                         self.host.log(&format!("command: done at step {} after only opening something; going on", step + 1));
                         turns.push(result(call, &format!("Not done yet. The user asked: \"{utterance}\". So far you only opened \
                             something. Do the rest now (write it, search it, answer it), then call done.")));
@@ -491,6 +520,7 @@ impl<'a> Agent<'a> {
             repeats = if signature == last_signature && !browsing { repeats + 1 } else { 0 };
             last_signature = signature;
             if repeats >= 2 {
+                self.sent_back.push("went round in circles (the same step three times)".into());
                 self.host.log("command: the same step three times; stopping");
                 self.wrap_up(model, &system, &turns, &tools);
                 return;
@@ -501,6 +531,7 @@ impl<'a> Agent<'a> {
             }
             self.host.progress(&format!("Working… (step {})", step + 2));
         }
+        self.sent_back.push(format!("ran out of steps ({MAX_STEPS})"));
         self.host.log(&format!("command: stopped after {MAX_STEPS} steps"));
         self.wrap_up(model, &system, &turns, &tools);
     }
@@ -549,6 +580,7 @@ impl<'a> Agent<'a> {
     /// Runs a tool, and keeps what it did for the next command.
     fn execute(&mut self, call: &Call, routing: bool) -> Outcome {
         let (outcome, opened) = self.perform(call, routing);
+        self.steps.push((call.name.clone(), ai::cut(&outcome.result, 200), !super::improve::failed(&outcome.result)));
         let said = ai::cut(&outcome.result, 200).replace('\n', " ⏎ ");
         self.host.log(&format!("command:   ↳ {said}{}", if outcome.result.chars().count() > 200 { "…" } else { "" }));
         let mut arguments: Map<String, Value> = call.arguments.iter()

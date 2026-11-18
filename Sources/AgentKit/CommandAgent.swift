@@ -207,6 +207,15 @@ public final class CommandAgent {
     /// The last reply held back (not shown) and nothing shown since: if the run then ends with done, it's shown,
     /// rather than ending with nothing said ("Want me to go ahead?" held back, then done).
     private var unshownReply = ""
+    /// Rules Murmur learned from earlier mistakes, given to the model for this command (SelfImprovement).
+    private var lessons: [SelfImprovement.Lesson] = []
+    /// The last command as it went, and when it ended: if what you say next corrects it ("no, I meant…"), that's
+    /// a mistake to learn from.
+    private var lastRun: (run: SelfImprovement.Run, at: Date)?
+    /// A run is being reflected on (one at a time).
+    private var reflecting = false
+    /// The model running this command, as the self-improvement memory keeps it ("claude-haiku-5-5").
+    private var learnModel = ""
 
     /// Tools that do something in an app or on the screen (typing, clicking, sending, scripting an app), as opposed
     /// to looking, opening, or working something out. run_command counts only when it changes the user's things.
@@ -410,6 +419,22 @@ public final class CommandAgent {
             return
         }
         defer { CommandMemory.record(said: utterance, app: app, window: window, actions: did, answer: shown.answer) }
+        // You correcting the last command straight after ("no, I meant the other one"): a mistake to learn from.
+        // Not "no" to a question it asked you.
+        if let previous = lastRun, Date().timeIntervalSince(previous.at) < 120, SelfImprovement.isOn,
+           SelfImprovement.isCorrection(utterance),
+           !(previous.run.answer?.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") ?? false) {
+            var corrected = previous.run
+            corrected.correction = utterance
+            for change in SelfImprovement.shared.correct(corrected.lessons, model: corrected.model, request: corrected.request) {
+                host.log("self-improvement: \(change)")
+            }
+            reflect(on: corrected)
+        }
+        lastRun = nil
+        lessons = []
+        learnModel = ""
+        defer { selfImprove(app: app, window: window) }
         // What the model worked on in this window, for the next command here ("do it", "the rest", "all of it").
         defer {
             if routing {
@@ -551,7 +576,7 @@ public final class CommandAgent {
 
     /// What to say when a command needs a model and there's none: Ollama isn't on this Mac and no cloud key worked.
     public nonisolated static let needsModel =
-        "Commands like this need a model. Install Ollama, or add a Claude or OpenAI key in Commands & AI."
+        "Commands like this need a model. Install Ollama, or add a Claude, OpenAI or Sarvam key in Commands & AI."
 
     /// The earlier file a query names: its path or exact name, or every word of the query found in the name.
     nonisolated static func earlierFile(_ query: String, recent: [String]) -> String? {
@@ -834,6 +859,62 @@ public final class CommandAgent {
         }
     }
 
+    // MARK: - Self-improvement
+
+    /// After a command the model ran: whether each learned rule it was given helped (the evidence that keeps or
+    /// retires it), and, when the command went wrong, a reflection that diagnoses why and proposes a rule.
+    private func selfImprove(app: String?, window: String?) {
+        guard SelfImprovement.isOn, routing, !learnModel.isEmpty else { return }
+        var sentBack: [String] = []
+        if finish.nothingDoneChecks > 0 { sentBack.append("said it was done without having changed anything on the screen") }
+        if finish.unfinishedChecks > 0 { sentBack.append("said it was done while its own reply showed work left") }
+        if finish.permissionChecks > 0 { sentBack.append("stopped to ask permission to go on instead of carrying on") }
+        let run = SelfImprovement.Run(request: utterance, app: app, window: window, model: learnModel,
+                                      steps: trace.steps.map { (tool: $0.tool, text: $0.text, worked: $0.worked) },
+                                      sentBack: sentBack, stopped: stoppedEarly, answer: shown.answer, lessons: lessons)
+        for change in SelfImprovement.shared.observe(lessons, worked: !run.wentWrong, model: run.model, request: run.request) {
+            host.log("self-improvement: \(change)")
+        }
+        lastRun = (run, Date())
+        if run.wentWrong { reflect(on: run) }
+    }
+
+    /// The paper's proposer: the commands' AI reads the run and the whole self-improvement memory, and names the root
+    /// cause and a rule (or nothing). In the background; with a cloud model only, unless `defaults write
+    /// com.copico.Murmur selfImprovement.local -bool true` (a small local model's diagnoses are rarely worth keeping).
+    private func reflect(on run: SelfImprovement.Run) {
+        guard !reflecting else { return }
+        let router = currentRouter()
+        if router is OllamaRouter, !UserDefaults.standard.bool(forKey: "selfImprovement.local") {
+            host.log("self-improvement: \"\(run.request.prefix(60))\" went wrong; not reflecting with a local model")
+            return
+        }
+        reflecting = true
+        let memory = SelfImprovement.shared
+        let prompt = memory.reflection(on: run)
+        host.log("self-improvement: reflecting on \"\(run.request.prefix(60))\"")
+        Task { [weak self] in
+            defer { self?.reflecting = false }
+            var reply = ""
+            do {
+                for try await piece in router.write(system: SelfImprovement.reflectSystem, prompt: prompt,
+                                                    maxTokens: 900, thorough: true) {
+                    reply += piece
+                }
+            } catch {
+                self?.host.log("self-improvement: couldn't reflect: \(error.localizedDescription)")
+                return
+            }
+            guard let proposal = SelfImprovement.proposal(from: reply) else {
+                self?.host.log("self-improvement: couldn't read the reflection: \(reply.prefix(200))")
+                return
+            }
+            let changes = memory.learn(proposal, request: run.request, app: run.app, model: run.model)
+            if changes.isEmpty { self?.host.log("self-improvement: nothing new to learn (\(proposal.rootCause.prefix(80)))") }
+            for change in changes { self?.host.log("self-improvement: \(change)") }
+        }
+    }
+
     // MARK: - Router loop
 
     /// The router for this command: the cloud model you chose, else the local one.
@@ -915,6 +996,21 @@ public final class CommandAgent {
         var router = currentRouter()
         activeRouter = router
         trace.model = router is OllamaRouter ? routerModel : router.name
+        // Rules learned from earlier mistakes on commands like this one, unless they didn't help with this model.
+        // By model, since a rule that helps one model can hurt another.
+        switch router {
+        case is AnthropicRouter: learnModel = AnthropicRouter.model
+        case let openAI as OpenAIRouter: learnModel = openAI.provider.model
+        default: learnModel = trace.model
+        }
+        if SelfImprovement.isOn {
+            lessons = SelfImprovement.shared.lessons(for: utterance, app: ScreenControl.workingApp()?.localizedName ?? frontApp,
+                                                     model: learnModel)
+            if let rules = SelfImprovement.prompt(lessons) {
+                context += "\n\n" + rules
+                host.log("command: learned rules given: " + lessons.map { "[\($0.attempt)] \($0.rule)" }.joined(separator: " | "))
+            }
+        }
         // A local model gets the tool sets this request needs (more when it asks, or calls one); a cloud model, all.
         if router is OllamaRouter {
             groups = ToolGroup.select(QuickCommands.clean(utterance), frontIsBrowser: BrowserControl.inFront() != nil,

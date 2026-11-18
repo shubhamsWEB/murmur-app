@@ -51,13 +51,18 @@ pub struct Settings {
     pub speech_model: String,
     pub microphone: String,
     pub quiet_voice_off: bool,
+    /// With the Sarvam model: how it writes ("" for English letters, "spoken", "english") and the language it expects
+    /// ("" for detecting it).
+    pub sarvam_output: String,
+    pub sarvam_language: String,
     /// The Murmur button on screen (on unless turned off), and where it was left (physical pixels).
     pub floating_button_off: bool,
     /// Dictation's history (on unless turned off: Home's "This week"), and keeping every recording (off).
     pub history_off: bool,
     pub keep_recordings: bool,
     pub floating_button_at: Option<(i32, i32)>,
-    /// Commands & AI (commands/mod.rs): the model ("" or "local" for Ollama on this PC, "anthropic", "openai"), each
+    /// Commands & AI (commands/mod.rs): the model ("" or "local" for Ollama on this PC, "anthropic", "openai",
+    /// "sarvam"), each
     /// one's model name ("" for the default), the Anthropic workspace for an organization's key, AI clean-up of
     /// dictation (off by default, as on the Mac) and its style for each kind of app ("personal": "casual"…), and
     /// commands told apart from dictation without Shift (on unless turned off). The keys themselves are in Windows'
@@ -66,6 +71,7 @@ pub struct Settings {
     pub local_model: String,
     pub anthropic_model: String,
     pub openai_model: String,
+    pub sarvam_model: String,
     pub anthropic_workspace: String,
     pub ai_cleanup: bool,
     /// The model clean-up uses: "" for Murmur Cleanup when it's in Ollama (else the commands' model), "commands" for
@@ -73,6 +79,22 @@ pub struct Settings {
     pub cleanup_model: String,
     pub cleanup_styles: BTreeMap<String, String>,
     pub detect_commands_off: bool,
+    /// Commands don't learn from their mistakes (they do unless this is turned on).
+    pub learn_off: bool,
+    /// Murmur's windows show in screen sharing and recordings (they're left out unless this is turned on).
+    pub show_in_sharing: bool,
+    /// Meeting notes (meeting/mod.rs): offering them when a meeting app turns on the microphone (on unless turned off),
+    /// answering by itself (on unless turned off), the AI for answers and notes ("" for the commands' model), who
+    /// transcribes ("" for dictation's model, "sarvam", "openai"), your standing instructions, and the panel's look.
+    pub meeting_offer_off: bool,
+    pub meeting_auto_answer_off: bool,
+    pub meeting_ai: String,
+    pub meeting_speech: String,
+    pub meeting_instructions: String,
+    pub meeting_layout: String,
+    pub meeting_opacity: Option<f64>,
+    pub meeting_solid_on_hover_off: bool,
+    pub meeting_text_size: Option<f64>,
 }
 
 impl Settings {
@@ -87,6 +109,10 @@ impl Settings {
             floating_button: !self.floating_button_off,
             keep_history: !self.history_off,
             keep_recordings: self.keep_recordings,
+            sarvam: crate::dictation::cloud::Sarvam {
+                output: crate::dictation::cloud::Output::from_name(&self.sarvam_output),
+                language: if self.sarvam_language == "unknown" { String::new() } else { self.sarvam_language.clone() },
+            },
         }
     }
 }
@@ -100,12 +126,14 @@ impl Settings {
                 local_model: self.local_model.clone(),
                 anthropic_model: self.anthropic_model.clone(),
                 openai_model: self.openai_model.clone(),
+                sarvam_model: self.sarvam_model.clone(),
                 anthropic_workspace: self.anthropic_workspace.clone(),
             },
             cleanup: self.ai_cleanup,
             own_cleanup: self.cleanup_model != "commands",
             styles: self.cleanup_styles.clone(),
             detect: !self.detect_commands_off,
+            learn: !self.learn_off,
         }
     }
 }

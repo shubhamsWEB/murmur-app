@@ -45,6 +45,7 @@ enum ConfirmPanel {
         // Above every window, floating panels included: a question nobody sees is a command that never finishes.
         panel.level = .screenSaver
         panel.isMovableByWindowBackground = true
+        PrivateWindows.apply(panel)
         // On every Space, over full-screen apps. (.moveToActiveSpace can't be combined with .canJoinAllSpaces:
         // AppKit throws, and every confirmation crashed Murmur.)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]

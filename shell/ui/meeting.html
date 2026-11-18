@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Murmur · Meeting notes</title>
+  <link rel="stylesheet" href="meeting.css">
+</head>
+<!-- Meeting notes (src-tauri/src/meeting): the panel beside the call, as the Mac's MeetingPanel. Live answers you can
+     read out, the notes as they're kept, the transcript, and what the meeting is about. Kept out of screen sharing.
+     With ?offer=<app>, the small card that offers notes when a call starts. -->
+<body>
+  <!-- Offered when a meeting app turns on the microphone. -->
+  <div class="offer" id="offer" hidden>
+    <img class="offer-icon" src="icon.png" alt="">
+    <div class="offer-text"><b>Take notes of this meeting?</b><span id="offer-app"></span></div>
+    <div class="offer-actions">
+      <button class="secondary" id="offer-no">Not now</button>
+      <button class="primary" id="offer-yes">Take notes</button>
+    </div>
+  </div>
+
+  <!-- Folded into a pill at the top of the screen. -->
+  <button class="folded" id="folded" hidden>
+    <span class="dot" id="folded-dot"></span><span id="folded-text">Meeting notes</span>
+  </button>
+
+  <div class="panel" id="panel" hidden>
+    <header class="head" data-tauri-drag-region>
+      <span class="dot" id="live-dot" data-tauri-drag-region></span>
+      <span class="title" id="title" data-tauri-drag-region>Meeting notes</span>
+      <span class="meters" data-tauri-drag-region title="Them · You">
+        <span class="meter"><span id="meter-call"></span></span><span class="meter"><span id="meter-mic"></span></span>
+      </span>
+      <span class="spacer" data-tauri-drag-region></span>
+      <button class="icon" id="layout" title="Read near the camera" aria-label="Read near the camera">
+        <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5 H20.5"/></svg>
+      </button>
+      <button class="icon" id="fold" title="Fold into a pill" aria-label="Fold into a pill">
+        <svg viewBox="0 0 24 24"><path d="M6 15 L12 9 L18 15"/></svg>
+      </button>
+      <button class="icon" id="close" title="Close" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M7 7 L17 17 M17 7 L7 17"/></svg>
+      </button>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="live" aria-selected="true">Live</button>
+      <button role="tab" data-tab="notes">Notes</button>
+      <button role="tab" data-tab="transcript">Transcript</button>
+      <button role="tab" data-tab="context">Context</button>
+    </nav>
+
+    <div class="problem" id="problem" hidden><span id="problem-text"></span><button class="link" id="problem-close">Dismiss</button></div>
+
+    <!-- Live: the answer to read out. -->
+    <section class="tab" id="tab-live">
+      <div class="reader" id="reader" aria-live="polite"></div>
+      <div class="pager" id="pager" hidden>
+        <button class="small" id="copy-answer">Copy</button>
+        <span class="spacer"></span>
+        <button class="icon" id="previous" aria-label="Previous answer"><svg viewBox="0 0 24 24"><path d="M15 6 L9 12 L15 18"/></svg></button>
+        <span class="count" id="page"></span>
+        <button class="icon" id="next" aria-label="Next answer"><svg viewBox="0 0 24 24"><path d="M9 6 L15 12 L9 18"/></svg></button>
+      </div>
+      <div class="actions">
+        <button class="primary" id="answer-now">Answer now <kbd id="hotkey"></kbd></button>
+        <button class="small" id="screen" title="Answer about what's on the meeting's screen">Screen</button>
+        <button class="small" id="more" aria-haspopup="menu">More…</button>
+        <span class="spacer"></span>
+        <label class="toggle" title="Answer questions by itself"><input type="checkbox" id="auto"><span>Auto</span></label>
+        <label class="toggle" title="Leave your microphone out of the notes"><input type="checkbox" id="mute"><span>Mute me</span></label>
+      </div>
+      <div class="menu" id="menu" role="menu" hidden>
+        <button role="menuitem" id="say-next">What should I say?</button>
+        <button role="menuitem" id="follow-ups">Follow-up questions</button>
+        <button role="menuitem" id="recap">Recap so far</button>
+      </div>
+      <form class="ask" id="ask-form">
+        <input id="ask" type="text" placeholder="Ask privately: “what's a good counter-offer?”" autocomplete="off" spellcheck="true">
+        <button class="small" type="submit">Ask</button>
+      </form>
+    </section>
+
+    <!-- Notes: kept as it goes; the final ones when it ends. -->
+    <section class="tab" id="tab-notes" hidden>
+      <div class="notes" id="notes"></div>
+      <div class="email" id="email"></div>
+    </section>
+
+    <section class="tab" id="tab-transcript" hidden>
+      <div class="lines" id="lines"></div>
+    </section>
+
+    <section class="tab" id="tab-context" hidden>
+      <div class="form">
+        <label><b>What this meeting is about</b>
+          <textarea id="about" rows="3" placeholder="An interview for a staff frontend role at Sarvam; my background is…"></textarea></label>
+        <label><b>Your instructions</b><span>For every meeting.</span>
+          <textarea id="instructions" rows="3" placeholder="Answer as a senior engineer. Keep it short."></textarea></label>
+        <div class="field"><b>Documents</b><span>An agenda, a spec, your resume (text, Markdown, Word, web pages; up to five).</span>
+          <div class="documents" id="documents"></div>
+          <button class="small" id="add-documents">Add files…</button></div>
+        <label><b>AI for answers and notes</b><select id="ai"></select>
+          <span>A cloud AI keeps the work off this PC; the conversation goes to that provider.</span></label>
+        <label><b>Speech for meetings</b><select id="speech">
+            <option value="">Same as dictation</option>
+            <option value="sarvam">Sarvam (cloud)</option>
+            <option value="openai">OpenAI gpt-4o-mini-transcribe (cloud)</option>
+          </select><span>Who turns what's said into text, apart from the AI. From the next meeting.</span></label>
+        <div class="field"><b>See-through</b>
+          <div class="row"><input type="range" id="opacity" min="35" max="100" step="5"><span id="opacity-value"></span></div>
+          <label class="toggle"><input type="checkbox" id="solid"><span>Solid when the pointer is on it</span></label></div>
+        <div class="field"><b>Answer text</b>
+          <div class="row"><button class="small" id="smaller" aria-label="Smaller text">A−</button>
+            <button class="small" id="bigger" aria-label="Bigger text">A+</button></div></div>
+        <label class="toggle"><input type="checkbox" id="offers"><span>Offer notes when a call starts</span></label>
+        <p class="note">This panel is left out of screen sharing and recordings. Notes are saved to Documents › Murmur Meetings.</p>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span class="status" id="status"></span>
+      <span class="spacer"></span>
+      <button class="small" id="show-file" hidden>Show file</button>
+      <button class="small" id="copy-notes">Copy notes</button>
+      <button class="primary" id="stop">Stop</button>
+    </footer>
+  </div>
+  <script src="meeting.js"></script>
+</body>
+</html>

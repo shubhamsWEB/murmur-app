@@ -11,6 +11,8 @@ pub fn shape_problem(provider: Provider, key: &str) -> Option<String> {
             "OpenAI keys start with “sk-” (project keys with “sk-proj-”). This one starts with “{start}…”, so part of it may be missing.")),
         Provider::Anthropic if !key.starts_with("sk-ant-") => Some(format!(
             "Anthropic keys start with “sk-ant-”. This one starts with “{start}…”, so part of it may be missing.")),
+        Provider::Sarvam if key.starts_with("sk-ant-") || key.starts_with("sk-proj-") => Some(
+            "That looks like an Anthropic or OpenAI key. Sarvam's keys are at dashboard.sarvam.ai → API Keys.".into()),
         _ if key.chars().count() < 20 => Some("That key looks too short.".into()),
         _ => None,
     }

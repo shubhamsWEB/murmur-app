@@ -18,34 +18,77 @@ use std::time::Instant;
 
 pub const ARGUMENT: &str = "--speech-worker";
 
-/// The model where it runs: in Murmur (Parakeet, quick and small) or in a worker (Hinglish).
+/// The model where it runs: in Murmur (Parakeet, quick and small), in a worker (Hinglish), or online (Sarvam).
 pub enum Engine {
     Here(Recognizer),
     Apart(Worker),
+    Online(Online),
+}
+
+/// Sarvam's speech-to-text, with how it should listen; English on this PC (when it's downloaded) for a dictation
+/// Sarvam can't be reached for, loaded then.
+pub struct Online {
+    pub choice: Mutex<super::cloud::Sarvam>,
+    offline: Mutex<Option<Recognizer>>,
 }
 
 impl Engine {
-    /// Loads `model`: the Hinglish one in a worker, whose output goes to `log`.
+    /// Loads `model`: the Hinglish one in a worker, whose output goes to `log`; Sarvam needs only its key.
     pub fn load(model: Model, folder: &Path, log: &Path) -> Result<Engine, String> {
-        if model == Model::Hinglish {
-            Worker::start(model, folder, log).map(Engine::Apart)
-        } else {
-            Recognizer::load(model, folder).map(Engine::Here)
+        match model {
+            Model::Hinglish => Worker::start(model, folder, log).map(Engine::Apart),
+            Model::Sarvam => {
+                if !super::cloud::has_key("sarvam") {
+                    return Err("Sarvam needs its API key: add it in Settings → Commands & AI (Model: Sarvam)".into());
+                }
+                Ok(Engine::Online(Online { choice: Mutex::new(Default::default()), offline: Mutex::new(None) }))
+            }
+            _ => Recognizer::load(model, folder).map(Engine::Here),
         }
     }
 
     pub fn warm_up(&self) -> f64 {
         match self {
             Engine::Here(recognizer) => recognizer.warm_up(),
-            Engine::Apart(_) => 0.0, // Whisper isn't warmed up (speech.rs says why)
+            Engine::Apart(_) | Engine::Online(_) => 0.0, // Whisper isn't warmed up (speech.rs says why)
         }
     }
 
-    /// The words in a recording; an error when the worker has stopped (with how it ended).
+    /// Whether it runs on this PC.
+    pub fn is_local(&self) -> bool {
+        !matches!(self, Engine::Online(_))
+    }
+
+    /// How Sarvam listens (nothing for the models on this PC).
+    pub fn set_sarvam(&self, choice: super::cloud::Sarvam) {
+        if let Engine::Online(online) = self {
+            *online.choice.lock().unwrap() = choice;
+        }
+    }
+
+    /// The words in a recording; an error when the worker has stopped (with how it ended), or Sarvam couldn't do it.
     pub fn words(&self, samples: &[f32], rate: u32) -> Result<String, String> {
         match self {
             Engine::Here(recognizer) => Ok(recognizer.words(samples, rate)),
             Engine::Apart(worker) => worker.words(samples, rate),
+            Engine::Online(online) => {
+                let choice = online.choice.lock().unwrap().clone();
+                match crate::ai::blocking(super::cloud::sarvam(samples, rate, &choice)) {
+                    Ok(text) => Ok(super::speech::tidy(&text)),
+                    // Offline: English on this PC rather than losing what was said.
+                    Err(crate::ai::AiError::Unreachable(_)) => {
+                        let folder = super::speech::default_folder(Model::English)
+                            .filter(|folder| super::speech::installed(Model::English, folder))
+                            .ok_or("Couldn't reach Sarvam. Check your internet connection.")?;
+                        let mut offline = online.offline.lock().unwrap();
+                        if offline.is_none() {
+                            *offline = Some(Recognizer::load(Model::English, &folder)?);
+                        }
+                        Ok(offline.as_ref().map(|r| r.words(samples, rate)).unwrap_or_default())
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
         }
     }
 }

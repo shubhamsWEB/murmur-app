@@ -90,14 +90,16 @@ public final class ScreenMemory {
         process.executableURL = url
         process.qualityOfService = .background
         process.standardOutput = FileHandle.nullDevice
-        // Reading with Claude or OpenAI: the helper gets the key on its standard input (it can't read Murmur's
+        // Reading with Claude, OpenAI or Sarvam: the helper gets the key on its standard input (it can't read Murmur's
         // Keychain items itself), never in its arguments or environment.
         var handoff: String?
         if let provider = settings.cloudReader, let choice = RouterChoice(rawValue: provider), let account = choice.keyAccount,
            let key = Keychain.get(account) {
             handoff = CloudReader.handoff(anthropic: choice == .anthropic ? key : nil, anthropicModel: AnthropicRouter.model,
                                           workspace: AnthropicWorkspace.id, openai: choice == .openai ? key : nil,
-                                          openaiModel: OpenAIRouter.model)
+                                          openaiModel: OpenAIRouter.model,
+                                          sarvam: choice == .sarvam ? key : nil,
+                                          sarvamModel: ChatCompletions.sarvam.model)
         }
         let input = Pipe()
         if handoff != nil {

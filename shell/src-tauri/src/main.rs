@@ -16,7 +16,9 @@ mod hotkey;
 mod hours;
 mod moments;
 mod ocr;
+mod meeting;
 mod options;
+mod privacy;
 mod settings;
 mod status;
 mod tray_icon;
@@ -665,10 +667,18 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--at-login"])))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _, event| {
-                    if event.state == ShortcutState::Pressed {
-                        toggle_panel(app);
+                .with_handler(|app, shortcut, event| {
+                    if event.state != ShortcutState::Pressed {
+                        return;
                     }
+                    // Ctrl+Alt+Enter while meeting notes run: answer now.
+                    if meeting::is_hotkey(shortcut) {
+                        if let Some(meeting) = app.try_state::<Arc<meeting::Meeting>>() {
+                            meeting.inner().clone().answer_now();
+                        }
+                        return;
+                    }
+                    toggle_panel(app);
                 })
                 .build(),
         )
@@ -681,7 +691,8 @@ fn main() {
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, dictation_info,
             set_dictation, download_speech_model, logo_clicked, logo_menu, dictation_action, assistant_info,
-            set_assistant, save_api_key, check_ai, ollama_models, download_cleanup_model, forget_memory, answer_text, answer_fit, answer_close
+            set_assistant, save_api_key, check_ai, ollama_models, download_cleanup_model, forget_memory, answer_text, answer_fit, answer_close,
+            set_hide_from_sharing, meeting_state, meeting_action, meetings_list
         ])
         .build(tauri::generate_context!())
         .expect("Murmur couldn't start");
@@ -859,6 +870,20 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     };
     app.manage(assistant);
     step("commands ready");
+    // Meeting notes: offered when a meeting app turns on the microphone, or started from the tray or Meetings.
+    let meeting = {
+        let reader = shell.clone();
+        let writer = shell.clone();
+        meeting::Meeting::new(&handle, &shell.logs, meeting::Store {
+            read: Box::new(move || reader.settings.lock().unwrap().clone()),
+            edit: Box::new(move |change| {
+                let mut settings = writer.settings.lock().unwrap();
+                change(&mut settings);
+                let _ = settings.save(&writer.settings_path);
+            }),
+        })
+    };
+    app.manage(meeting);
     if shell.settings.lock().unwrap().delete_code_index {
         delete_code_index(&shell);
     }
@@ -936,6 +961,9 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         }
     }
     step("started");
+    // Murmur's windows out of screen sharing (unless that's turned off), now and as they're made.
+    privacy::set(&handle, !shell.settings.lock().unwrap().show_in_sharing);
+    privacy::watch(&handle);
     watch_hours(&handle);
     updates::start(&handle);
     // The entry that opens Murmur at login is written again: it follows Murmur if it moved, and older ones didn't say
@@ -1342,6 +1370,7 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
         },
         "state": shell.snapshot(),
         "updateChecks": !settings.update_checks_off,
+        "hideFromSharing": !settings.show_in_sharing,
         "installsUpdates": updates::installs_itself(),
         "version": app.package_info().version.to_string(),
         "licenses": licenses_file(&app).is_some(),
@@ -1659,6 +1688,18 @@ fn with_exec(text: &str, exec: &str) -> String {
     lines.join("\n")
 }
 
+/// Murmur's windows left out of screen sharing (privacy.rs), or not.
+#[tauri::command]
+fn set_hide_from_sharing(app: AppHandle, shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), String> {
+    {
+        let mut settings = shell.settings.lock().unwrap();
+        settings.show_in_sharing = !on;
+        settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+    }
+    privacy::set(&app, on);
+    Ok(())
+}
+
 /// The model on the processor from now on (the running search service and indexing helper are ended; they start
 /// again with the new environment when next needed).
 #[tauri::command]
@@ -1701,6 +1742,8 @@ fn set_dictation(app: AppHandle, choice: String, value: Value) -> Result<(), Str
             "floatingButton" => settings.floating_button_off = !value.as_bool().unwrap_or(true),
             "keepHistory" => settings.history_off = !value.as_bool().unwrap_or(true),
             "keepRecordings" => settings.keep_recordings = value.as_bool().unwrap_or(false),
+            "sarvamOutput" => settings.sarvam_output = text,
+            "sarvamLanguage" => settings.sarvam_language = text,
             _ => return Err(format!("no dictation setting called {choice}")),
         }
         settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
@@ -1718,7 +1761,8 @@ fn assistant_info(app: AppHandle) -> Value {
     app.state::<Arc<commands::Assistant>>().info()
 }
 
-/// One of its choices: "provider" ("local", "anthropic", "openai"), "localModel", "anthropicModel", "openaiModel",
+/// One of its choices: "provider" ("local", "anthropic", "openai", "sarvam"), "localModel", "anthropicModel",
+/// "openaiModel", "sarvamModel",
 /// "workspace" (text), "cleanup" and "detect" (true or false), "style" ({category, style}).
 #[tauri::command(async)]
 fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), String> {
@@ -1731,10 +1775,12 @@ fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), Str
             "localModel" => settings.local_model = text,
             "anthropicModel" => settings.anthropic_model = text,
             "openaiModel" => settings.openai_model = text,
+            "sarvamModel" => settings.sarvam_model = text,
             "workspace" => settings.anthropic_workspace = text,
             "cleanup" => settings.ai_cleanup = value.as_bool().unwrap_or(false),
             "cleanupModel" => settings.cleanup_model = if text == "commands" { text } else { String::new() },
             "detect" => settings.detect_commands_off = !value.as_bool().unwrap_or(true),
+            "learn" => settings.learn_off = !value.as_bool().unwrap_or(true),
             "style" => {
                 let category = value["category"].as_str().unwrap_or_default().to_string();
                 let style = value["style"].as_str().unwrap_or_default().to_string();
@@ -1746,7 +1792,7 @@ fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), Str
         settings.assistant()
     };
     // A new model or key setting: what went wrong before may not any more.
-    if matches!(choice.as_str(), "provider" | "anthropicModel" | "openaiModel" | "workspace") {
+    if matches!(choice.as_str(), "provider" | "anthropicModel" | "openaiModel" | "sarvamModel" | "workspace") {
         ai::set_last_error(None);
     }
     app.state::<Arc<commands::Assistant>>().set_choices(choices);
@@ -1769,6 +1815,10 @@ async fn save_api_key(app: AppHandle, provider: String, key: String) -> Result<O
     }
     ai::keys::set(account, key.trim())?;
     ai::set_last_error(None);
+    // Sarvam's key also does its speech-to-text: dictation with Sarvam can start now.
+    if provider == ai::Provider::Sarvam && !key.trim().is_empty() {
+        app.state::<dictation::Dictation>().ensure_loaded();
+    }
     if key.trim().is_empty() {
         return Ok(None);
     }
@@ -1801,9 +1851,39 @@ fn forget_memory(app: AppHandle, id: String) {
     let assistant = app.state::<Arc<commands::Assistant>>();
     if id == "all" {
         assistant.memory.forget(true);
+        assistant.improve.forget_all();
+    } else if let Some(problem) = id.strip_prefix("learned:") {
+        assistant.improve.forget(problem);
     } else {
         assistant.memory.remove(&id);
     }
+}
+
+// Meeting notes (meeting/mod.rs): the panel's state and controls, and the meetings saved. Off the main thread: the
+// panel's page calls in while Murmur makes or moves its window there.
+
+#[tauri::command(async)]
+fn meeting_state(app: AppHandle) -> Value {
+    app.state::<Arc<meeting::Meeting>>().snapshot()
+}
+
+/// One of the panel's (or the Meetings page's) controls: "start", "stop", "answerNow", "ask" (text), "auto" (on)…
+#[tauri::command(async)]
+fn meeting_action(app: AppHandle, action: String, value: Option<Value>) -> Result<(), String> {
+    let meeting = app.state::<Arc<meeting::Meeting>>().inner().clone();
+    meeting.action(&action, &value.unwrap_or(Value::Null))
+}
+
+/// Meetings: the notes saved, newest first, and where they're kept.
+#[tauri::command(async)]
+fn meetings_list(app: AppHandle) -> Value {
+    let meeting = app.state::<Arc<meeting::Meeting>>();
+    json!({
+        "meetings": meeting::saved(),
+        "folder": meeting::Meeting::folder().map(|f| f.display().to_string()),
+        "running": meeting.is_running(),
+        "state": meeting.snapshot(),
+    })
 }
 
 // The answer card's commands, off the main thread (commands/answer.rs says why).
@@ -1935,6 +2015,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let paste_last = MenuItem::with_id(app, "paste-last", "Paste Last Dictation", true, None::<&str>)?;
     let paste_heard = MenuItem::with_id(app, "paste-heard", "Paste Exactly What I Said", true, None::<&str>)?;
     let stop_command = MenuItem::with_id(app, "stop-command", "Stop Command", true, None::<&str>)?;
+    let meeting_notes = MenuItem::with_id(app, "meeting", "Take Meeting Notes", true, None::<&str>)?;
     let folders = MenuItem::with_id(app, "folders", "Folders…", true, None::<&str>)?;
     let index = MenuItem::with_id(app, "index", "Index Now", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause Indexing", true, None::<&str>)?;
@@ -1944,7 +2025,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &separator, &search, &paste_last, &paste_heard, &stop_command, &open, &folders, &index, &pause, &settings, &check,
+        &[&status, &separator, &search, &paste_last, &paste_heard, &stop_command, &meeting_notes, &open, &folders, &index, &pause, &settings, &check,
           &PredefinedMenuItem::separator(app)?, &quit_item],
     )?;
     // Murmur's logo, in its colors (tray_icon.rs).
@@ -1960,6 +2041,10 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
             "open" => show_window_or_setup(app),
             "paste-last" => app.state::<dictation::Dictation>().paste_last(),
             "paste-heard" => app.state::<dictation::Dictation>().paste_heard(),
+            "meeting" => {
+                let meeting = app.state::<Arc<meeting::Meeting>>().inner().clone();
+                std::thread::spawn(move || meeting.start(None, false));
+            }
             "stop-command" => {
                 let assistant = app.state::<Arc<commands::Assistant>>().inner().clone();
                 if !assistant.stop() {
