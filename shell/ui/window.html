@@ -18,6 +18,7 @@
     <nav class="nav" aria-label="Pages">
       <button data-page="home"><svg viewBox="0 0 24 24"><path d="M4 11 L12 4 L20 11 V20 H14.5 V14.5 H9.5 V20 H4 Z"/></svg>Home</button>
       <button data-page="search"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15 L20 20"/></svg>Search<span class="accessory" id="nav-hotkey"></span></button>
+      <button data-page="meetings"><svg viewBox="0 0 24 24"><rect x="3.5" y="6.5" width="12" height="11" rx="2.5"/><path d="M15.5 10.5 L20.5 7.5 V16.5 L15.5 13.5"/></svg>Meetings<span class="accessory" id="nav-meeting"></span></button>
       <span class="nav-label">Make it yours</span>
       <button data-page="folders"><svg viewBox="0 0 24 24"><path d="M3.5 6.5 H9.5 L11.5 8.5 H20.5 V18.5 H3.5 Z"/></svg>Folders<span class="accessory" id="nav-folders"></span></button>
       <button data-page="settings"><svg viewBox="0 0 24 24"><path d="M18.7 10.0 L21.3 10.5 L21.3 13.5 L18.7 14.0 L18.2 15.3 L19.6 17.5 L17.5 19.6 L15.3 18.2 L14.0 18.7 L13.5 21.3 L10.5 21.3 L10.0 18.7 L8.7 18.2 L6.5 19.6 L4.4 17.5 L5.8 15.3 L5.3 14.0 L2.7 13.5 L2.7 10.5 L5.3 10.0 L5.8 8.7 L4.4 6.5 L6.5 4.4 L8.7 5.8 L10.0 5.3 L10.5 2.7 L13.5 2.7 L14.0 5.3 L15.3 5.8 L17.5 4.4 L19.6 6.5 L18.2 8.7 Z"/><circle cx="12" cy="12" r="3"/></svg>Settings<span class="accessory" id="nav-settings"></span></button>
@@ -121,6 +122,42 @@
       </footer>
     </section>
 
+    <!-- Meetings: notes from your calls, and starting them (meetings.js; src-tauri/src/meeting). -->
+    <section class="page pane" id="page-meetings" hidden>
+      <div class="column">
+        <header class="page-head"><h1>Meetings</h1>
+          <p>Notes from your calls, newest first. Murmur listens to the call and your microphone, writes down what's said,
+            keeps notes, and drafts answers when someone asks you something. Its panel is left out of screen sharing.</p></header>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b id="meeting-now-title">Take meeting notes</b>
+            <span id="meeting-now-about">Start when the call starts. Press <b>Ctrl+Alt+Enter</b> during the call to answer
+              what was just asked.</span></div>
+            <div class="sctl"><button class="secondary" id="meetings-folder">Open Folder</button>
+              <button class="primary" id="meeting-start">Take Notes Now</button></div></div>
+          <div class="srow"><div class="stext"><b>Offer notes when a call starts</b>
+            <span>When Teams, Zoom, Meet in a browser or another call app turns on the microphone, Murmur asks whether to
+              take notes.</span></div>
+            <label class="switch"><input type="checkbox" id="meeting-offers"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>Answer by itself</b>
+            <span>Draft an answer as soon as someone on the call finishes asking you something.</span></div>
+            <label class="switch"><input type="checkbox" id="meeting-auto"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>AI for answers and notes</b>
+            <span>A cloud AI keeps the work off this PC; the conversation goes to that provider.</span></div>
+            <select class="field" id="meeting-ai"></select></div>
+          <div class="srow"><div class="stext"><b>Speech for meetings</b>
+            <span>Who turns what's said into text, apart from the AI.</span></div>
+            <select class="field" id="meeting-speech">
+              <option value="">Same as dictation</option>
+              <option value="sarvam">Sarvam (cloud)</option>
+              <option value="openai">OpenAI gpt-4o-mini-transcribe (cloud)</option>
+            </select></div>
+        </div>
+        <input class="field wide" id="meetings-search" type="search" placeholder="Search your meetings: a name, a decision, a number" autocomplete="off">
+        <div class="meetings" id="meetings-list"></div>
+        <p class="problem" id="meetings-problem" hidden></p>
+      </div>
+    </section>
+
     <!-- Settings: dictation first, then Murmur itself (settings.js). -->
     <section class="page pane" id="page-settings" hidden>
       <div class="column">
@@ -130,7 +167,7 @@
         <div class="card rows">
           <div class="srow"><div class="stext"><b>Dictation</b>
             <span>Hold the dictation key and talk; let go and the words are typed where you're typing. Speech is turned
-              into text on this PC: nothing you say leaves it.</span></div>
+              into text on this PC (unless you choose Sarvam, online): nothing you say leaves it.</span></div>
             <label class="switch"><input type="checkbox" id="dictation-on"><span></span></label></div>
           <div class="srow"><div class="stext"><b>Dictation key</b>
             <span>With <b>Alt</b> too, what you say is a command; with <b>Shift</b>, it's typed as you said it. Hold them
@@ -144,6 +181,12 @@
             <span class="thin" id="speech-bar" hidden><span id="speech-fill"></span></span>
             <span id="speech-detail"></span></div>
             <button class="secondary" id="speech-download" hidden>Download</button></div>
+          <div class="srow sub" id="sarvam-output-row" hidden><div class="stext"><b>How Sarvam writes it</b>
+            <span>Hindi and Hinglish come out in English letters unless you choose otherwise.</span></div>
+            <select class="field" id="sarvam-output"></select></div>
+          <div class="srow sub" id="sarvam-language-row" hidden><div class="stext"><b>Language you speak</b>
+            <span>Sarvam tells by itself; choose one if it guesses wrong.</span></div>
+            <select class="field" id="sarvam-language"></select></div>
           <div class="srow"><div class="stext"><b>Microphone</b><span>The default follows Windows' sound settings.</span></div>
             <select class="field" id="microphone"></select></div>
           <div class="srow"><div class="stext"><b>Quiet Voice</b>
@@ -186,6 +229,7 @@
               <option value="local">On this PC (Ollama)</option>
               <option value="anthropic">Claude (Anthropic)</option>
               <option value="openai">OpenAI</option>
+              <option value="sarvam">Sarvam (India)</option>
             </select></div>
           <div class="srow sub" id="ai-local-row"><div class="stext"><b>Local model</b>
             <span id="ai-local-about"></span></div>
@@ -207,6 +251,11 @@
             <span id="ai-memory-about"></span></div>
             <button class="secondary" id="ai-forget-all">Clear Memory</button></div>
           <div class="list" id="ai-facts"></div>
+          <div class="srow"><div class="stext"><b>Learn from mistakes</b>
+            <span>When a command goes wrong, or you correct it (“no, I meant…”), your cloud AI works out why and writes a
+              rule for next time. Rules that don't help are turned off. Kept on this PC.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-learn"><span></span></label></div>
+          <div class="list" id="ai-learned"></div>
         </div>
 
         <span class="section-label">Recordings and history</span>
@@ -234,6 +283,10 @@
 
         <span class="section-label">Murmur</span>
         <div class="card rows">
+          <div class="srow"><div class="stext"><b>Hide Murmur from screen sharing</b>
+            <span>Murmur's windows (the pill, answers, meeting notes, this window) stay on your screen and out of what
+              Teams, Zoom, Meet and screen recorders capture. Meeting notes are always left out.</span></div>
+            <label class="switch"><input type="checkbox" id="hide-sharing"><span></span></label></div>
           <div class="srow" id="login-option" hidden><div class="stext"><b>Open Murmur when you sign in</b>
             <span>Murmur lives in the tray, listens for the dictation key and keeps your folders indexed.</span></div>
             <label class="switch"><input type="checkbox" id="login"><span></span></label></div>
@@ -347,6 +400,7 @@
   <script src="window.js"></script>
   <script src="settings.js"></script>
   <script src="assistant.js"></script>
+  <script src="meetings.js"></script>
   <script src="home.js"></script>
 </body>
 </html>

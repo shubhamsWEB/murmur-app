@@ -1,7 +1,7 @@
 //! Commands & AI on Windows, as the Mac app's AgentKit: one key both types and gives commands. What you said is
 //! decided to be a command or dictation (intent.rs); a command is carried out (agent.rs, with Windows' tools in
 //! actions.rs); dictation can be tidied by the model first (ai/cleanup.rs). The model is the one chosen in Settings →
-//! Commands & AI: Ollama on this PC, or Claude or OpenAI with your key.
+//! Commands & AI: Ollama on this PC, or Claude, OpenAI or Sarvam with your key.
 //!
 //! Still to come on Windows: reading the screen and clicking, browser automation, and sending messages; the model is
 //! told so and says it when asked.
@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod agent;
 pub mod answer;
+pub mod improve;
 pub mod intent;
 pub mod memory;
 pub mod places;
@@ -26,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// What's chosen in Settings → Commands & AI.
 #[derive(Clone, Debug, Default)]
@@ -39,6 +40,8 @@ pub struct Choices {
     pub styles: BTreeMap<String, String>,
     /// Commands told apart from dictation without Alt (on by default).
     pub detect: bool,
+    /// Learn from mistakes (improve.rs; on by default).
+    pub learn: bool,
 }
 
 /// What a command needs from the rest of Murmur.
@@ -72,6 +75,11 @@ pub struct Assistant {
     /// Murmur Cleanup: whether it's in Ollama (and when that was looked at), and its download.
     own_cleanup: Mutex<(Option<bool>, Option<Instant>)>,
     cleanup_download: Mutex<Download>,
+    /// What commands learned from their mistakes, the last command as it went (what you say next may correct it),
+    /// and whether a run is being reflected on (one at a time).
+    pub improve: std::sync::Arc<improve::Improvement>,
+    last_run: Mutex<Option<(improve::Run, Instant)>>,
+    reflecting: std::sync::Arc<AtomicBool>,
 }
 
 /// A question a command ended on.
@@ -122,6 +130,7 @@ impl Assistant {
     pub fn new(app: &AppHandle, memory_file: Option<PathBuf>, choices: Choices, hooks: Hooks) -> Assistant {
         #[cfg(windows)]
         actions::warm();
+        let improve_file = memory_file.as_ref().and_then(|f| f.parent()).map(|folder| folder.join("self-improvement.json"));
         let assistant = Assistant {
             app: app.clone(),
             memory: memory::Memory::open(memory_file),
@@ -135,6 +144,9 @@ impl Assistant {
             question: Mutex::new(None),
             own_cleanup: Mutex::new((None, None)),
             cleanup_download: Mutex::new(Download::Idle),
+            improve: std::sync::Arc::new(improve::Improvement::open(improve_file)),
+            last_run: Mutex::new(None),
+            reflecting: std::sync::Arc::new(AtomicBool::new(false)),
         };
         assistant.warm_up();
         assistant
@@ -395,9 +407,30 @@ impl Assistant {
         let choices = self.choices();
         let model = ai::current(&choices.ai);
         let local = ai::local(&choices.ai);
+        // You correcting the last command straight after ("no, I meant the other one"): a mistake to learn from. Not
+        // "no" to a question it asked you.
+        let previous = self.last_run.lock().unwrap().take();
+        if let (true, Some((previous, at))) = (choices.learn, previous) {
+            let asked = previous.answer.as_deref().is_some_and(|a| a.trim_end().ends_with('?'));
+            if at.elapsed() < Duration::from_secs(120) && improve::is_correction(text) && !asked {
+                let mut corrected = previous;
+                corrected.correction = Some(text.to_string());
+                for change in self.improve.correct(&corrected.lessons, &corrected.model, &corrected.request) {
+                    log(&format!("self-improvement: {change}"));
+                }
+                self.reflect(corrected, log);
+            }
+        }
+        // Rules learned from earlier mistakes on commands like this one, unless they didn't help with this model.
+        let model_id = model.model().to_string();
+        let lessons = if choices.learn { self.improve.lessons(text, front_app.as_deref(), &model_id, 6) } else { vec![] };
+        if !lessons.is_empty() {
+            log(&format!("command: learned rules given: {}", lessons.iter().map(|l| format!("[{}] {}", l.attempt, l.rule)).collect::<Vec<_>>().join(" | ")));
+        }
         let mut host = Pc { app: &self.app, hooks: &self.hooks, log, target, editable: context.editable, answered: false,
                             generation: &self.generation, me };
         let mut agent = agent::Agent::new(&mut host, &self.memory, &model, &local);
+        agent.set_lessons(improve::Improvement::prompt(&lessons));
         let request = match &question {
             Some(asked) => {
                 agent.run_answer(&asked.request, &asked.asked, text, &context);
@@ -410,8 +443,25 @@ impl Assistant {
         };
         let stopped = agent.was_stopped();
         let ended_on = agent.answer().and_then(agent::question_in).map(String::from);
+        let shown = agent.answer().map(String::from);
+        let (steps, sent_back) = agent.trace();
+        let used_model = agent.used_model();
         drop(agent);
         self.busy.store(false, Ordering::SeqCst);
+        // Whether each learned rule it was given helped, and, when it went wrong, what to learn from it.
+        if choices.learn && used_model {
+            let run = improve::Run {
+                request: text.to_string(), app: front_app.clone(), window: context.window_title.clone(), model: model_id.clone(),
+                steps, sent_back, stopped, answer: shown, correction: None, lessons: lessons.clone(),
+            };
+            for change in self.improve.observe(&lessons, !run.went_wrong(), &model_id, text, memory::now()) {
+                log(&format!("self-improvement: {change}"));
+            }
+            if run.went_wrong() {
+                self.reflect(run.clone(), log);
+            }
+            *self.last_run.lock().unwrap() = Some((run, Instant::now()));
+        }
         if stopped {
             crate::dictation::pill_flash(&self.app, "Stopped", "info", 1.5);
             return;
@@ -425,6 +475,48 @@ impl Assistant {
             std::thread::sleep(Duration::from_millis(1200));
             crate::dictation::pill_hide(&self.app);
         }
+    }
+
+    /// The paper's proposer: the commands' AI reads the run and the whole self-improvement memory, and names the root
+    /// cause and a rule (or nothing). In the background, with a cloud model only (`MURMUR_LEARN_LOCAL=1` for the local
+    /// one too: a small model's diagnoses are rarely worth keeping). What it learns goes to improve.log.
+    fn reflect(&self, run: improve::Run, log: &(dyn Fn(&str) + Sync)) {
+        let router = self.router();
+        if router.is_local() && std::env::var_os("MURMUR_LEARN_LOCAL").is_none() {
+            log(&format!("self-improvement: \"{}\" went wrong; not reflecting with a local model", ai::cut(&run.request, 60)));
+            return;
+        }
+        if self.reflecting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log(&format!("self-improvement: reflecting on \"{}\"", ai::cut(&run.request, 60)));
+        let learned = self.improve.clone();
+        let reflecting = self.reflecting.clone();
+        let file = self.app.path().app_log_dir().ok().map(|folder| folder.join("improve.log"));
+        std::thread::spawn(move || {
+            let note = |line: &str| {
+                use std::io::Write;
+                if let Some(mut out) = file.as_ref().and_then(|f| std::fs::OpenOptions::new().create(true).append(true).open(f).ok()) {
+                    let _ = writeln!(out, "{} {line}", memory::now() as u64);
+                }
+            };
+            let prompt = learned.reflection(&run, memory::now());
+            let reply = ai::blocking(router.write(improve::REFLECT_SYSTEM, &prompt, None, 900, true, &mut |_| {}, &|| false));
+            match reply.map(|reply| improve::proposal(&reply)) {
+                Ok(Some(proposal)) => {
+                    let changes = learned.learn(&proposal, &run.request, run.app.as_deref(), &run.model, memory::now());
+                    if changes.is_empty() {
+                        note(&format!("nothing new to learn from \"{}\" ({})", ai::cut(&run.request, 60), ai::cut(&proposal.root_cause, 80)));
+                    }
+                    for change in changes {
+                        note(&change);
+                    }
+                }
+                Ok(None) => note("couldn't read the reflection"),
+                Err(error) => note(&format!("couldn't reflect: {error}")),
+            }
+            reflecting.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Stops the command that's running, after the step it's on (Esc, or Stop Command in the tray). False when none
@@ -466,9 +558,12 @@ impl Assistant {
             "localModel": choices.ai.local_model,
             "anthropicModel": choices.ai.anthropic_model,
             "openaiModel": choices.ai.openai_model,
+            "sarvamModel": choices.ai.sarvam_model,
             "workspace": choices.ai.anthropic_workspace,
-            "defaults": {"local": ai::DEFAULT_LOCAL_MODEL, "anthropic": ai::DEFAULT_ANTHROPIC_MODEL, "openai": ai::DEFAULT_OPENAI_MODEL},
-            "keys": {"anthropic": key(ai::Provider::Anthropic), "openai": key(ai::Provider::OpenAI)},
+            "defaults": {"local": ai::DEFAULT_LOCAL_MODEL, "anthropic": ai::DEFAULT_ANTHROPIC_MODEL, "openai": ai::DEFAULT_OPENAI_MODEL,
+                         "sarvam": ai::DEFAULT_SARVAM_MODEL},
+            "keys": {"anthropic": key(ai::Provider::Anthropic), "openai": key(ai::Provider::OpenAI),
+                     "sarvam": key(ai::Provider::Sarvam)},
             "cleanup": choices.cleanup,
             "cleanupModel": if choices.own_cleanup { "murmur" } else { "commands" },
             "ownCleanup": self.own_cleanup_info(),
@@ -480,7 +575,23 @@ impl Assistant {
             "lastError": ai::last_error(),
             "facts": facts,
             "commands": self.memory.recent(400).len(),
+            "learn": choices.learn,
+            "learned": self.learned(),
         })
+    }
+
+    /// What commands learned, newest first, for Settings: each problem's rule in use, why, what it should fix, how
+    /// it's done (by model), and the rules tried before.
+    fn learned(&self) -> Vec<Value> {
+        self.improve.problems().iter().rev().map(|problem| {
+            let attempts: Vec<Value> = problem.attempts.iter().rev().map(|a| {
+                let (worked, of) = a.tally(None);
+                json!({"id": a.id, "rule": a.rule, "rationale": a.rationale, "prediction": a.prediction, "retired": a.retired,
+                       "notFor": a.not_for, "worked": worked, "of": of, "trigger": a.trigger, "model": a.model})
+            }).collect();
+            json!({"id": problem.id, "rootCause": problem.root_cause, "current": problem.current().map(|a| a.rule.clone()),
+                   "attempts": attempts})
+        }).collect()
     }
 
     /// Checks a provider's saved key (or that Ollama answers): None when it works, else what's wrong. Awaited from

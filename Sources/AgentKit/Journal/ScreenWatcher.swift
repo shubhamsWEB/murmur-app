@@ -488,7 +488,7 @@ public final class ScreenWatcher {
                     await Consolidator.chronicle(journal: journal, model: "", now: Date(), keepGoing: { true }, graph: graph, ask: prose)
                 }
                 if read > 0 {
-                    let name = provider == "openai" ? "OpenAI" : "Claude"
+                    let name = provider == "anthropic" ? "Claude" : CloudReader.name(provider)
                     MemoryLog.write("read \(read) episodes of what you did with \(name) in "
                                     + String(format: "%.0f s", Date().timeIntervalSince(started)))
                     MemoryLog.setStatus("Read \(read) episodes with \(name) at " + Date().formatted(date: .omitted, time: .shortened))

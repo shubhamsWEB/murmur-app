@@ -42,6 +42,10 @@ enum Snapshot {
         typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
         guard let symbol = dlsym(dlopen(nil, RTLD_NOW), "CGWindowListCreateImage") else { throw Failure.noBitmap }
         let createImage = unsafeBitCast(symbol, to: CreateImage.self)
+        // Left out of captures (Hide from screen sharing) would leave it out of this one too.
+        let sharing = window.sharingType
+        window.sharingType = .readOnly
+        defer { window.sharingType = sharing }
         // kCGWindowListOptionIncludingWindow, kCGWindowImageBoundsIgnoreFraming
         guard let image = createImage(.null, 1 << 3, UInt32(window.windowNumber), 1 << 0)?.takeRetainedValue(),
               let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])

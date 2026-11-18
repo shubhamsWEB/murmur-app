@@ -132,7 +132,7 @@ public enum AudioDevices {
         return value
     }
 
-    private static func string(_ id: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String? {
+    static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
         var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
                                                  mElement: kAudioObjectPropertyElementMain)
         var value: Unmanaged<CFString>?

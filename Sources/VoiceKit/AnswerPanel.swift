@@ -98,6 +98,7 @@ final class AnswerPanel: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentMinSize = NSSize(width: 380, height: 150)
+        PrivateWindows.apply(panel)
         panel.delegate = self
         // After SwiftUI's layout pass, not inside it.
         state.onHeight = { [weak self] height in

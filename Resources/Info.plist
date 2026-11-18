@@ -42,6 +42,8 @@
 	<string>Murmur reads your reminders when you ask about them.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Murmur remembers who people are (their work, numbers and birthdays) when you turn on Contacts in Memory, and looks up a number when you ask it to message someone. It stays on your Mac.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>With meeting notes on, Murmur listens to the call's sound so it can write down what others say. It's transcribed by your speech model, and the notes are written by the AI you chose for commands.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Murmur turns Bluetooth on or off when you ask it to.</string>
 	<key>NSAppleEventsUsageDescription</key>

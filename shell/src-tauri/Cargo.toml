@@ -30,6 +30,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 regex = "1"
 fancy-regex = "0.14"
+# Meeting notes: a picture of the meeting's screen (PNG, for the models that look at pictures), and the text of a Word
+# document given to the meeting (its zip read here; both already in Murmur's build through Tauri).
+png = "0.17"
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -48,7 +52,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
                                               # dictation: the key watcher's thread priority
                                               "Win32_System_Threading",
                                               # Commands & AI: the API keys in the Credential Manager, locking the PC
-                                              "Win32_Security_Credentials", "Win32_System_Shutdown"] }
+                                              "Win32_Security_Credentials", "Win32_System_Shutdown",
+                                              # meeting notes: file names in the PC's time
+                                              "Win32_System_Time"] }
 # dictation: the text around the cursor (UI Automation) and Windows' spell checker, which are COM (dictation/cursor.rs);
 # commands: the speakers' volume (commands/actions.rs); search: Windows' OCR for pictures' text (ocr.rs)
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility",

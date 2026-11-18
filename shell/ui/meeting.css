@@ -1,0 +1,212 @@
+/* Meeting notes' panel: Murmur's cream and coral (charcoal and coral in dark), large readable answers, everything in
+   reach of the mouse. The window is transparent: the panel's card is drawn here, and its see-through setting is the
+   card's opacity. */
+
+:root {
+  --coral: #ff6f61;
+  --coral-deep: #e2554a;
+  --surface: #fbf8f4;
+  --card: #ffffff;
+  --text: #221e1c;
+  --secondary: #6b5f58;
+  --tertiary: #a39890;
+  --line: rgba(0, 0, 0, 0.09);
+  --fill: rgba(0, 0, 0, 0.05);
+  --fill-strong: rgba(0, 0, 0, 0.1);
+  --code: #f4efe9;
+  --answer-size: 19px;
+  --on-coral: #fff;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #1e1b1a;
+    --card: #262220;
+    --text: #f5ede6;
+    --secondary: #b8aca4;
+    --tertiary: #7d716a;
+    --line: rgba(255, 255, 255, 0.1);
+    --fill: rgba(255, 255, 255, 0.07);
+    --fill-strong: rgba(255, 255, 255, 0.13);
+    --code: #171413;
+    --coral-deep: #ff8a7e;
+    --on-coral: #1e1b1a;
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+body { padding: 6px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+
+.panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+  transition: opacity 0.18s ease-out;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 6px 14px;
+  cursor: default;
+}
+.title { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spacer { flex: 1; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--tertiary); flex: none; }
+.dot.on { background: var(--coral); box-shadow: 0 0 0 3px rgba(255, 111, 97, 0.22); }
+.meters { display: flex; gap: 3px; }
+.meter { width: 34px; height: 5px; border-radius: 3px; background: var(--fill-strong); overflow: hidden; }
+.meter span { display: block; height: 100%; width: 0; background: var(--coral); transition: width 0.12s linear; }
+.meter + .meter span { background: var(--secondary); }
+
+.icon {
+  width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--secondary);
+}
+.icon:hover { background: var(--fill); color: var(--text); }
+.icon:disabled { opacity: 0.35; cursor: default; }
+.icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.tabs { display: flex; gap: 2px; margin: 0 10px; padding: 3px; background: var(--fill); border-radius: 9px; }
+.tabs button {
+  flex: 1; border: 0; background: transparent; border-radius: 7px; padding: 5px 0; color: var(--secondary); font-weight: 500;
+}
+.tabs button[aria-selected="true"] { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+
+.problem {
+  display: flex; gap: 8px; align-items: flex-start; margin: 8px 10px 0; padding: 8px 10px; border-radius: 9px;
+  background: rgba(255, 111, 97, 0.12); color: var(--text); font-size: 12.5px; line-height: 1.4;
+}
+.problem span { flex: 1; }
+.link { border: 0; background: none; color: var(--coral-deep); padding: 0; font-weight: 600; }
+
+.tab { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* The answer, to read out. */
+.reader { flex: 1; overflow-y: auto; padding: 14px 16px 6px; user-select: text; font-size: var(--answer-size); line-height: 1.45; }
+.question { font-size: 0.72em; color: var(--secondary); margin: 0 0 10px; }
+.question .screen { color: var(--coral-deep); font-weight: 600; }
+.headline { font-weight: 600; font-size: 1.08em; margin: 0 0 10px; }
+.points { margin: 0 0 10px; padding: 0; list-style: none; }
+.points li { position: relative; padding-left: 1.05em; margin: 0 0 7px; }
+.points li::before { content: "•"; position: absolute; left: 0.1em; color: var(--coral-deep); font-weight: 700; }
+.example { border-left: 3px solid var(--coral); padding: 2px 0 2px 10px; margin: 0 0 10px; }
+.example b { display: block; font-size: 0.62em; letter-spacing: 0.02em; color: var(--secondary); margin-bottom: 2px; }
+.say p { margin: 0 0 8px; }
+.also { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 0.8em; }
+.also h3 { margin: 0 0 6px; font-size: 0.82em; color: var(--secondary); font-weight: 600; }
+.also ul { margin: 0; padding-left: 1.1em; }
+.also li { margin: 0 0 4px; }
+.writing { color: var(--secondary); font-size: 0.72em; display: flex; align-items: center; gap: 8px; }
+.writing::before {
+  content: ""; width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(255, 111, 97, 0.25);
+  border-top-color: var(--coral); animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .writing::before { animation: none; } }
+.code { margin: 0 0 10px; border-radius: 9px; background: var(--code); border: 1px solid var(--line); overflow: hidden; }
+.code header { display: flex; align-items: center; padding: 4px 6px 4px 10px; font-size: 11.5px; color: var(--secondary); }
+.code pre { margin: 0; padding: 4px 12px 12px; overflow-x: auto; font: 13px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre; }
+.empty { color: var(--secondary); font-size: 14px; line-height: 1.5; }
+.empty b { color: var(--text); display: block; font-size: 15px; margin-bottom: 4px; }
+
+.pager { display: flex; align-items: center; gap: 4px; padding: 4px 12px; }
+.count { color: var(--secondary); font-size: 12px; min-width: 52px; text-align: center; }
+
+.actions { display: flex; align-items: center; gap: 6px; padding: 8px 12px 6px; flex-wrap: wrap; }
+.primary, .secondary, .small {
+  border-radius: 8px; padding: 6px 12px; font-weight: 600; border: 1px solid transparent; white-space: nowrap;
+}
+.primary { background: var(--coral-deep); color: var(--on-coral, #fff); }
+.primary:hover { background: var(--coral); }
+.primary:disabled { opacity: 0.5; cursor: default; }
+.secondary, .small { background: var(--fill); border-color: var(--line); }
+.secondary:hover, .small:hover { background: var(--fill-strong); }
+.small { padding: 5px 10px; font-weight: 500; }
+kbd { font: 500 10.5px "Segoe UI", sans-serif; opacity: 0.85; margin-left: 4px; }
+.toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--secondary); font-size: 12.5px; cursor: pointer; }
+.toggle input { accent-color: var(--coral-deep); margin: 0; }
+
+.menu {
+  position: absolute; bottom: 88px; left: 140px; z-index: 5; background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2); display: flex; flex-direction: column;
+}
+.menu button { border: 0; background: transparent; text-align: left; padding: 7px 12px; border-radius: 7px; }
+.menu button:hover { background: var(--fill); }
+
+.ask { display: flex; gap: 6px; padding: 0 12px 10px; }
+.ask input, .form textarea, .form select {
+  flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); padding: 6px 10px;
+}
+.ask input:focus, .form textarea:focus, .form select:focus { outline: 2px solid rgba(255, 111, 97, 0.5); outline-offset: -1px; }
+
+/* Notes and transcript. */
+.notes, .lines, .form { flex: 1; overflow-y: auto; padding: 12px 16px; user-select: text; line-height: 1.5; font-size: 13.5px; }
+.notes h1 { font-size: 17px; margin: 0 0 8px; }
+.notes h2 { font-size: 14px; margin: 14px 0 6px; }
+.notes h3 { font-size: 13.5px; margin: 12px 0 4px; }
+.notes ul { margin: 0 0 6px; padding-left: 1.2em; }
+.notes li { margin: 0 0 3px; }
+.notes p { margin: 0 0 6px; }
+.notes .task { list-style: none; margin-left: -1.2em; }
+.email { padding: 0 16px 12px; }
+.email .box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+.email .box b { display: block; margin-bottom: 6px; }
+.email pre { white-space: pre-wrap; font: inherit; margin: 0 0 8px; user-select: text; }
+.email .row { display: flex; gap: 6px; flex-wrap: wrap; }
+.line { margin: 0 0 8px; }
+.line .who { font-weight: 600; margin-right: 6px; }
+.line.them .who { color: var(--coral-deep); }
+.line .time { color: var(--tertiary); font-size: 11.5px; margin-right: 6px; }
+
+.form label, .form .field { display: flex; flex-direction: column; gap: 4px; margin: 0 0 14px; }
+.form label.toggle { flex-direction: row; }
+.form b { font-size: 12.5px; }
+.form span { color: var(--secondary); font-size: 12px; }
+.form textarea { resize: vertical; }
+.form .row { display: flex; gap: 8px; align-items: center; }
+.form input[type="range"] { flex: 1; accent-color: var(--coral-deep); }
+.documents { display: flex; flex-direction: column; gap: 4px; }
+.document { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 7px; background: var(--fill); }
+.document span { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note { color: var(--secondary); font-size: 12px; }
+
+.foot { display: flex; align-items: center; gap: 6px; padding: 8px 12px 10px; border-top: 1px solid var(--line); }
+.status { color: var(--secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Folded: a pill at the top of the screen; it lights up when an answer is ready. */
+.folded {
+  width: 100%; height: 100%; border: 1px solid var(--line); border-radius: 22px; background: var(--surface);
+  display: flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+}
+.folded.unread { border-color: var(--coral); box-shadow: 0 0 0 3px rgba(255, 111, 97, 0.3), 0 6px 20px rgba(0, 0, 0, 0.2); }
+
+/* The strip near the camera: wide, short, the answer beside the controls. */
+body.strip .tabs, body.strip #ask-form { display: none; }
+body.strip .reader { padding-top: 8px; }
+
+/* The offer. */
+.offer {
+  height: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+.offer-icon { width: 34px; height: 34px; border-radius: 9px; }
+.offer-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.offer-text b { font-size: 14.5px; }
+.offer-text span { color: var(--secondary); }
+.offer-actions { width: 100%; display: flex; justify-content: flex-end; gap: 8px; }

@@ -1,5 +1,6 @@
 //! The models behind AI clean-up and voice commands, as the Mac app's AgentKit has them (Router.swift): a local model
-//! through Ollama, or Claude or OpenAI with the person's own API key. One conversation shape for all three (turns,
+//! through Ollama, or Claude, OpenAI or Sarvam (Sarvam's Token Factory: OpenAI's API in front of the models it hosts
+//! in India) with the person's own API key. One conversation shape for all three (turns,
 //! tool calls, tool results); each provider's wire format is built and read by pure functions here, tested without a
 //! network. The calls are async (reqwest, over Windows' own certificate store and proxy settings, as the updater's
 //! are); `blocking` runs one from a plain thread (dictation's).
@@ -10,6 +11,7 @@ pub mod check;
 pub mod cleanup;
 pub mod keys;
 pub mod output;
+pub mod stream;
 
 use serde_json::{json, Map, Value};
 use std::sync::{Mutex, OnceLock};
@@ -21,16 +23,18 @@ pub enum Provider {
     Local,
     Anthropic,
     OpenAI,
+    Sarvam,
 }
 
 impl Provider {
     #[allow(dead_code)]
-    pub const ALL: [Provider; 3] = [Provider::Local, Provider::Anthropic, Provider::OpenAI];
+    pub const ALL: [Provider; 4] = [Provider::Local, Provider::Anthropic, Provider::OpenAI, Provider::Sarvam];
 
     pub fn from_name(name: &str) -> Provider {
         match name {
             "anthropic" => Provider::Anthropic,
             "openai" => Provider::OpenAI,
+            "sarvam" => Provider::Sarvam,
             _ => Provider::Local,
         }
     }
@@ -40,6 +44,7 @@ impl Provider {
             Provider::Local => "local",
             Provider::Anthropic => "anthropic",
             Provider::OpenAI => "openai",
+            Provider::Sarvam => "sarvam",
         }
     }
 
@@ -49,6 +54,7 @@ impl Provider {
             Provider::Local => "Ollama",
             Provider::Anthropic => "Anthropic",
             Provider::OpenAI => "OpenAI",
+            Provider::Sarvam => "Sarvam",
         }
     }
 
@@ -58,6 +64,7 @@ impl Provider {
             Provider::Local => None,
             Provider::Anthropic => Some("anthropic"),
             Provider::OpenAI => Some("openai"),
+            Provider::Sarvam => Some("sarvam"),
         }
     }
 
@@ -74,6 +81,7 @@ pub struct Config {
     pub local_model: String,
     pub anthropic_model: String,
     pub openai_model: String,
+    pub sarvam_model: String,
     /// An organization-wide Anthropic key names its workspace on every request.
     pub anthropic_workspace: String,
 }
@@ -81,6 +89,8 @@ pub struct Config {
 pub const DEFAULT_LOCAL_MODEL: &str = "qwen3:4b";
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-5-5";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-luna";
+/// Sarvam 105B, hosted in India; Sarvam's Token Factory also has open-weight models (GLM, Kimi, DeepSeek).
+pub const DEFAULT_SARVAM_MODEL: &str = "sarvam-105b";
 
 impl Default for Config {
     fn default() -> Config {
@@ -89,6 +99,7 @@ impl Default for Config {
             local_model: DEFAULT_LOCAL_MODEL.into(),
             anthropic_model: DEFAULT_ANTHROPIC_MODEL.into(),
             openai_model: DEFAULT_OPENAI_MODEL.into(),
+            sarvam_model: DEFAULT_SARVAM_MODEL.into(),
             anthropic_workspace: String::new(),
         }
     }
@@ -192,7 +203,7 @@ impl std::fmt::Display for AiError {
 }
 
 pub const NEEDS_MODEL: &str =
-    "Commands like this need a model. Install Ollama, or add a Claude or OpenAI key in Settings → Commands & AI.";
+    "Commands like this need a model. Install Ollama, or add a Claude, OpenAI or Sarvam key in Settings → Commands & AI.";
 
 pub fn cut(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
@@ -226,18 +237,29 @@ pub enum Router {
     Ollama { model: String },
     Anthropic { model: String, workspace: String },
     OpenAI { model: String },
+    /// Sarvam's Token Factory: OpenAI's Chat Completions at api.sarvam.ai.
+    Sarvam { model: String },
 }
 
 /// The model chosen; a cloud choice without a key, or whose key was just rejected, falls back to the local one.
 pub fn current(config: &Config) -> Router {
+    for_provider(config.provider, config)
+}
+
+/// The model for one provider (meeting notes can use another than commands); a cloud one without a key, or whose key
+/// was just rejected, falls back to the local one.
+pub fn for_provider(provider: Provider, config: &Config) -> Router {
     let rejected = is_key_problem(last_error().as_deref());
-    match config.provider {
+    match provider {
         Provider::Anthropic if Provider::Anthropic.has_key() && !rejected => Router::Anthropic {
             model: or_default(&config.anthropic_model, DEFAULT_ANTHROPIC_MODEL),
             workspace: config.anthropic_workspace.trim().to_string(),
         },
         Provider::OpenAI if Provider::OpenAI.has_key() && !rejected => Router::OpenAI {
             model: or_default(&config.openai_model, DEFAULT_OPENAI_MODEL),
+        },
+        Provider::Sarvam if Provider::Sarvam.has_key() && !rejected => Router::Sarvam {
+            model: or_default(&config.sarvam_model, DEFAULT_SARVAM_MODEL),
         },
         _ => local(config),
     }
@@ -247,7 +269,7 @@ pub fn local(config: &Config) -> Router {
     Router::Ollama { model: or_default(&config.local_model, DEFAULT_LOCAL_MODEL) }
 }
 
-fn or_default(value: &str, default: &str) -> String {
+pub fn or_default(value: &str, default: &str) -> String {
     let value = value.trim();
     if value.is_empty() { default.to_string() } else { value.to_string() }
 }
@@ -259,6 +281,16 @@ impl Router {
             Router::Ollama { .. } => "Local model",
             Router::Anthropic { .. } => "Claude",
             Router::OpenAI { .. } => "OpenAI",
+            Router::Sarvam { .. } => "Sarvam",
+        }
+    }
+
+    /// The model's own name ("claude-haiku-5-5", "qwen3:4b").
+    #[allow(dead_code)]
+    pub fn model(&self) -> &str {
+        match self {
+            Router::Ollama { model } | Router::Anthropic { model, .. } | Router::OpenAI { model }
+            | Router::Sarvam { model } => model,
         }
     }
 
@@ -284,15 +316,21 @@ impl Router {
                 let body = anthropic::body(model, system, turns, tools, 2048);
                 Ok(anthropic::parse(&post(ANTHROPIC, &anthropic::headers(workspace)?, &body, timeout, "Anthropic").await?))
             }
-            Router::OpenAI { model } => {
+            Router::OpenAI { model } | Router::Sarvam { model } => {
+                let (url, company) = self.chat_endpoint();
                 let mut body = openai::body(model, system, turns, tools);
-                let headers = openai::headers()?;
-                let json = match post(OPENAI, &headers, &body, timeout, "OpenAI").await {
-                    // An older model that won't take reasoning_effort "none": ask without it.
+                // Sarvam 105B reasons by default, plain text too: off, as Claude runs here with thinking off.
+                if matches!(self, Router::Sarvam { .. }) {
+                    body["reasoning_effort"] = json!("none");
+                }
+                let headers = openai::headers(self.key_account())?;
+                let json = match post(url, &headers, &body, timeout, company).await {
+                    // An older model (or one of Sarvam's that always reasons) that won't take reasoning_effort "none":
+                    // ask without it.
                     Err(AiError::Http { code: 400, detail, .. }) if body.get("reasoning_effort").is_some()
-                        && detail.to_lowercase().contains("reasoning_effort") => {
+                        && detail.to_lowercase().contains("reasoning") => {
                         body.as_object_mut().unwrap().remove("reasoning_effort");
-                        post(OPENAI, &headers, &body, timeout, "OpenAI").await?
+                        post(url, &headers, &body, timeout, company).await?
                     }
                     other => other?,
                 };
@@ -333,7 +371,8 @@ impl Router {
                     }
                 }
             }
-            Router::OpenAI { model } => {
+            Router::OpenAI { model } | Router::Sarvam { model } => {
+                let (url, company) = self.chat_endpoint();
                 let tool = ToolSpec { name: "answer".into(), description: "Give the answer".into(), parameters: schema };
                 let mut body = json!({
                     "model": model,
@@ -342,11 +381,11 @@ impl Router {
                     "tool_choice": {"type": "function", "function": {"name": "answer"}},
                     "reasoning_effort": "none",
                 });
-                let headers = openai::headers().ok()?;
-                let result = match post(OPENAI, &headers, &body, timeout, "OpenAI").await {
-                    Err(AiError::Http { code: 400, detail, .. }) if detail.to_lowercase().contains("reasoning_effort") => {
+                let headers = openai::headers(self.key_account()).ok()?;
+                let result = match post(url, &headers, &body, timeout, company).await {
+                    Err(AiError::Http { code: 400, detail, .. }) if detail.to_lowercase().contains("reasoning") => {
                         body.as_object_mut().unwrap().remove("reasoning_effort");
-                        post(OPENAI, &headers, &body, timeout, "OpenAI").await
+                        post(url, &headers, &body, timeout, company).await
                     }
                     other => other,
                 };
@@ -364,6 +403,23 @@ impl Router {
         };
         result.filter(|answer| options.contains(&answer.as_str()))
     }
+
+    /// Where an OpenAI-style router sends its chats, and the company's name for errors.
+    fn chat_endpoint(&self) -> (&'static str, &'static str) {
+        match self {
+            Router::Sarvam { .. } => (SARVAM, "Sarvam"),
+            _ => (OPENAI, "OpenAI"),
+        }
+    }
+
+    /// The account its key is kept under.
+    fn key_account(&self) -> &'static str {
+        match self {
+            Router::Sarvam { .. } => "sarvam",
+            Router::Anthropic { .. } => "anthropic",
+            _ => "openai",
+        }
+    }
 }
 
 // MARK: HTTP
@@ -372,8 +428,9 @@ const OLLAMA: &str = "http://127.0.0.1:11434";
 const OLLAMA_CHAT: &str = "http://127.0.0.1:11434/api/chat";
 const ANTHROPIC: &str = "https://api.anthropic.com/v1/messages";
 const OPENAI: &str = "https://api.openai.com/v1/chat/completions";
+const SARVAM: &str = "https://api.sarvam.ai/v2/chat/completions";
 
-fn client() -> &'static reqwest::Client {
+pub(crate) fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         // As the updater does: the ring provider, unless something already chose one.
@@ -592,7 +649,7 @@ pub async fn ollama_copy(source: &str, destination: &str) -> Option<String> {
     }
 }
 
-mod ollama {
+pub(crate) mod ollama {
     use super::{output, Call, Reply, ToolSpec, Turn};
     use serde_json::{json, Value};
 
@@ -697,7 +754,7 @@ fn arguments(raw: &Value) -> Map<String, Value> {
 
 // MARK: Anthropic
 
-mod anthropic {
+pub(crate) mod anthropic {
     use super::{AiError, Call, Reply, ToolSpec, Turn};
     use serde_json::{json, Value};
 
@@ -777,12 +834,13 @@ mod anthropic {
 
 // MARK: OpenAI
 
-mod openai {
+pub(crate) mod openai {
     use super::{AiError, Call, Reply, ToolSpec, Turn};
     use serde_json::{json, Value};
 
-    pub fn headers() -> Result<Vec<(String, String)>, AiError> {
-        let key = super::keys::get("openai").ok_or(AiError::NoKey("OpenAI"))?;
+    /// "openai", or "sarvam" (the same API, with Sarvam's key).
+    pub fn headers(account: &str) -> Result<Vec<(String, String)>, AiError> {
+        let key = super::keys::get(account).ok_or(AiError::NoKey(if account == "sarvam" { "Sarvam" } else { "OpenAI" }))?;
         Ok(vec![("Authorization".to_string(), format!("Bearer {key}"))])
     }
 
@@ -863,6 +921,10 @@ pub async fn verify(provider: Provider, config: &Config) -> Option<String> {
     let (url, headers, body) = match provider {
         Provider::OpenAI => (OPENAI, vec![("Authorization".to_string(), format!("Bearer {key}"))],
                              json!({"model": or_default(&config.openai_model, DEFAULT_OPENAI_MODEL), "max_completion_tokens": 16,
+                                    "messages": [{"role": "user", "content": "Reply with OK."}]})),
+        Provider::Sarvam => (SARVAM, vec![("Authorization".to_string(), format!("Bearer {key}"))],
+                             json!({"model": or_default(&config.sarvam_model, DEFAULT_SARVAM_MODEL), "max_tokens": 16,
+                                    "reasoning_effort": "none",
                                     "messages": [{"role": "user", "content": "Reply with OK."}]})),
         Provider::Anthropic => {
             let mut headers = vec![("x-api-key".to_string(), key), ("anthropic-version".to_string(), "2023-06-01".to_string())];

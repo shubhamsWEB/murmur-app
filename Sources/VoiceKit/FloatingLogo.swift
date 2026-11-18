@@ -76,6 +76,7 @@ final class FloatingLogo {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .statusBar
+        PrivateWindows.apply(panel)
         panel.hidesOnDeactivate = false
         panel.canHide = false
         panel.becomesKeyOnlyIfNeeded = true

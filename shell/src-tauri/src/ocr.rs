@@ -30,7 +30,7 @@ pub fn serve(args: &[String]) -> i32 {
 }
 
 #[cfg(windows)]
-fn read(path: &str) -> Result<String, String> {
+pub(crate) fn read(path: &str) -> Result<String, String> {
     use windows::core::HSTRING;
     use windows::Graphics::Imaging::{
         BitmapAlphaMode, BitmapDecoder, BitmapInterpolationMode, BitmapPixelFormat, BitmapTransform,
@@ -86,7 +86,7 @@ fn read(path: &str) -> Result<String, String> {
 }
 
 #[cfg(not(windows))]
-fn read(_path: &str) -> Result<String, String> {
+pub(crate) fn read(_path: &str) -> Result<String, String> {
     Err("OCR is only built in on Windows".into())
 }
 

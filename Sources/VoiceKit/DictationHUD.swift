@@ -84,6 +84,7 @@ final class DictationHUD {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
+        PrivateWindows.apply(panel)
         let host = NSHostingView(rootView: HUDView(state: state))
         host.frame = panel.contentRect(forFrameRect: panel.frame)
         host.autoresizingMask = [.width, .height]

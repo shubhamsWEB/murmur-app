@@ -8,7 +8,7 @@
 const tauri = window.__TAURI__;
 const invoke = (command, args) => tauri.core.invoke(command, args);
 const $ = (id) => document.getElementById(id);
-const PAGES = ["home", "search", "folders", "settings", "about"];
+const PAGES = ["home", "search", "meetings", "folders", "settings", "about"];
 
 let dictation = null;   // dictation_info, kept current by its events
 let settings = {};      // settings_info: the shortcut, the folders, indexing (its "state" events)
@@ -27,6 +27,7 @@ function showPage(name) {
     }
   }
   window.murmurSettings?.shown(name);
+  if (name === "meetings") window.murmurMeetings?.load();
   if (name === "search") $("query").focus();
   try { localStorage.setItem("murmur.page", name); } catch { /* the next window opens on Home */ }
 }

@@ -776,7 +776,7 @@ private struct VoiceStep: View {
             VStack(alignment: .leading, spacing: 0) {
                 StepTitle(title: "Talk to your Mac",
                           subtitle: "Hold Fn, speak, and let go. Murmur types it wherever your cursor is.")
-                LanguageChoice(dictation: dictation)
+                LanguageChoice(dictation: dictation, includeOnline: false)
                     .frame(maxWidth: 520, alignment: .leading)
                     .padding(.top, 20)
                 VStack(alignment: .leading, spacing: 10) {
@@ -809,6 +809,8 @@ private struct VoiceStep: View {
 /// the Settings page.
 struct LanguageChoice: View {
     @ObservedObject var dictation: DictationController
+    /// Sarvam too (online, with a key): in Settings; onboarding shows only the models on this Mac.
+    var includeOnline = true
     /// A model picked that needs a download, waiting for the go-ahead.
     @State private var asking: SpeechModel?
 
@@ -818,7 +820,7 @@ struct LanguageChoice: View {
             // Nothing chosen yet (a fresh install): English, the default, is offered with its Download button showing.
             Text("Which language will you speak?").font(.system(size: 13.5, weight: .semibold))
             HStack(alignment: .top, spacing: 10) {
-                ForEach(SpeechModel.allCases, id: \.self) { model in
+                ForEach(includeOnline ? SpeechModel.allCases : SpeechModel.onThisMac, id: \.self) { model in
                     // On a fresh install nothing is chosen yet (English is only the default): no tick until you pick.
                     card(model, chosen: model == current && dictation.speechModelChosen, asked: model == asking)
                 }
@@ -906,6 +908,10 @@ struct LanguageChoice: View {
             Text("Getting ready…").font(.system(size: 11)).foregroundStyle(Theme.ink2)
         } else if chosen, case .failed = dictation.speechModelState {
             Text("Couldn't load. Pick it again to retry.").font(.system(size: 11)).foregroundStyle(Theme.danger)
+        } else if model == .sarvam {
+            Label(RouterChoice.sarvam.hasKey ? "Online · key saved" : "Needs a Sarvam key",
+                  systemImage: RouterChoice.sarvam.hasKey ? "network" : "key")
+                .font(.system(size: 11)).foregroundStyle(RouterChoice.sarvam.hasKey ? Theme.good : Theme.ink3)
         } else if model.isOnThisMac || (chosen && dictation.speechModelState == .ready) {
             Label("On this Mac", systemImage: "checkmark").font(.system(size: 11)).foregroundStyle(Theme.good)
         } else {
@@ -1194,7 +1200,7 @@ private struct CommandsStep: View {
     private var nothingNote: String {
         if case .ready = ollama { return "Commands that need a model will use \(model) on this Mac." }
         if RouterChoice.current != .local, RouterChoice.current.hasKey {
-            return "Commands that need a model will use \(RouterChoice.current == .anthropic ? "Claude" : "OpenAI")."
+            return "Commands that need a model will use \(RouterChoice.current == .anthropic ? "Claude" : RouterChoice.current.provider)."
         }
         return "Skipping is fine: everything else works now, and Murmur tells you when a command needs a model."
     }
@@ -1240,10 +1246,10 @@ private struct CommandsStep: View {
                 + "the screen's text meanwhile; you can download it later in Commands & AI."
         }
         if case .ready = vision.phase {
-            return "\(vision.model) is on this Mac. Screenshots stay here, even when Claude or OpenAI plans the command."
+            return "\(vision.model) is on this Mac. Screenshots stay here, even when a cloud model plans the command."
         }
         return "Downloads \(vision.model) (\(vision.sizeText)) in the background after setup, and asks for Screen "
-            + "Recording. Screenshots stay on this Mac, even when Claude or OpenAI plans the command."
+            + "Recording. Screenshots stay on this Mac, even when a cloud model plans the command."
     }
 
     private var keyPill: Pill? {
