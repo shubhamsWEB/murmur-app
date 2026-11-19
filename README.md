@@ -26,6 +26,13 @@ files from a description, and does small jobs for you. Speech is recognised on y
   <a href="https://www.producthunt.com/products/murmur-18?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-murmur-27023602-121b-4eab-968c-bfa99febae2b" target="_blank" rel="noopener noreferrer"><img alt="Murmur - Talk to your Mac. A free, private voice assistant | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1280346&amp;theme=light&amp;t=1792047746820"></a>
 </p>
 
+<p align="center">
+  <a href="https://usemurmur.live/film/"><img src="docs/media/film-poster.jpg" width="820" alt="Watch the film: a day with Murmur, 1 minute 10 seconds. A video call beside Murmur's meeting notes, with an answer already written."></a>
+  <br>
+  <sub><b>A day with Murmur, in 70 seconds:</b> voice typing in any app, a 400-page report read for you, a whole job done,
+  meeting notes hidden from the screen share, and memory. <a href="https://usemurmur.live/film/">Watch the film</a></sub>
+</p>
+
 ---
 
 ## What it does
