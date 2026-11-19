@@ -48,9 +48,6 @@ Everything starts with one key: hold **fn** and speak. Murmur works out whether 
 something.
 
 
-https://github.com/user-attachments/assets/c996234f-c5f6-4730-b045-a106bb3de095
-
-
 ## Install
 
 1. [Download **Murmur.dmg**](https://github.com/shubhamsWEB/murmur-app/releases/latest/download/Murmur.dmg), open it,
