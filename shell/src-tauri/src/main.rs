@@ -1763,7 +1763,7 @@ fn assistant_info(app: AppHandle) -> Value {
 
 /// One of its choices: "provider" ("local", "anthropic", "openai", "sarvam"), "localModel", "anthropicModel",
 /// "openaiModel", "sarvamModel",
-/// "workspace" (text), "cleanup" and "detect" (true or false), "style" ({category, style}).
+/// "workspace" (text), "cleanup", "grammar" and "detect" (true or false), "style" ({category, style}).
 #[tauri::command(async)]
 fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), String> {
     let shell = app.state::<Arc<Shell>>();
@@ -1778,6 +1778,7 @@ fn set_assistant(app: AppHandle, choice: String, value: Value) -> Result<(), Str
             "sarvamModel" => settings.sarvam_model = text,
             "workspace" => settings.anthropic_workspace = text,
             "cleanup" => settings.ai_cleanup = value.as_bool().unwrap_or(false),
+            "grammar" => settings.grammar_fix = value.as_bool().unwrap_or(false),
             "cleanupModel" => settings.cleanup_model = if text == "commands" { text } else { String::new() },
             "detect" => settings.detect_commands_off = !value.as_bool().unwrap_or(true),
             "learn" => settings.learn_off = !value.as_bool().unwrap_or(true),

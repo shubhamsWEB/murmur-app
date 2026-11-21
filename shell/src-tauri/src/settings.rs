@@ -78,6 +78,8 @@ pub struct Settings {
     /// the commands' model always.
     pub cleanup_model: String,
     pub cleanup_styles: BTreeMap<String, String>,
+    /// Grammar fixing of dictation (off by default, as on the Mac), on the clean-up model.
+    pub grammar_fix: bool,
     pub detect_commands_off: bool,
     /// Commands don't learn from their mistakes (they do unless this is turned on).
     pub learn_off: bool,
@@ -130,6 +132,7 @@ impl Settings {
                 anthropic_workspace: self.anthropic_workspace.clone(),
             },
             cleanup: self.ai_cleanup,
+            grammar: self.grammar_fix,
             own_cleanup: self.cleanup_model != "commands",
             styles: self.cleanup_styles.clone(),
             detect: !self.detect_commands_off,
