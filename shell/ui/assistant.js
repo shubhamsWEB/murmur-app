@@ -46,6 +46,7 @@ function render() {
   if (!info) return;
   $("ai-detect").checked = info.detect;
   $("ai-cleanup").checked = info.cleanup;
+  $("ai-grammar").checked = info.grammar;
 
   // Clean-up's model: Murmur Cleanup (downloaded through Ollama), or the commands' model.
   renderCleanupModel();
@@ -164,8 +165,9 @@ let following = null;     // a timer while Murmur Cleanup downloads
 
 function renderCleanupModel() {
   const row = $("ai-cleanup-model-row");
-  row.hidden = !info.cleanup;
-  if (!info.cleanup) return;
+  // Grammar fixing uses clean-up's model too.
+  row.hidden = !info.cleanup && !info.grammar;
+  if (row.hidden) return;
   const own = info.ownCleanup || { state: "missing" };
   const murmur = info.cleanupModel !== "commands";
   $("ai-cleanup-model").value = murmur ? "murmur" : "commands";
@@ -217,6 +219,7 @@ async function loadModels() {
 
 $("ai-detect").addEventListener("change", () => set("detect", $("ai-detect").checked));
 $("ai-cleanup").addEventListener("change", () => set("cleanup", $("ai-cleanup").checked));
+$("ai-grammar").addEventListener("change", () => set("grammar", $("ai-grammar").checked));
 $("ai-learn").addEventListener("change", () => set("learn", $("ai-learn").checked));
 $("ai-cleanup-model").addEventListener("change", () => set("cleanupModel", $("ai-cleanup-model").value));
 $("ai-cleanup-download").onclick = async () => {

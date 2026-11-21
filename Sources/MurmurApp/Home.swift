@@ -899,7 +899,7 @@ private struct SpeechAccuracyRows: View {
 }
 
 /// AI cleanup: off by default. When on, fillers and stumbles come out, self-corrections are applied and lists set
-/// out, in a style for each kind of app.
+/// out, in a style for each kind of app. Grammar fixing, also off by default, is a switch of its own on the same model.
 private struct CleanupSettings: View {
     @ObservedObject var dictation: DictationController
 
@@ -913,7 +913,15 @@ private struct CleanupSettings: View {
                 MurmurSwitch(label: "Tidy up what you say",
                              isOn: Binding(get: { dictation.aiCleanup }, set: { dictation.aiCleanup = $0 }))
             }
-            if dictation.aiCleanup {
+            RowDivider()
+            SettingRow(title: "Fix grammar",
+                       detail: "Corrects grammar mistakes and nothing else: “he go” → “he goes”, “I going” → “I am "
+                           + "going”, “two file” → “two files”. Your words, their order and their meaning stay. If the "
+                           + "model rewrites anything, or takes over 4 seconds, your words go in as heard.") {
+                MurmurSwitch(label: "Fix grammar",
+                             isOn: Binding(get: { dictation.grammarFix }, set: { dictation.grammarFix = $0 }))
+            }
+            if dictation.aiCleanup || dictation.grammarFix {
                 RowDivider()
                 SettingRow(title: "Model", detail: modelDetail) {
                     HStack(spacing: 8) {
@@ -936,6 +944,8 @@ private struct CleanupSettings: View {
                     }
                 }
                 .task { await own.refresh() }
+            }
+            if dictation.aiCleanup {
                 ForEach(DictationCleanup.Category.allCases, id: \.self) { category in
                     RowDivider()
                     SettingRow(title: category.display, detail: category.examples) {

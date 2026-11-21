@@ -122,6 +122,7 @@ public final class DictationController: ObservableObject {
     private static let lowLevelWarnedDefault = "dictation.lowLevelWarned"
     private static let showLogoDefault = "dictation.showLogo"
     private static let aiCleanupDefault = "dictation.aiCleanup"
+    private static let grammarFixDefault = "dictation.grammarFix"
 
     /// The microphone picked in Settings (its Core Audio UID); nil chooses automatically: the system's input, or the
     /// Mac's own microphone instead of a Bluetooth headset when `preferBuiltInMic` is on.
@@ -325,6 +326,13 @@ public final class DictationController: ObservableObject {
     public var aiCleanup: Bool {
         get { UserDefaults.standard.bool(forKey: Self.aiCleanupDefault) }
         set { UserDefaults.standard.set(newValue, forKey: Self.aiCleanupDefault); objectWillChange.send() }
+    }
+
+    /// Grammar fixing (off by default, on its own or with AI cleanup): grammar mistakes corrected ("he go" → "he goes")
+    /// and nothing else, by the same model as cleanup. With both on, one reply does both.
+    public var grammarFix: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.grammarFixDefault) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.grammarFixDefault); objectWillChange.send() }
     }
 
     public func cleanupStyle(for category: DictationCleanup.Category) -> DictationCleanup.Style {
@@ -887,7 +895,7 @@ public final class DictationController: ObservableObject {
         micLive = false
         // Murmur's cleanup model loads while you speak: unloaded (Ollama lets it go after 30 idle minutes, or for
         // the command model), loading it took most of cleanup's 4 seconds and the words went in untidied.
-        if aiCleanup, CleanupModel.shared.inUse {
+        if aiCleanup || grammarFix, CleanupModel.shared.inUse {
             let model = CleanupModel.tag
             Task.detached(priority: .utility) { await OllamaClient(model: model).warmUp() }
         }
@@ -1175,9 +1183,11 @@ public final class DictationController: ObservableObject {
                 lastHeard = text
                 lastCleaned = false
                 var words = text
-                if aiCleanup, DictationCleanup.worthCleaning(text) {
-                    hud.show(.working("Tidying up"))
-                    if let cleaned = await cleanUp(text) {
+                let tidy = aiCleanup && DictationCleanup.worthCleaning(text)
+                let fix = grammarFix && DictationCleanup.worthFixing(text)
+                if tidy || fix {
+                    hud.show(.working(tidy ? "Tidying up" : "Fixing grammar"))
+                    if let cleaned = await cleanUp(text, tidy: tidy, grammar: fix) {
                         words = cleaned
                         lastCleaned = cleaned != text
                     }
@@ -1205,20 +1215,22 @@ public final class DictationController: ObservableObject {
         }
     }
 
-    /// AI cleanup with Murmur's cleanup model, or the commands' model. Nil — the words are typed as heard — when the
-    /// model is slow (over 4 s), fails, or replies with anything but a tidied version of what was said.
-    private func cleanUp(_ text: String) async -> String? {
+    /// AI cleanup (`tidy`) and grammar fixing (`grammar`), one or both in one reply, with Murmur's cleanup model or
+    /// the commands' model. Nil — the words are typed as heard — when the model is slow (over 4 s), fails, or replies
+    /// with anything but a tidied or grammar-fixed version of what was said.
+    private func cleanUp(_ text: String, tidy: Bool, grammar: Bool) async -> String? {
         let app = NSWorkspace.shared.frontmostApplication
         let category = DictationCleanup.category(bundleID: app?.bundleIdentifier, windowTitle: Self.frontWindowTitle())
         let style = cleanupStyle(for: category)
         let (router, modelName) = await cleanupRouter()
-        let system = DictationCleanup.system(style: style, category: category)
-        let user = DictationCleanup.user(text)
+        let system = tidy ? DictationCleanup.system(style: style, category: category, grammar: grammar)
+                          : DictationCleanup.grammarSystem()
+        let turns: [RouterTurn] = tidy ? [.user(DictationCleanup.user(text))] : DictationCleanup.grammarTurns(text)
         let started = Date()
         let reply: String? = await withCheckedContinuation { continuation in
             let once = ResumeOnce()
             let work = Task {
-                let answer = try? await router.chat(system: system, turns: [.user(user)], tools: []).text
+                let answer = try? await router.chat(system: system, turns: turns, tools: []).text
                 once.run { continuation.resume(returning: answer) }
             }
             Task {
@@ -1228,18 +1240,19 @@ public final class DictationController: ObservableObject {
             }
         }
         let took = Date().timeIntervalSince(started)
-        let what = "\(modelName), \(category.rawValue), \(style.rawValue)"
+        let job = tidy && grammar ? "AI cleanup + grammar" : tidy ? "AI cleanup" : "grammar fix"
+        let what = tidy ? "\(modelName), \(category.rawValue), \(style.rawValue)" : modelName
         guard let reply else {
-            log(String(format: "dictation: AI cleanup (%@) gave nothing in %.1f s: typed as heard", what, took))
+            log(String(format: "dictation: %@ (%@) gave nothing in %.1f s: typed as heard", job, what, took))
             // Murmur's model may have been removed or Ollama closed: look again before the next dictation.
             if modelName == CleanupModel.tag { await CleanupModel.shared.refresh() }
             return nil
         }
-        guard let cleaned = DictationCleanup.accept(original: text, cleaned: reply) else {
-            log(String(format: "dictation: AI cleanup (%@) changed more than tidying in %.1f s: typed as heard", what, took))
+        guard let cleaned = DictationCleanup.accept(original: text, cleaned: reply, cleanup: tidy, grammar: grammar) else {
+            log(String(format: "dictation: %@ (%@) changed more than it may in %.1f s: typed as heard", job, what, took))
             return nil
         }
-        log(String(format: "dictation: AI cleanup (%@) in %.1f s%@", what, took, cleaned == text ? ", nothing to change" : ""))
+        log(String(format: "dictation: %@ (%@) in %.1f s%@", job, what, took, cleaned == text ? ", nothing to change" : ""))
         return cleaned
     }
 

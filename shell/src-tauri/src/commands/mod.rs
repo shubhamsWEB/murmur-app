@@ -35,6 +35,9 @@ pub struct Choices {
     pub ai: ai::Config,
     /// AI clean-up of dictation (off by default, as on the Mac), and the style for each kind of app.
     pub cleanup: bool,
+    /// Grammar fixing of dictation (off by default, as on the Mac): grammar mistakes corrected and nothing else, on
+    /// clean-up's model; with clean-up on too, one reply does both.
+    pub grammar: bool,
     /// Clean-up uses Murmur Cleanup when it's in Ollama (on unless "Same as commands" is chosen).
     pub own_cleanup: bool,
     pub styles: BTreeMap<String, String>,
@@ -222,7 +225,7 @@ impl Assistant {
     /// starts.
     pub fn warm_cleanup(&self) {
         let choices = self.choices();
-        if !choices.cleanup || !choices.own_cleanup {
+        if !(choices.cleanup || choices.grammar) || !choices.own_cleanup {
             return;
         }
         let known = self.own_cleanup.lock().unwrap().0;
@@ -291,39 +294,53 @@ impl Assistant {
 
     // MARK: Dictation, tidied
 
-    /// AI clean-up of what was heard. None (typed as heard) when it's off, too short to bother, slow (over four
-    /// seconds), failed, or the reply is anything but a tidied version of it.
+    /// AI clean-up and grammar fixing of what was heard, one or both in one reply. None (typed as heard) when they're
+    /// off, it's too short to bother, slow (over four seconds), failed, or the reply is anything but a tidied or
+    /// grammar-fixed version of it.
     pub fn clean_up(&self, text: &str, program: Option<&str>, title: Option<&str>, log: &dyn Fn(&str)) -> Option<String> {
         let choices = self.choices();
-        if !choices.cleanup || !cleanup::worth_cleaning(text) {
+        let tidy = choices.cleanup && cleanup::worth_cleaning(text);
+        let grammar = choices.grammar && cleanup::worth_fixing(text);
+        if !tidy && !grammar {
             return None;
         }
         let category = cleanup::category(program, title);
         let style = self.style(category);
         let router = self.cleanup_router();
         let own = matches!(&router, ai::Router::Ollama { model } if model == ai::CLEANUP_MODEL);
-        let what = format!("{}, {}, {}", if own { "Murmur Cleanup" } else { router.name() }, category.name(), style.name());
-        crate::dictation::pill_show(&self.app, "working", "Tidying up");
+        let model = if own { "Murmur Cleanup" } else { router.name() };
+        let what = if tidy { format!("{model}, {}, {}", category.name(), style.name()) } else { model.to_string() };
+        let job = match (tidy, grammar) { (true, true) => "AI clean-up + grammar", (true, false) => "AI clean-up", _ => "grammar fix" };
+        crate::dictation::pill_show(&self.app, "working", if tidy { "Tidying up" } else { "Fixing grammar" });
         let started = Instant::now();
-        let reply = ai::blocking(router.chat(&cleanup::system(style, category), &[Turn::User(cleanup::user(text))], &[],
-                                             Duration::from_secs(4)));
+        let system = if tidy { cleanup::system(style, category, grammar) } else { cleanup::grammar_system() };
+        // Grammar fixing on its own: worked examples first, as earlier turns.
+        let mut turns: Vec<Turn> = Vec::new();
+        if !tidy {
+            for (heard, fixed) in cleanup::GRAMMAR_EXAMPLES {
+                turns.push(Turn::User(cleanup::user(heard)));
+                turns.push(Turn::Assistant { text: fixed.to_string(), calls: Vec::new() });
+            }
+        }
+        turns.push(Turn::User(cleanup::user(text)));
+        let reply = ai::blocking(router.chat(&system, &turns, &[], Duration::from_secs(4)));
         let took = started.elapsed().as_secs_f64();
         match reply {
             Err(error) => {
-                log(&format!("AI clean-up ({what}) gave nothing in {took:.1} s ({error}): typed as heard"));
+                log(&format!("{job} ({what}) gave nothing in {took:.1} s ({error}): typed as heard"));
                 // Murmur Cleanup may have been removed, or Ollama closed: looked at again before the next dictation.
                 if own {
                     *self.own_cleanup.lock().unwrap() = (None, None);
                 }
                 None
             }
-            Ok(reply) => match cleanup::accept(text, &ai::output::answer(&reply.text)) {
+            Ok(reply) => match cleanup::accept(text, &ai::output::answer(&reply.text), tidy, grammar) {
                 None => {
-                    log(&format!("AI clean-up ({what}) changed more than tidying in {took:.1} s: typed as heard"));
+                    log(&format!("{job} ({what}) changed more than it may in {took:.1} s: typed as heard"));
                     None
                 }
                 Some(cleaned) => {
-                    log(&format!("AI clean-up ({what}) in {took:.1} s{}", if cleaned == text { ", nothing to change" } else { "" }));
+                    log(&format!("{job} ({what}) in {took:.1} s{}", if cleaned == text { ", nothing to change" } else { "" }));
                     Some(cleaned)
                 }
             },
@@ -565,6 +582,7 @@ impl Assistant {
             "keys": {"anthropic": key(ai::Provider::Anthropic), "openai": key(ai::Provider::OpenAI),
                      "sarvam": key(ai::Provider::Sarvam)},
             "cleanup": choices.cleanup,
+            "grammar": choices.grammar,
             "cleanupModel": if choices.own_cleanup { "murmur" } else { "commands" },
             "ownCleanup": self.own_cleanup_info(),
             "ownCleanupSize": ai::CLEANUP_SIZE,
