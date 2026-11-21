@@ -6,21 +6,14 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.8.0</title>
-      <pubDate>Wed, 18 Nov 2026 20:31:44 +0000</pubDate>
-      <sparkle:version>23</sparkle:version>
-      <sparkle:shortVersionString>1.8.0</sparkle:shortVersionString>
+      <title>Murmur 1.8.1</title>
+      <pubDate>Sat, 21 Nov 2026 11:04:13 +0000</pubDate>
+      <sparkle:version>24</sparkle:version>
+      <sparkle:shortVersionString>1.8.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[<h3>What's new on the Mac and Windows</h3>
-<p><b>Meeting notes.</b> Murmur can now sit in on your calls (Zoom, Teams, Meet, Slack and others). It listens to the call and to your microphone, writes down what's said, and keeps notes as it goes: decisions, who does what, and the details worth looking back at. When someone asks you something, an answer you can read out appears beside the call as it's being written, with the main point first, then the details, an example, and code when code was asked for. Press <b>Answer now</b> (⌃⌥Return on the Mac, Ctrl+Alt+Enter on Windows) to answer at once. You can also ask for a recap, follow-up questions, what to say next, or an answer about what's on the shared screen. Murmur offers to take notes when a call starts. At the end it saves the notes and the transcript to Documents › Murmur Meetings and can draft your follow-up email. Find past meetings under <b>Meetings</b>.</p>
-<p><b>Hidden from screen sharing.</b> The meeting panel is never shown in a shared screen or a recording. Murmur's other windows (the pill, answers and the Murmur button) are hidden too, unless you turn that off in Settings.</p>
-<p><b>Choose who answers and who listens.</b> Meeting answers and notes can use Claude (Sonnet, for complete and precise answers), OpenAI, Sarvam, or the model on your computer. The speech-to-text for meetings is a separate choice: the same model as dictation, Sarvam, or OpenAI.</p>
-<p><b>Sarvam.</b> Add a Sarvam key in Settings and use Sarvam for commands, and its speech model for dictation in Hindi, English and 20 more Indian languages, mixed as you speak. Hinglish is written in English letters unless you choose otherwise. Without an internet connection, dictation falls back to English on your computer.</p>
-<p><b>Commands learn from their mistakes.</b> When a command goes wrong, or you correct it straight after ("no, I meant…"), Murmur works out why and writes a rule for next time. It keeps track of whether each rule helps, with each AI model, and turns off the ones that don't. You can see and forget what it learned in Settings. It's on unless you turn it off.</p>
-<h3>Also on the Mac</h3>
-<p><b>Clear voice is off by default.</b> It's still in Settings for a noisy room. Dictation starts faster without it.</p>
-<p><b>Memory can be read with Sarvam</b> as well as Claude or OpenAI, if you choose.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.8.0/Murmur-1.8.0.dmg" type="application/octet-stream" sparkle:edSignature="TK/3t/yNXEbZgNKHmo97WX2EOhcRNUCrgUhkjm54OyxcA2fiNOklQ2y9cK/BEFZzQ385eOLNi8xH+nr8VXNPCA==" length="18532027"/>
+<p><b>Fix grammar.</b> Turn on <b>Fix grammar</b> in Settings and Murmur corrects grammar mistakes in what you dictate, and nothing else: "he go" becomes "he goes", "I going" becomes "I am going", "two file" becomes "two files". Your words, their order and their meaning stay as you said them, and Hinglish is left alone. If the fix would change anything more than grammar, or takes longer than 4 seconds, your words go in exactly as you said them. It runs on the same small model as AI cleanup, so with both turned on there's no extra wait. It's off unless you turn it on.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.8.1/Murmur-1.8.1.dmg" type="application/octet-stream" sparkle:edSignature="3J5/fqMKpbTncTERpNCrLySDJi0gRUECFnjHMzT334MyuOI/CJcuI3UgyAMpnY68583uz49ugi8T3rF+i1eDDQ==" length="18549627"/>
     </item>
   </channel>
 </rss>
