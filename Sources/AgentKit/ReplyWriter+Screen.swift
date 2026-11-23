@@ -24,8 +24,8 @@ extension ReplyWriter {
         if page == nil, browsers.contains(where: { bundle == $0 || bundle.hasPrefix($0 + ".") }) { return nil }
         let window: AXUIElement? = ScreenReader.attribute(element, kAXFocusedWindowAttribute)
         let title: String = window.flatMap { ScreenReader.attribute($0, kAXTitleAttribute) } ?? ""
-        let pieces = (page ?? window).map { pieces(in: $0, skipping: field) } ?? []
-        let (above, below) = arrange(pieces, field: fieldFrame)
+        let found = (page ?? window).map { Self.pieces(in: $0, skipping: field) } ?? []
+        let (above, below) = arrange(found, field: fieldFrame)
         let draft: String = ScreenReader.attribute(field, kAXValueAttribute) ?? ""
         let selected: String? = ScreenReader.attribute(field, kAXSelectedTextAttribute)
         let context = Context(app: ScreenText.appName(app.localizedName ?? bundle), title: ScreenText.appName(title),
@@ -98,7 +98,7 @@ extension ReplyWriter {
             if role == "AXSecureTextField" || subrole == "AXSecureTextField" || ScreenText.chrome.contains(subrole) { continue }
             if ["AXStaticText", "AXTextArea", "AXHeading", "AXCell"].contains(role),
                let value: String = ScreenReader.attribute(element, kAXValueAttribute),
-               let frame = frame(of: element) {
+               let frame = Self.frame(of: element) {
                 let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 if text.count > 1 { found.append(Piece(text: text, frame: frame)) }
             }
