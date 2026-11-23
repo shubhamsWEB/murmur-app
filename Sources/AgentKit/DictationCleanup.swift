@@ -211,8 +211,10 @@ public enum DictationCleanup {
         let kept = words(cleaned)
         guard !heard.isEmpty, !kept.isEmpty else { return nil }
         // Every word kept must be one that was said (a long passage may gain a word or two, "I am" → "I'm"):
-        // anything else was written by the model, an answer or a rephrasing.
-        let said = Set(heard)
+        // anything else was written by the model, an answer or a rephrasing. A number said in words and written in
+        // digits ("two" → "2", "one point three" → "1", "3") was said.
+        // A contraction's ending ("I am" → "I'm": "m") isn't a new word either.
+        let said = Set(heard).union(words(SpokenNumbers.allDigits(original))).union(["m", "s", "re", "ll", "d", "ve"])
         let new = kept.filter { !said.contains($0) }
         if grammar {
             guard grammarOnly(heard: heard, kept: kept, new: new, tidied: cleanup) else { return nil }
@@ -234,8 +236,66 @@ public enum DictationCleanup {
         let spoken = " \(heard.joined(separator: " ")) "
         let corrected = correctionCues.contains { spoken.contains(" \($0) ") }
         if Double(kept.count) < Double(heard.count) * (corrected ? 0.3 : 0.6) { return nil }
+        // And only those: a word of yours that went must be a filler, a word said twice, a small word folded into
+        // another ("I am" → "I'm"), or part of what you corrected. A sentence the model left out is never tidying.
+        if !onlyTidyingDropped(heard: words(SpokenNumbers.allDigits(heard.joined(separator: " "))),
+                               kept: words(SpokenNumbers.allDigits(kept.joined(separator: " ")))) { return nil }
         if kept.count > heard.count + (grammar ? max(2, heard.count / 5) : 2) { return nil }
         return cleaned
+    }
+
+    // MARK: - What cleanup may drop
+
+    /// Sounds and words that are only filler when dictated.
+    static let fillers: Set<String> = ["um", "umm", "uh", "uhh", "er", "erm", "hmm", "hm", "ah", "eh", "like", "you",
+                                       "know", "so", "well", "basically", "actually", "literally", "okay", "ok", "right",
+                                       "mean", "i", "yeah", "matlab", "na", "toh", "haan", "accha", "acha"]
+
+    /// Whether every word that went between what was said (`heard`) and what came back (`kept`) is one tidying may
+    /// take out: a filler, a word said twice in a row, a small word folded into another, a list's spoken marker, or
+    /// one in the stretch a correction replaced (up to eight words before "no", "I mean", "actually"…). At most one
+    /// other word may go (a stumble the lists don't name).
+    static func onlyTidyingDropped(heard: [String], kept: [String]) -> Bool {
+        // Which of the heard words are kept, in order (the longest common subsequence, forms of a word alike).
+        let n = heard.count, m = kept.count
+        guard n > 0 else { return true }
+        var table = [[Int]](repeating: [Int](repeating: 0, count: m + 1), count: n + 1)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            for j in stride(from: m - 1, through: 0, by: -1) {
+                table[i][j] = heard[i] == kept[j] || related(heard[i], kept[j])
+                    ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        var dropped: [Int] = []
+        var i = 0, j = 0
+        while i < n {
+            if j < m, heard[i] == kept[j] || related(heard[i], kept[j]), table[i][j] == table[i + 1][j + 1] + 1 {
+                i += 1; j += 1
+            } else if j < m, table[i][j + 1] >= table[i + 1][j] {
+                j += 1
+            } else {
+                dropped.append(i); i += 1
+            }
+        }
+        // The stretches corrections replaced: up to eight words before each cue, and the cue.
+        var corrected = Set<Int>()
+        for (k, word) in heard.enumerated() {
+            let two = k + 1 < n ? "\(word) \(heard[k + 1])" : ""
+            let cue = correctionCues.first { $0 == word || $0 == two }
+            guard let cue else { continue }
+            let length = cue.split(separator: " ").count
+            for x in max(0, k - 8)..<min(n, k + length) { corrected.insert(x) }
+        }
+        let other = dropped.filter { k in
+            let word = heard[k]
+            if fillers.contains(word) || grammarWords.contains(word) || listMarkers.contains(word) { return false }
+            if word.count == 1, word.first?.isNumber == true { return false }   // "one …, two …" as a list
+            if corrected.contains(k) { return false }
+            if k > 0, heard[k - 1] == word { return false }        // said twice
+            if k + 1 < n, heard[k + 1] == word { return false }
+            return true
+        }
+        return other.count <= 1
     }
 
     // MARK: - Checking a grammar fix
@@ -251,7 +311,9 @@ public enum DictationCleanup {
         if new.count > max(3, Int(Double(kept.count) * 0.4)) { return false }
         let saidNot = heard.filter(negations.contains).count, keptNot = kept.filter(negations.contains).count
         if tidied ? keptNot > saidNot : keptNot != saidNot { return false }
-        let numbers = Set(heard.filter { $0.contains(where: \.isNumber) })
+        // Numbers that were said, in digits too ("two" → "2"): writing one in digits isn't changing it.
+        let numbers = Set((heard + words(SpokenNumbers.allDigits(heard.joined(separator: " "))))
+            .filter { $0.contains(where: \.isNumber) })
         if kept.contains(where: { $0.contains(where: \.isNumber) && !numbers.contains($0) }) { return false }
         return Double(inOrder(heard, kept)) >= Double(kept.count) * 0.75
     }
@@ -279,7 +341,7 @@ public enum DictationCleanup {
     }
 
     /// Small words a grammar fix may add or change. Not "not", "no", "and", "or", "but", "if": those change meaning.
-    private static let grammarWords: Set<String> = [
+    static let grammarWords: Set<String> = [
         "a", "an", "the", "is", "are", "was", "were", "am", "be", "been", "being", "has", "have", "had", "do", "does",
         "did", "to", "of", "in", "on", "at", "for", "with", "by", "from", "it", "its", "s", "m", "re", "ve", "ll", "d",
         "i", "will", "would", "that", "which", "who", "whom", "this", "these", "those", "there", "their", "they",
@@ -289,11 +351,11 @@ public enum DictationCleanup {
     private static let negations: Set<String> = ["not", "no", "never", "t", "cannot", "nothing", "nobody", "none",
                                                  "neither", "nor", "without"]
 
-    private static let listMarkers: Set<String> = ["first", "second", "third", "fourth", "fifth", "sixth", "one", "two",
+    static let listMarkers: Set<String> = ["first", "second", "third", "fourth", "fifth", "sixth", "one", "two",
                                                    "three", "four", "five", "six", "next", "bullet", "point", "then",
                                                    "firstly", "secondly", "thirdly", "lastly", "finally"]
 
-    private static let correctionCues = ["no", "sorry", "i mean", "actually", "wait", "scratch that", "make that",
+    static let correctionCues = ["no", "sorry", "i mean", "actually", "wait", "scratch that", "make that",
                                          "rather", "nahi", "matlab"]
 
     /// Words as lowercase letters and digits only, for comparing what was said with what came back.

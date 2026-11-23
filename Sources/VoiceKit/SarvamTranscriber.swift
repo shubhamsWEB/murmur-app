@@ -76,7 +76,7 @@ actor SarvamTranscriber {
         if output.takesKeyterms(onV3: onV3), let terms = SarvamAudio.keyterms(keyterms) { fields.append(("keyterms", terms)) }
         let results = try await withThrowingTaskGroup(of: (Int, String, String?).self) { group in
             for (index, piece) in pieces.enumerated() {
-                let wav = SarvamAudio.wav(samples[piece])
+                let wav = SarvamAudio.wav(samples[piece], edge: SarvamAudio.edgeSilence)
                 group.addTask { let (text, language) = try await Self.send(wav, fields: fields, key: key); return (index, text, language) }
             }
             var texts = [String](repeating: "", count: pieces.count)

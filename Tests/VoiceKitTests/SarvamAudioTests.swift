@@ -31,6 +31,17 @@ struct SarvamAudioTests {
         #expect(cut > 24 && cut < 24.4)
     }
 
+    /// Each piece goes with silence before and after, so a word at its edge isn't dropped, and stays under 30 s.
+    @Test func eachPieceHasSilenceAtItsEdges() {
+        let wav = SarvamAudio.wav([0.5, 0.5][...], edge: 0.3)
+        let pad = Int(0.3 * 16_000)
+        #expect(wav.count == 44 + (2 + 2 * pad) * 2)
+        let first = wav[44..<46].withUnsafeBytes { $0.loadUnaligned(as: Int16.self).littleEndian }
+        let voice = wav[(44 + pad * 2)..<(46 + pad * 2)].withUnsafeBytes { $0.loadUnaligned(as: Int16.self).littleEndian }
+        #expect(first == 0 && voice > 0)
+        #expect(SarvamAudio.maxSeconds + 2 * SarvamAudio.edgeSilence < 30)
+    }
+
     @Test func theWavIs16BitMonoAt16kHz() {
         let wav = SarvamAudio.wav([0, 1, -1, 0.5][...])
         #expect(wav.count == 44 + 8)

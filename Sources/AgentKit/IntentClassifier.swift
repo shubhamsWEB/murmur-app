@@ -89,8 +89,35 @@ public enum IntentClassifier {
         "did", "read", "describe",
     ]
 
+    /// Apps (and web pages, by their window's title) where you talk to another AI: what you say into their text box
+    /// is for that AI, however much it sounds like an instruction ("check if the onboarding covers it", "update the
+    /// website and release it").
+    static let otherAIs: Set<String> = [
+        "claude", "chatgpt", "cursor", "codex", "windsurf", "gemini", "perplexity", "copilot", "code", "visual studio code",
+        "zed", "kiro", "antigravity", "lm studio", "msty", "jan",
+    ]   // Not the terminals: there "build me an app" starts Claude Code, as it always has.
+    static let otherAITitles = #"(?i)\b(claude|chatgpt|gemini|perplexity|copilot|deepseek|grok|mistral le chat|meta ai)\b"#
+
+    /// Why a dictation into a text box is typed whatever it says, or nil: it's in another AI's box, or it's long (a
+    /// command for Murmur is a sentence or two). Saying "Murmur, …" or holding the command key still makes it one.
+    /// On 23 Nov a 41-second note into Claude starting "Check if…" ran as a question about messages, and "Ab jo
+    /// website hai usko update kar do" into Claude ran as a command: neither was typed.
+    public static func typed(_ utterance: String, focus: Focus, frontApp: String?, windowTitle: String?) -> String? {
+        guard focus == .textField, WakeName.strip(utterance) == nil else { return nil }
+        let words = QuickCommands.clean(utterance).split(separator: " ").count
+        // A short known command ("open Slack", "volume 30") is still for Murmur, wherever you are.
+        if words <= 6, QuickCommands.parseAll(utterance) != nil { return nil }
+        let app = (frontApp ?? "").lowercased()
+        if otherAIs.contains(app) { return "in \(frontApp ?? "another AI")'s text box" }
+        if let windowTitle, windowTitle.range(of: otherAITitles, options: .regularExpression) != nil {
+            return "in another AI's text box (\(windowTitle.prefix(40)))"
+        }
+        if words > 25 { return "\(words) words into a text box" }
+        return nil
+    }
+
     public static func decide(_ utterance: String, forcedCommand: Bool, focus: Focus, frontApp: String?,
-                              hasSelection: Bool, router: Router) async -> Decision {
+                              hasSelection: Bool, router: Router, windowTitle: String? = nil) async -> Decision {
         if forcedCommand { return Decision(intent: .command, reason: "command key held") }
         let cleaned = QuickCommands.clean(utterance)
         if cleaned.isEmpty { return Decision(intent: .dictation, reason: "empty") }
@@ -102,6 +129,9 @@ public enum IntentClassifier {
         // Text selected and "summarise this", "make it more formal", "translate this to Hindi".
         if hasSelection, CommandAgent.isAboutSelection(utterance) {
             return Decision(intent: .command, reason: "an instruction about the selected text")
+        }
+        if let reason = typed(utterance, focus: focus, frontApp: frontApp, windowTitle: windowTitle) {
+            return Decision(intent: .dictation, reason: reason)
         }
         // "my photos from Goa are amazing" in a message is text; "find my photos…" is a search anywhere.
         let verblessFileSearch = QuickCommands.parseAll(utterance)?.allSatisfy { $0.tool == "search_files" } == true

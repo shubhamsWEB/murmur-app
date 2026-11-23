@@ -3,6 +3,7 @@ import ApplicationServices
 import AgentKit
 import AVFoundation
 import Carbon.HIToolbox
+import FluidAudio
 
 /// Murmur's dictation: hold the dictation key to talk and release to insert, or double-tap it for hands-free and tap
 /// again to finish (Esc cancels). Speech is transcribed on this Mac and pasted into the focused app.
@@ -52,6 +53,8 @@ public final class DictationController: ObservableObject {
     private var previousApp: NSRunningApplication?
     /// At the key press: whether a text field had the focus, and what was selected.
     private var focusAtPress = IntentClassifier.Focus.unknown
+    /// The front window's title when the key went down (another AI's page in a browser: what you say is typed).
+    private var titleAtPress: String?
     /// The words to listen for in this dictation (DictationVocabulary), from the window it started in.
     private var vocabularyAtPress: [String] = []
     private var selectionAtPress: String?
@@ -200,7 +203,8 @@ public final class DictationController: ObservableObject {
     /// Whether vocabulary is in use (your words, or the window's), and the model can take it.
     private var wantsVocabulary: Bool {
         transcriber.takesVocabulary
-            && (listensForScreenWords || !DictationVocabulary.userWords(from: dictationWords).isEmpty)
+            && ((listensForScreenWords && transcriber.model != .sarvam)
+                || !DictationVocabulary.userWords(from: dictationWords).isEmpty)
     }
 
     /// The word spotter, downloaded (once, about 106 MB) and loaded in the background when vocabulary is wanted.
@@ -223,8 +227,12 @@ public final class DictationController: ObservableObject {
     /// The words for a dictation starting now, in the front window.
     private func vocabularyNow() -> [String] {
         guard wantsVocabulary else { return [] }
-        let title = listensForScreenWords ? Self.frontWindowTitle() : nil
-        let app = listensForScreenWords ? NSWorkspace.shared.frontmostApplication?.localizedName : nil
+        // Sarvam gets only the words you listed. Given the window's words too, it wrote them over what you said, with
+        // nothing to check it: "Murmur ki website" said into Claude came back "Claude ki website" (23 Nov). Parakeet
+        // may still listen for them: there a word is swapped only when Parakeet wasn't sure of it.
+        let screen = listensForScreenWords && transcriber.model != .sarvam
+        let title = screen ? Self.frontWindowTitle() : nil
+        let app = screen ? NSWorkspace.shared.frontmostApplication?.localizedName : nil
         return DictationVocabulary.terms(windowTitle: title, appName: app,
                                          userWords: DictationVocabulary.userWords(from: dictationWords))
     }
@@ -834,6 +842,7 @@ public final class DictationController: ObservableObject {
             // apps), and a quick first word was lost while it did.
             begin(handsFree: doubleTap)
             focusAtPress = Self.focus()
+            titleAtPress = Self.frontWindowTitle()
             selectionAtPress = Self.selectedText()
             vocabularyAtPress = vocabularyNow()
         default:
@@ -910,6 +919,29 @@ public final class DictationController: ObservableObject {
     }
 
     public var isRunningCommand: Bool { commandTask != nil }
+
+    // MARK: - Checking dictation with recordings
+
+    /// Debug runs: a recording (any audio file) through dictation as it would go after you let go of the key: the
+    /// level, the speech model chosen, numbers in digits and AI cleanup as set, the safety checks; nothing typed.
+    /// Returns what the speech model heard and what would be typed.
+    public func dictateFile(_ url: URL) async -> (heard: String, typed: String, seconds: Double)? {
+        guard let file = try? AVAudioFile(forReading: url),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+              (try? file.read(into: buffer)) != nil, let channel = buffer.floatChannelData?[0] else { return nil }
+        let raw = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+        let rate = file.processingFormat.sampleRate
+        let samples = rate == 16_000 ? raw : ((try? AudioConverter().resample(raw, from: rate)) ?? [])
+        guard !samples.isEmpty else { return nil }
+        let leveled = AudioLevel.normalize(samples, maxGainDB: whisperMode ? 40 : 30)
+        let heard = TextCleanup.basic((try? await transcriber.transcribe(leveled.samples, vocabulary: [])) ?? "")
+        var text = heard
+        if aiCleanup { text = SpokenNumbers.digits(text) }
+        let tidy = aiCleanup && DictationCleanup.worthCleaning(text)
+        let fix = grammarFix && DictationCleanup.worthFixing(text)
+        if tidy || fix, let cleaned = await cleanUp(text, tidy: tidy, grammar: fix) { text = cleaned }
+        return (heard, text, Double(samples.count) / 16_000)
+    }
 
     // MARK: - Write it for me
 
@@ -1106,6 +1138,7 @@ public final class DictationController: ObservableObject {
             previousApp = NSWorkspace.shared.frontmostApplication
             begin(handsFree: true)
             focusAtPress = Self.focus()
+            titleAtPress = Self.frontWindowTitle()
             selectionAtPress = Self.selectedText()
             vocabularyAtPress = vocabularyNow()
         default:
@@ -1186,6 +1219,7 @@ public final class DictationController: ObservableObject {
         let frontApp = previousApp?.localizedName
         let pressedSelection = selectionAtPress
         let focus = focusAtPress
+        let pressedTitle = titleAtPress
         let detect = detectCommands
         let vocabulary = vocabularyAtPress
         let compare = UserDefaults.standard.bool(forKey: Self.compareDefault)
@@ -1261,7 +1295,8 @@ public final class DictationController: ObservableObject {
                     : detect
                     ? await IntentClassifier.decide(text, forcedCommand: forcedCommand,
                                                     focus: focus, frontApp: frontApp,
-                                                    hasSelection: selection != nil, router: agent.currentRouter())
+                                                    hasSelection: selection != nil, router: agent.currentRouter(),
+                                                    windowTitle: pressedTitle)
                     : IntentClassifier.Decision(intent: forcedCommand ? .command : .dictation,
                                                 reason: forcedCommand ? "command key held" : "detection off")
                 log("intent: \(decision.intent.rawValue) (\(decision.reason))")
@@ -1305,6 +1340,12 @@ public final class DictationController: ObservableObject {
                 }
                 lastHeard = text
                 lastCleaned = false
+                // AI cleanup writes numbers as digits, whatever the model does: "version one point three" →
+                // "version 1.3" (Sarvam writes them out in words, and the model was told to leave them).
+                if aiCleanup {
+                    let numbered = SpokenNumbers.digits(text)
+                    if numbered != text { log("dictation: numbers written as digits"); text = numbered; lastCleaned = true }
+                }
                 var words = text
                 let tidy = aiCleanup && DictationCleanup.worthCleaning(text)
                 let fix = grammarFix && DictationCleanup.worthFixing(text)
@@ -1312,7 +1353,7 @@ public final class DictationController: ObservableObject {
                     hud.show(.working(tidy ? "Tidying up" : "Fixing grammar"))
                     if let cleaned = await cleanUp(text, tidy: tidy, grammar: fix) {
                         words = cleaned
-                        lastCleaned = cleaned != text
+                        lastCleaned = lastCleaned || cleaned != text
                     }
                 }
                 lastText = words
@@ -1509,6 +1550,13 @@ public final class DictationController: ObservableObject {
     /// Starts the key monitor. Without Accessibility permission macOS refuses it, so this retries every 2 s
     /// until you grant it in System Settings (once, with macOS's prompt, if `prompt`).
     private func startMonitor(prompt: Bool) {
+        // A dev copy (its own settings suite, beside the installed Murmur) leaves the talk key to the installed one:
+        // on 23 Nov a dev copy left open after a tour check heard fn too, and every dictation was typed twice. It
+        // listens only when asked (-devListens YES).
+        if UserDefaults.standard.string(forKey: "defaultsSuite") != nil, !UserDefaults.standard.bool(forKey: "devListens") {
+            log("dictation: a dev copy: the talk key is left to the installed Murmur (-devListens YES to listen)")
+            return
+        }
         if prompt {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)

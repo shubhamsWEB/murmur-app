@@ -44,6 +44,28 @@ struct DictationCleanupTests {
     @Test func droppingTooMuchRejected() {
         #expect(accept("I think we should move the launch to next week because the build is not ready", "We should move the launch.") == nil)
     }
+    /// Cleanup takes out what's tidying, never what you said: a dropped sentence or clause means the words go in as heard.
+    @Test func droppedWordsMustBeTidying() {
+        // A clause gone: rejected, however much is left.
+        #expect(accept("check if the onboarding covers the meeting notes and also the one tap feature we just built",
+                       "Check if the onboarding covers the meeting notes.") == nil)
+        #expect(accept("please send the report today and copy Rahul on it so he knows", "Please send the report today.") == nil)
+        // Fillers, a repeat, a contraction, a correction: kept.
+        #expect(accept("so um I I am going to send it you know by tonight", "I'm going to send it by tonight.")
+                == "I'm going to send it by tonight.")
+        #expect(accept("let's do it on Monday no wait Tuesday afternoon", "Let's do it on Tuesday afternoon.")
+                == "Let's do it on Tuesday afternoon.")
+    }
+
+    /// Numbers written in digits are what was said: "version one point three" → "version 1.3".
+    @Test func digitsForSpokenNumbersAreKept() {
+        #expect(accept("um complete the tasks in version one point three", "Complete the tasks in version 1.3.")
+                == "Complete the tasks in version 1.3.")
+        #expect(accept("we have twenty five people coming", "We have 25 people coming.") == "We have 25 people coming.")
+        // A number that wasn't said is still the model's own.
+        #expect(accept("we have some people coming", "We have 25 people coming.") == nil)
+    }
+
     @Test func emptyRejected() { #expect(accept("hello there my friend", "  ") == nil) }
     @Test func shortNotWorthIt() {
         #expect(!DictationCleanup.worthCleaning("ok thanks"))

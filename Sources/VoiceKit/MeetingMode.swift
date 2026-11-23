@@ -19,6 +19,9 @@ import Foundation
 @MainActor
 public final class MeetingMode {
     let state = MeetingState()
+    /// Telling the call's voices apart, and the last one heard (a short stretch straight after is theirs too).
+    private let voiceprints = MeetingVoices()
+    private var lastVoice: (voice: Int, until: Date)?
     private let log: (String) -> Void
     private let transcriber: () -> SpeechTranscriber?
     private let router: () -> Router?
@@ -207,6 +210,17 @@ public final class MeetingMode {
         checkedRevision = -1
         linesAtNotes = 0
         lastNotes = Date()
+        lastVoice = nil
+        Task { [weak self, voiceprints] in
+            await voiceprints.reset()
+            let started = Date()
+            do {
+                try await voiceprints.prepare()
+                self?.log(String(format: "meeting: voices told apart (model ready in %.1f s)", Date().timeIntervalSince(started)))
+            } catch {
+                self?.log("meeting: can't tell voices apart: \(error.localizedDescription)")
+            }
+        }
         let (stream, continuation) = AsyncStream.makeStream(of: MeetingPiece.self)
         pieces = continuation
         worker = Task { [weak self] in
@@ -470,7 +484,20 @@ public final class MeetingMode {
             }
             let text = TextCleanup.basic(raw)
             guard MeetingText.isWorthKeeping(text) else { return }
-            add(MeetingLine(id: nextID, speaker: piece.speaker, text: text, at: piece.at))
+            // Which of them said it: by voice; a stretch too short to tell, straight after one that wasn't, is theirs.
+            var voice: Int?
+            if piece.speaker == .them {
+                voice = await voiceprints.who(piece.samples)
+                if voice == nil, let lastVoice, piece.at.timeIntervalSince(lastVoice.until) < 3 { voice = lastVoice.voice }
+                let end = piece.at.addingTimeInterval(Double(piece.samples.count) / 16_000)
+                if let voice { lastVoice = (voice, end) }
+                let heard = await voiceprints.count
+                if heard != state.voices {
+                    state.voices = heard
+                    if heard > 1 { log("meeting: \(heard) voices on the call") }
+                }
+            }
+            add(MeetingLine(id: nextID, speaker: piece.speaker, text: text, at: piece.at, voice: voice))
             nextID += 1
         } catch {
             log("meeting: couldn't transcribe: \(error.localizedDescription)")
@@ -482,9 +509,14 @@ public final class MeetingMode {
         switch line.speaker {
         case .you:
             // On speakers, your microphone hears the call too: that isn't you speaking.
-            if recent.contains(where: { $0.speaker == .them && MeetingText.isEcho(line.text, of: $0.text) }) { return }
+            if recent.contains(where: { $0.speaker == .them
+                && MeetingText.isEcho(line.text, of: $0.text, apart: line.at.timeIntervalSince($0.at)) }) {
+                log("meeting: your microphone picked up the call (speakers?): left out once")
+                return
+            }
         case .them:
-            let echoes = Set(recent.filter { $0.speaker == .you && MeetingText.isEcho($0.text, of: line.text) }.map(\.id))
+            let echoes = Set(recent.filter { $0.speaker == .you
+                && MeetingText.isEcho($0.text, of: line.text, apart: line.at.timeIntervalSince($0.at)) }.map(\.id))
             if !echoes.isEmpty { state.lines.removeAll { echoes.contains($0.id) } }
         }
         state.lines.append(line)
@@ -557,7 +589,7 @@ public final class MeetingMode {
         checkedRevision = turnRevision
         lastVerdict = nil
         let revision = turnRevision
-        let user = "Conversation so far (newest last):\n\(MeetingText.transcript(state.lines, limit: 4_000))\n\n"
+        let user = "Conversation so far (newest last):\n\(MeetingText.transcript(state.lines, limit: 4_000, label: state.label))\n\n"
             + "What the other side said since the last answer: \"\(text)\""
         Task { [weak self] in
             let verdict = await router.choose(system: Self.decideSystem, user: user, field: "decision",
@@ -615,7 +647,7 @@ public final class MeetingMode {
         log("meeting: drafting a follow-up email")
         var prompt = contextText.isEmpty ? "" : "\(contextText)\n\n"
         prompt += state.notesText.isEmpty
-            ? "The meeting (newest last):\n\(MeetingText.transcript(state.lines.filter { MeetingText.isSubstantive($0.text) }))"
+            ? "The meeting (newest last):\n\(MeetingText.transcript(state.lines.filter { MeetingText.isSubstantive($0.text) }, label: state.label))"
             : "The meeting's notes:\n\(state.notesText)"
         Task { [weak self] in
             guard let self else { return }
@@ -682,7 +714,7 @@ public final class MeetingMode {
         // All of the meeting's context and documents, and a long stretch of the conversation: complete, precise
         // answers first.
         var base = contextText.isEmpty ? "" : "\(contextText)\n\n"
-        base += "Conversation so far (newest last):\n\(MeetingText.transcript(state.lines, limit: transcriptLimit))\n\n"
+        base += "Conversation so far (newest last):\n\(MeetingText.transcript(state.lines, limit: transcriptLimit, label: state.label))\n\n"
         base += request
         let system = kind.system
         let bundle = appBundle
@@ -795,16 +827,16 @@ public final class MeetingMode {
         var prompt = contextText.isEmpty ? "" : "\(contextText)\n\n"
         if final {
             prompt += state.notesText.isEmpty ? "" : "Notes taken during the meeting:\n\(state.notesText)\n\n"
-            prompt += "The whole meeting (newest last):\n\(MeetingText.transcript(substantive, limit: 30_000))\n\n"
+            prompt += "The whole meeting (newest last):\n\(MeetingText.transcript(substantive, limit: 30_000, label: state.label))\n\n"
             prompt += "The meeting has ended. Write the final notes from the whole meeting, with a title line (# …) "
                 + "naming what it was actually about."
         } else {
             prompt += state.notesText.isEmpty ? "No notes yet.\n\n" : "Notes so far:\n\(state.notesText)\n\n"
             if !earlier.isEmpty {
                 prompt += "Just before, for context (already in the notes):\n"
-                    + "\(MeetingText.transcript(Array(earlier.suffix(6)), limit: 1_500))\n\n"
+                    + "\(MeetingText.transcript(Array(earlier.suffix(6)), limit: 1_500, label: state.label))\n\n"
             }
-            prompt += "New since the notes were last updated:\n\(MeetingText.transcript(fresh, limit: 10_000))\n\n"
+            prompt += "New since the notes were last updated:\n\(MeetingText.transcript(fresh, limit: 10_000, label: state.label))\n\n"
             prompt += "Update the notes with what's new and worth keeping, and reply with the whole notes. If nothing "
                 + "new is worth noting, reply exactly: NO CHANGE"
         }
@@ -838,7 +870,7 @@ public final class MeetingMode {
         time.dateFormat = "HH:mm:ss"
         var text = state.notesText.isEmpty ? "# Meeting notes\n" : state.notesText
         text += "\n\n## Transcript\n\n"
-        text += state.lines.map { "**\(time.string(from: $0.at)) \($0.speaker.rawValue):** \($0.text)" }
+        text += state.lines.map { "**\(time.string(from: $0.at)) \(state.label($0)):** \($0.text)" }
             .joined(separator: "\n\n")
         text += "\n"
         do {
@@ -871,8 +903,8 @@ public final class MeetingMode {
     }
 
     static let answerSystem = """
-        You help the user during a live meeting or call. In the transcript, "Them" is the other people and "You" is \
-        the user; it's speech-to-text, so expect misheard words. The user glances at your answer and says it out \
+        You help the user during a live meeting or call. In the transcript, "You" is the user and the other people are \
+        "Them", "Speaker 1", "Speaker 2" or their names; it's speech-to-text, so expect misheard words. The user glances at your answer and says it out \
         loud, live, so it must be quick to scan and natural to say, and complete, precise and correct. Reply in \
         exactly this shape, plain text, no preamble; use **bold** only for the one or two key words in a line:
         ANSWER: the direct answer in one short sentence the user can say first, in the first person.
@@ -899,8 +931,8 @@ public final class MeetingMode {
         """
 
     static let followUpSystem = """
-        You help the user during a live meeting or call. In the transcript, "Them" is the other people and "You" is \
-        the user; it's speech-to-text, so expect misheard words. Suggest questions the user could ask now: sharp, \
+        You help the user during a live meeting or call. In the transcript, "You" is the user and the other people are \
+        "Them", "Speaker 1", "Speaker 2" or their names; it's speech-to-text, so expect misheard words. Suggest questions the user could ask now: sharp, \
         specific to what was actually said, the kind a thoughtful person would ask to clarify, go deeper or move \
         things forward. Reply in exactly this shape, plain text, **bold** only for a key word:
         ANSWER: one short sentence on what's worth digging into right now.
@@ -910,8 +942,8 @@ public final class MeetingMode {
         """
 
     static let recapSystem = """
-        You help the user during a live meeting or call. In the transcript, "Them" is the other people and "You" is \
-        the user; it's speech-to-text, so expect misheard words. Recap the meeting so far for someone who lost the \
+        You help the user during a live meeting or call. In the transcript, "You" is the user and the other people are \
+        "Them", "Speaker 1", "Speaker 2" or their names; it's speech-to-text, so expect misheard words. Recap the meeting so far for someone who lost the \
         thread for a few minutes. Reply in exactly this shape, plain text, **bold** only for key words:
         ANSWER: what the meeting is about, in one short sentence.
         POINTS:
@@ -934,7 +966,7 @@ public final class MeetingMode {
 
     static let decideSystem = """
         You watch a live meeting transcript (speech-to-text, so expect misheard words and missing punctuation). \
-        "Them" is the other people and "You" is the user. Decide one thing about what the other side said since the \
+        "You" is the user; the other people are "Them", "Speaker 1", "Speaker 2" or their names. Decide one thing about what the other side said since the \
         last answer:
         "answer": they asked the user something, or asked them to explain, describe, show or do something (however \
         it's phrased: "tell me about…", "I'd love to hear how you…", "walk us through…", "what's your take"), and \
@@ -951,8 +983,8 @@ public final class MeetingMode {
         """
 
     static let notesSystem = """
-        You are an excellent note-taker sitting in on the user's meeting. In the transcript, "Them" is the other \
-        people and "You" is the user; it's speech-to-text, so fix obvious mishearings from context and ignore \
+        You are an excellent note-taker sitting in on the user's meeting. In the transcript, "You" is the user and the \
+        other people are "Them", "Speaker 1", "Speaker 2" or their names; it's speech-to-text, so fix obvious mishearings from context and ignore \
         fragments that make no sense.
         Note only what someone would want to look back at: what was decided, who will do what and by when, the \
         facts, numbers, names, dates and terms that came up, problems raised and how they were resolved, and \
@@ -1126,6 +1158,9 @@ final class MeetingState: ObservableObject {
     @Published var copied = false
     @Published var autoAnswer = true
     @Published var micMuted = false
+    /// How many voices on the call have spoken (MeetingVoices), and the names the screen gave them.
+    @Published var voices = 0
+    @Published var names: [Int: String] = [:]
     @Published var callLevel: Float = 0
     @Published var micLevel: Float = 0
     @Published var about = ""
@@ -1172,7 +1207,14 @@ final class MeetingState: ObservableObject {
     var replaceNext = false
     private var nextAnswerID = 0
 
+    /// Who said a line, as the transcript shows it ("You", "Them", "Speaker 2", a name).
+    func label(_ line: MeetingLine) -> String {
+        MeetingText.label(line, voices: voices, names: names)
+    }
+
     func reset() {
+        voices = 0
+        names = [:]
         running = false
         finishing = false
         app = nil
