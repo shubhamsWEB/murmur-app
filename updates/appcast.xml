@@ -6,21 +6,22 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.9.0</title>
-      <pubDate>Mon, 23 Nov 2026 18:24:00 +0000</pubDate>
-      <sparkle:version>26</sparkle:version>
-      <sparkle:shortVersionString>1.9.0</sparkle:shortVersionString>
+      <title>Murmur 1.9.1</title>
+      <pubDate>Mon, 23 Nov 2026 20:59:09 +0000</pubDate>
+      <sparkle:version>27</sparkle:version>
+      <sparkle:shortVersionString>1.9.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h3>What's new on the Mac</h3>
-<p><b>A tour of Murmur.</b> The first time you open Murmur after this update (or right after setup), a starling shows you around the real app. It points at each part, explains what it does, and lets you try dictation, a rewrite and file search on the spot. For meeting notes it shows the real offer card and notes panel: Live answers, Notes, Transcript and Context. It ends with where the AI runs, on your Mac or in the cloud, and what a cloud model sees. It moves on only when you click, and it starts by itself just once. Take it again any time from About &amp; Help or <b>Help › Take the Tour</b>.</p>
-<p><b>Tap to write.</b> Click in any text box and tap the talk key once. Murmur writes what goes there: your reply to the conversation above it, the message a note in the box asks for ("say yes but after 5, ask if he needs the enterprise tier"), or your draft, finished and fixed. It reads that window and asks your commands' AI. It brings in what it knows about you only when the conversation is about it, and leaves a gap like [time] rather than making up a fact. Nothing is ever sent: it's in the box, and ⌘Z takes it back. A tap outside a text box, in an address bar or in a search field does nothing. Turn it off under <b>Settings › Shortcuts › Tap to write</b>.</p>
-<p><b>Your memory, as pages.</b> With screen memory on, Murmur now keeps a page for each person and project you work with, a digest of what's going on (projects, people, promises), and a short profile of how you work. Each claim on a page says how it's known and where it came from. The pages are rewritten as new evidence comes in, and old claims are kept as history.</p>
-<p><b>Your memory in your AI apps.</b> Claude Desktop, Claude Code, Cursor, Codex, VS Code, Windsurf, Gemini CLI, LM Studio and Cline can ask Murmur what you know: "what did I promise Priya?". Murmur adds itself to the ones on your Mac (their settings are backed up first), and nothing leaves your Mac except the answers they ask for. Turn it off with <b>Share memory with AI apps</b> in Settings.</p>
-<h3>Also on the Mac</h3>
-<ul><li>Duplicate projects ("Sudoku V2" and "Modernizing Sudoku v2 game") are merged into one, with their memories and pages.</li><li>With "not at weekends" on, Murmur no longer reads the screen on Saturdays when your calendar counts only Sunday as the weekend.</li><li>Cloud models get room for a whole page, and an answer that's cut off keeps its finished part.</li></ul>
+      <description><![CDATA[<h3>Fixes on the Mac</h3>
+<p><b>Dictation is typed, not run as a command, when it's meant for someone else.</b> What you dictate into Claude, ChatGPT, Cursor or another AI app (in its app or in a browser) is typed into its box, however much it sounds like an instruction. So is anything over 25 words in any text box. Before, a long note starting "Check if…", or "update the website and release it" said into Claude, could be run as a command for Murmur and never typed. To give Murmur a command there, start with "Murmur, …" or hold ⌃ with fn. Short ones like "open Slack" still work as before.</p>
+<p><b>Sarvam no longer swaps your words for the window's.</b> Murmur used to send Sarvam the words in the front window's title to listen for, and Sarvam sometimes wrote them over what you said: "Murmur ki website" said into Claude came back "Claude ki website". Now Sarvam gets only the words you list in Settings.</p>
+<p><b>Long dictations keep every word.</b> A dictation over 30 seconds goes to Sarvam in pieces. They're now cut at a real pause, and each piece gets a moment of silence at both ends, so the word at a cut isn't lost.</p>
+<p><b>Numbers in digits.</b> With AI cleanup on, numbers you say are written the way people write them: "version one point three" → "version 1.3", "P two P one" → "P2 P1", "twenty five people" → "25 people", "ten percent" → "10%", "fifty dollars" → "$50", "at eleven thirty" → "at 11:30". One to nine in an ordinary sentence ("I have two kids") stay as words.</p>
+<p><b>Cleanup never drops what you said.</b> AI cleanup may take out fillers, words said twice and the phrase you corrected, and nothing else. If it leaves out anything more, your words go in exactly as you said them.</p>
+<p><b>Your side of the meeting stays in the transcript.</b> A reply that repeated the other person's words ("Can you share the pricing sheet?" / "Yes, I'll share the pricing sheet") was taken for the call echoing through your speakers and left out. Now only the same words, in the same order, at the same moment count as an echo.</p>
+<p><b>Who's speaking.</b> Meeting notes now tell the voices on a call apart, on your Mac: one other person is "Them", and with more they're "Speaker 1", "Speaker 2" and so on, in the transcript, the answers, the notes and the saved file. The voice model is downloaded once (about 30 MB).</p>
 <h3>Windows</h3>
-<p>No changes in this release. The tour, tap to write and memory pages come to Windows next.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.9.0/Murmur-1.9.0.dmg" type="application/octet-stream" sparkle:edSignature="iAdSw4CgPbfcXTjXnrmOJ4tqHciQPKs1DlPxrwEM+iD+6hZXYhoFnG94uDPvex9c8GAZe/IuJldQKCyUnFDpDQ==" length="19269338"/>
+<p>No changes in this release.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.9.1/Murmur-1.9.1.dmg" type="application/octet-stream" sparkle:edSignature="D4kB9DBVxAd6A51UNXFDj1T8UBecwNZ9GHjK13sO0DO9fyNrK0d5puIBcdoKrDshfVxbihMXd58IzM+zka6OBQ==" length="19353930"/>
     </item>
   </channel>
 </rss>
