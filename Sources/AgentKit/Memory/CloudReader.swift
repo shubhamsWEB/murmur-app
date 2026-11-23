@@ -44,6 +44,14 @@ public enum CloudReader {
     static var openaiModel: String { keys["openaiModel"] ?? "gpt-6-luna" }
     static var sarvamModel: String { keys["sarvamModel"] ?? ChatCompletions.sarvam.defaultModel }
 
+    /// Put after an answer that ran out of tokens.
+    public static let cutOff = "\n[cut off]"
+
+    /// The model it reads with.
+    static func model(_ provider: Provider) -> String {
+        provider == "anthropic" ? anthropicModel : provider == "sarvam" ? sarvamModel : openaiModel
+    }
+
     /// The provider's name, as the memory log says it.
     static func name(_ provider: Provider) -> String {
         switch provider {
@@ -77,18 +85,18 @@ public enum CloudReader {
             if let workspace = keys["anthropicWorkspace"], !workspace.isEmpty {
                 request.setValue(workspace, forHTTPHeaderField: "anthropic-workspace-id")
             }
-            body = ["model": model, "max_tokens": 900, "system": system,
+            body = ["model": model, "max_tokens": 4000, "system": system,
                     "messages": [["role": "user", "content": user]]]
         } else if provider == "sarvam" {
             // Sarvam's Token Factory: OpenAI-style, reasoning off (Sarvam 105B takes "none").
             request = URLRequest(url: ChatCompletions.sarvam.endpoint)
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-            body = ["model": model, "max_tokens": 1200, "reasoning_effort": "none",
+            body = ["model": model, "max_tokens": 4000, "reasoning_effort": "none",
                     "messages": [["role": "system", "content": system], ["role": "user", "content": user]]]
         } else {
             request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-            var openai: [String: Any] = ["model": model, "max_completion_tokens": 900,
+            var openai: [String: Any] = ["model": model, "max_completion_tokens": 4000,
                                          "messages": [["role": "system", "content": system], ["role": "user", "content": user]]]
             if json { openai["response_format"] = ["type": "json_object"] }
             body = openai
@@ -108,11 +116,20 @@ public enum CloudReader {
             MemoryLog.write("\(label) refused to read (\(code)): \(detail.prefix(160))")
             return nil
         }
+        // Out of tokens: the answer is cut off mid-word. Said in the log, and marked, so what reads it keeps only what
+        // was finished (`cutOff`).
+        let text: String?, cut: Bool
         if anthropic {
             let blocks = json?["content"] as? [[String: Any]] ?? []
-            return blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
+            text = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
+            cut = json?["stop_reason"] as? String == "max_tokens"
+        } else {
+            let choice = (json?["choices"] as? [[String: Any]])?.first
+            text = (choice?["message"] as? [String: Any])?["content"] as? String
+            cut = choice?["finish_reason"] as? String == "length"
         }
-        let choices = json?["choices"] as? [[String: Any]]
-        return (choices?.first?["message"] as? [String: Any])?["content"] as? String
+        guard let text else { return nil }
+        if cut { MemoryLog.write("\(label)'s answer was cut off (out of tokens)") }
+        return cut ? text + cutOff : text
     }
 }

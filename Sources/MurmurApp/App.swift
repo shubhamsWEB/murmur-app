@@ -1,4 +1,5 @@
 import AppKit
+import AgentKit
 import UserNotifications
 
 @main
@@ -62,6 +63,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + "index \(tildePath(settings.indexDirectory.path)) · models \(tildePath(settings.modelsDirectory.path))")
         // Only now is the log open: said here, so it's in it.
         if let replaced { log("launch: replaced the Murmur that was running (\(replaced))") }
+        // Murmur's memory in the AI apps on this Mac (Claude, Cursor, Codex…): added to any installed since, updated
+        // when this copy moved, or taken out when the user turned it off.
+        DispatchQueue.global(qos: .utility).async {
+            let done = MCPRegistration.sync()
+            let parts = [("added to", done.added), ("taken out of", done.removed), ("left alone in", done.skipped)]
+                .filter { !$0.1.isEmpty }.map { "\($0.0) \($0.1.joined(separator: ", "))" }
+            if !parts.isEmpty { DispatchQueue.main.async { log("memory for AI apps: " + parts.joined(separator: "; ")) } }
+        }
         let (atLogin, why) = Launch.atLogin()   // while the open-application event is still the current one
         let showWindow = !atLogin && !DebugHooks.drivesUI
         log("launch: \(atLogin ? "at login" : "opened by hand") (\(why))\(showWindow ? ", showing the window" : "")")
@@ -140,7 +149,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
         NSApp.windowsMenu = windowMenu
 
-        for submenu in [appMenu, fileMenu, editMenu, windowMenu] {
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(ActionMenuItem("Take the Tour") { [weak app] in app?.home.startTour() })
+        NSApp.helpMenu = helpMenu
+
+        for submenu in [appMenu, fileMenu, editMenu, windowMenu, helpMenu] {
             let item = NSMenuItem()
             item.submenu = submenu
             mainMenu.addItem(item)

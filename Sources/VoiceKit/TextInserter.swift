@@ -67,6 +67,11 @@ public enum TextInserter {
         return text?.isEmpty == false ? text : nil
     }
 
+    /// ⌘A: everything in the focused box selected.
+    public static func selectAll() {
+        press(CGKeyCode(kVK_ANSI_A))
+    }
+
     private static func pressCommandV() {
         press(CGKeyCode(kVK_ANSI_V))
     }

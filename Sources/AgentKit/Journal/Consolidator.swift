@@ -461,6 +461,7 @@ public enum Consolidator {
         switch level {
         case .hour: span = "one hour of the user's work, from the windows they worked in"
         case .day: span = "one day of the user's work, from summaries of its hours"
+        case .week: span = "one week of the user's work, from summaries of its days"
         case .month: span = "one month of the user's work, from summaries of its days"
         case .year: span = "one year of the user's work, from summaries of its months"
         }
@@ -565,12 +566,15 @@ public enum Consolidator {
             return await chat(system, text, schema: nil, model: model)
         }
         let calendar = Calendar.current
-        // Hours: each finished hour of the last 24 with something seen in it.
+        // Hours: each finished hour of the last 24 with something seen in it, and again when an episode in it was read
+        // after its summary was written (the summary said less than memory now knows).
         for back in (1...24).reversed() {
             guard keepGoing() else { return }
             guard let start = calendar.dateInterval(of: .hour, for: now.addingTimeInterval(Double(-back) * 3600)) else { continue }
             let period = Journal.Level.hour.period(of: start.start)
-            guard journal.chronicle(.hour, period) == nil else { continue }
+            if let written = journal.chronicleGenerated(.hour, period) {
+                guard let graph, let read = graph.lastRead(from: start.start, to: start.end), read > written else { continue }
+            }
             let seen = journal.snapshots(from: start.start, to: start.end, limit: 80)
             guard seen.reduce(0, { $0 + $1.seconds }) >= 120 || seen.count >= 3 else { continue }
             // The hour's episodes, once they're read, say it better than its windows: what each was, for how long, how
@@ -593,19 +597,20 @@ public enum Consolidator {
                 MemoryLog.write("wrote the summary of \(period)")
             }
         }
-        // Rollups: yesterday from its hours, last month from its days, last year from its months.
-        let rollups: [(Journal.Level, Date)] = [
-            (.day, now.addingTimeInterval(-86400)),
-            (.month, calendar.date(byAdding: .month, value: -1, to: now) ?? now),
-            (.year, calendar.date(byAdding: .year, value: -1, to: now) ?? now),
-        ]
-        for (level, date) in rollups {
+        // Rollups, from the level below: today and yesterday from their hours; this week and last from their days;
+        // this month and last; last year from its months. Written once their parts exist, and again when a part was
+        // written after them (late evidence), at most every three hours for a period still going on.
+        for (level, date, ongoing) in rollups(now: now, calendar: calendar) {
             guard keepGoing(), let below = level.below else { return }
-            let period = level.period(of: date)
-            guard journal.chronicle(level, period) == nil else { continue }
+            let period = level.period(of: date, calendar: calendar)
+            let partsWithDates = journal.chronicleParts(below, within: period)
+            if let written = journal.chronicleGenerated(level, period) {
+                guard partsWithDates.contains(where: { $0.generated > written }) else { continue }
+                if ongoing, now.timeIntervalSince(written) < 3 * 3600 { continue }
+            }
             // Hours that say the same (a window seen across several of them): once.
             var parts: [(period: String, summary: String)] = []
-            for part in journal.chronicles(below, within: period) {
+            for part in partsWithDates {
                 let words = BrainModel.keywords(part.summary)
                 if parts.contains(where: { BrainModel.similarity(BrainModel.keywords($0.summary), words) >= 0.6 }) { continue }
                 parts.append((part.period, part.summary))
@@ -614,8 +619,22 @@ public enum Consolidator {
             let text = parts.map { "\($0.period): \($0.summary)" }.joined(separator: "\n").prefix(7000)
             if let summary = await write(chronicleSystem(level), String(text)) {
                 journal.setChronicle(level, period, clean(summary), now: now)
+                MemoryLog.write("wrote the summary of \(period)")
             }
         }
+    }
+
+    /// The periods rolled up from the level below, each with whether it's still going on.
+    static func rollups(now: Date, calendar: Calendar) -> [(Journal.Level, Date, Bool)] {
+        [
+            (.day, now.addingTimeInterval(-86400), false),
+            (.day, now, true),
+            (.week, now.addingTimeInterval(-7 * 86400), false),
+            (.week, now, true),
+            (.month, calendar.date(byAdding: .month, value: -1, to: now) ?? now, false),
+            (.month, now, true),
+            (.year, calendar.date(byAdding: .year, value: -1, to: now) ?? now, false),
+        ]
     }
 
     /// A summary as kept: secrets out, and at most five sentences (a small model sometimes repeats its input back).

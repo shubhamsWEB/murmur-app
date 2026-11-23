@@ -274,6 +274,8 @@ extension MemoryIndex {
                 """, self.memoryRecords),
             ("chronicle", "SELECT group_concat(rowid || ':' || coalesce(generated, '') || ':' || coalesce(length(summary), ''), ',') FROM chronicle",
              self.chronicleRecords),
+            ("pages", "SELECT group_concat(id || ':' || coalesce(updated, '') || ':' || coalesce(length(body), ''), ',') FROM page",
+             self.pageRecords),
             ("loops", "SELECT group_concat(id || ':' || coalesce(last, '') || ':' || coalesce(status, '') || ':' || coalesce(due, ''), ',') FROM loop",
              self.loopRecords),
         ]
@@ -305,6 +307,7 @@ extension MemoryIndex {
             ("item:", "SELECT 'item:' || id FROM screen_item"), ("episode:", "SELECT 'episode:' || id FROM episode"),
             ("thread:", "SELECT 'thread:' || id FROM thread"), ("memory:", "SELECT 'memory:' || id FROM memory WHERE archived = 0"),
             ("chronicle:", "SELECT 'chronicle:' || rowid FROM chronicle"), ("loop:", "SELECT 'loop:' || id FROM loop"),
+            ("page:", "SELECT 'page:' || id FROM page"),
             ("snapshot:", "SELECT 'snapshot:' || id FROM snapshot"),
         ]
         var pruned = true
@@ -414,14 +417,28 @@ extension MemoryIndex {
 
     /// Summaries of the user's hours and days.
     func chronicleRecords() -> [Record] {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return db.rows("SELECT rowid, level, period, summary, generated FROM chronicle", []).compactMap { row in
+        db.rows("SELECT rowid, level, period, summary, generated FROM chronicle", []).compactMap { row in
             guard row.count == 5 else { return nil }
-            formatter.dateFormat = row[1] == "hour" ? "yyyy-MM-dd'T'HH" : "yyyy-MM-dd"
-            let at = formatter.date(from: row[2]) ?? date(row[4])
+            let at = Journal.Level.start(of: row[2]) ?? date(row[4])
             return Record(source: "chronicle:\(row[0])", kind: .summary, actor: "me", at: at,
                           title: "Your \(row[1]), \(row[2])", text: row[3], prior: 0.55)
+        }
+    }
+
+    /// Wiki pages: what Murmur knows about one person, project or topic, its core claims first. Trusted like what the
+    /// user told Murmur, below it: every claim on a page was checked against its evidence.
+    func pageRecords() -> [Record] {
+        db.rows("""
+            SELECT p.id, p.title, p.kind, p.summary, p.updated, p.aliases,
+              (SELECT group_concat(text, char(10)) FROM (SELECT text FROM page_claim c WHERE c.page = p.id AND c.invalid_at IS NULL
+                ORDER BY c.worth = 'detail', c.id))
+            FROM page p
+            """, []).compactMap { row in
+            guard row.count == 7 else { return nil }
+            let text = ([row[3]] + [WikiRules.unlinked(row[6])]).filter { !$0.isEmpty }.joined(separator: "\n")
+            return Record(source: "page:\(row[0])", kind: .fact, actor: row[2] == "me" ? "me" : "other", at: date(row[4]),
+                          title: row[2] == "me" ? "About you" : "About \(row[1])", text: String(text.prefix(2400)),
+                          entities: [row[1]] + row[5].split(separator: "\n").map(String.init), prior: 0.85)
         }
     }
 

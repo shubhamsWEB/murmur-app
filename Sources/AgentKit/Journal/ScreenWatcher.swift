@@ -75,6 +75,10 @@ public final class ScreenWatcher {
     private var thinking = false
     private var embedding = false
     private let vectors = MemoryVectors()
+    /// The wiki of people, projects and topics, and the user's profile and digest: written after episodes and
+    /// summaries, with the same model.
+    private let wiki = Wiki()
+    private let profile = Profile()
     /// A capture under way: another waits for the next change (two at once counted time backwards).
     private var capturing = false
     /// Why the model isn't reading now, logged when it changes.
@@ -410,7 +414,13 @@ public final class ScreenWatcher {
 
     /// The model, as an episode reader asks it.
     nonisolated static func ask(_ model: String, fast: Bool) -> EpisodeReader.Ask {
-        { system, user in await Consolidator.chat(system, user, schema: EpisodeReader.schema, model: model, fast: fast, maxTokens: 700) }
+        ask(model, fast: fast, schema: EpisodeReader.schema, maxTokens: 700)
+    }
+
+    /// The local model, held to a schema (nil: plain text).
+    nonisolated static func ask(_ model: String, fast: Bool, schema: [String: Any]?, maxTokens: Int) -> EpisodeReader.Ask {
+        nonisolated(unsafe) let schema = schema
+        return { system, user in await Consolidator.chat(system, user, schema: schema, model: model, fast: fast, maxTokens: maxTokens) }
     }
 
     /// A small picture of the window you've stayed in, for the vision model to look at later: only on a Mac that can
@@ -486,6 +496,11 @@ public final class ScreenWatcher {
                 }
                 if let prose = CloudReader.ask(provider, json: false) {
                     await Consolidator.chronicle(journal: journal, model: "", now: Date(), keepGoing: { true }, graph: graph, ask: prose)
+                    let name = CloudReader.name(provider)
+                    await WikiWriter.pass(wiki: wiki, brain: brain, graph: graph, journal: journal, ask: ask, model: name,
+                                          remote: true, limit: 6)
+                    await ProfileWriter.pass(profile: profile, journal: journal, wiki: wiki, brain: brain, graph: graph,
+                                             ask: prose, model: name, remote: true)
                 }
                 if read > 0 {
                     let name = provider == "anthropic" ? "Claude" : CloudReader.name(provider)
@@ -570,6 +585,18 @@ public final class ScreenWatcher {
             if keepGoing() {
                 await Consolidator.chronicle(journal: journal, model: model, now: Date(), keepGoing: keepGoing, graph: graph)
             }
+            // Knowledge from what was read: the pages of the people and projects it touched, then the digest and the
+            // profile when they're due.
+            if keepGoing() {
+                await WikiWriter.pass(wiki: wiki, brain: brain, graph: graph, journal: journal,
+                                      ask: Self.ask(model, fast: now.plugged, schema: WikiRules.schema, maxTokens: 900),
+                                      model: model, remote: false, limit: now.plugged ? 4 : 2, keepGoing: keepGoing)
+            }
+            if keepGoing() {
+                await ProfileWriter.pass(profile: profile, journal: journal, wiki: wiki, brain: brain, graph: graph,
+                                         ask: Self.ask(model, fast: false, schema: nil, maxTokens: 800), model: model,
+                                         remote: false, keepGoing: keepGoing)
+            }
             MemoryLog.write("read \(read) of \(pending) episodes of what you did with \(model) in "
                             + String(format: "%.0f s", Date().timeIntervalSince(started))
                             + (keepGoing() ? "" : " (stopped: you came back, or the power changed)"))
@@ -577,6 +604,7 @@ public final class ScreenWatcher {
                                 + (keepGoing() ? "" : "; stopped when you came back"))
             journal.prune()
             graph.prune()
+            wiki.prune()
         }
     }
 }

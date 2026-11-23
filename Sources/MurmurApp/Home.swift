@@ -28,6 +28,18 @@ enum HomeSection: String, CaseIterable, Identifiable {
         }
     }
 
+    /// What the tour calls this page's sidebar item.
+    var tourTarget: TourTarget? {
+        switch self {
+        case .search: .sidebarSearch
+        case .meetings: .sidebarMeetings
+        case .memory: .sidebarMemory
+        case .commands: .sidebarCommands
+        case .dictation: .sidebarSettings
+        default: nil
+        }
+    }
+
     var symbol: String {
         switch self {
         case .home: "house"
@@ -66,6 +78,8 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
     private unowned let app: AppController
     private(set) var window: NSWindow?
     let state = HomeState()
+    /// The walk around the window (`Tour.swift`).
+    let tour = TourModel()
 
     init(app: AppController) {
         self.app = app
@@ -77,6 +91,29 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
         if let section { state.section = section }
         let window = self.window ?? makeWindow()
         app.present(window)
+        startTourOnce()
+    }
+
+    /// The tour starts by itself once ever: the first time this window opens after setup (or after updating to a
+    /// Murmur that has it), once the window has settled. After that it's in About & Help, and Help › Take the Tour.
+    private func startTourOnce() {
+        guard !TourModel.seen, !tour.isOn, app.onboarding == nil, !AppController.offscreen, !DebugHooks.drivesUI
+        else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, self.isVisible, !TourModel.seen, !self.tour.isOn, self.app.onboarding == nil else { return }
+            log("tour: starting by itself, the first time")
+            self.tour.start(app: self.app, home: self.state)
+        }
+    }
+
+    /// Opens the window on Home and starts the tour.
+    func startTour() {
+        show(.home)
+        tour.start(app: app, home: state)
+    }
+
+    func snapshot(to url: URL) throws {
+        try Snapshot.write(window, to: url)
     }
 
     private func makeWindow() -> NSWindow {
@@ -95,7 +132,7 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
         if UserDefaults.standard.string(forKey: "defaultsSuite") == nil {
             window.setFrameAutosaveName("MurmurMainWindow")
         }
-        window.contentView = NSHostingView(rootView: HomeView(app: app, state: state).murmurStyle())
+        window.contentView = NSHostingView(rootView: HomeView(app: app, state: state, tour: tour).murmurStyle())
         if window.frame.origin == .zero { window.center() }
         self.window = window
         return window
@@ -106,6 +143,7 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
             QLPreviewPanel.shared().orderOut(nil)
         }
         PreviewPlayback.shared.stop()
+        if tour.isOn { tour.finish() }
         window?.contentView = nil
         window = nil
         app.windowClosed()
@@ -119,6 +157,7 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
 private struct HomeView: View {
     let app: AppController
     @Bindable var state: HomeState
+    let tour: TourModel
 
     var body: some View {
         HStack(spacing: 0) {
@@ -131,13 +170,22 @@ private struct HomeView: View {
                     SearchWindowView(search: app.searchWindow.search, model: app.model, app: app)
                 } else {
                     TimelineView(.periodic(from: .now, by: 1.5)) { _ in
-                        ScrollView {
-                            page
-                                .frame(maxWidth: state.section == .home ? 920 : 720, alignment: .leading)
-                                .padding(.horizontal, 48)
-                                .padding(.top, 56)
-                                .padding(.bottom, 48)
-                                .frame(maxWidth: .infinity)
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                page
+                                    .frame(maxWidth: state.section == .home ? 920 : 720, alignment: .leading)
+                                    .padding(.horizontal, 48)
+                                    .padding(.top, 56)
+                                    .padding(.bottom, 48)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            // The tour's next place in view (once its page is drawn: when the bird gets there).
+                            .onChange(of: tour.scrollToken) {
+                                guard let target = tour.step?.target else { return }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                                    withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .center) }
+                                }
+                            }
                         }
                     }
                 }
@@ -148,6 +196,12 @@ private struct HomeView: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(Theme.page)
         .foregroundStyle(Theme.ink)
+        .coordinateSpace(.named(tourSpace))
+        .environment(tour)
+        .overlay {
+            if tour.isOn { TourOverlay(tour: tour).transition(.opacity) }
+        }
+        .animation(.easeOut(duration: 0.25), value: tour.isOn)
     }
 
     @ViewBuilder
@@ -328,6 +382,7 @@ private struct Sidebar: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .tourTarget(section.tourTarget)
     }
 
     /// A newer Murmur is waiting: say which, and install it from here (Sparkle's window, with Install).
@@ -432,10 +487,15 @@ private struct HomePage: View {
     private var hero: some View {
         HStack(spacing: 0) {
             HStack(alignment: .center, spacing: 28) {
-                LiveKey(label: keyLabel, lit: dictation.phase != .idle)
+                LiveKey(label: keyLabel, lit: dictation.phase != .idle).tourTarget(.talk)
                 VStack(alignment: .leading, spacing: 14) {
                     Gesture(keys: [keyLabel], title: "Hold to dictate",
                             detail: "Talk, let go, it's typed where your cursor is.")
+                    if dictation.writeOnTap {
+                        Gesture(keys: [keyLabel], title: "Tap in a text box to write",
+                                detail: "The reply to what's above it, or what you jotted there (“yes, after 5”). Nothing is sent.")
+                            .tourTarget(.writeTap)
+                    }
                     Gesture(keys: [keyLabel, keyLabel], title: "Double-tap for hands-free",
                             detail: "Tap \(keyLabel) again to finish. Esc cancels.")
                     Gesture(keys: [keyLabel, dictation.commandModifier.symbol], plus: true, title: "Only a command",
@@ -553,6 +613,8 @@ private struct ThingsToSay: View {
         let title: String
         let how: String
         let say: [String]
+        /// What the tour calls this tile.
+        var target: TourTarget?
         var id: String { title }
     }
 
@@ -563,10 +625,10 @@ private struct ThingsToSay: View {
                  say: ["Running ten minutes late, start without me"]),
             Idea(symbol: "text.quote", title: "Work on selected text",
                  how: "Select text first, then say what to do with it.",
-                 say: ["Summarise this", "Make this more formal"]),
+                 say: ["Summarise this", "Make this more formal"], target: .selection),
             Idea(symbol: "macwindow", title: "Control your Mac",
                  how: "Apps, settings, websites, several steps in a row.",
-                 say: ["Search YouTube for lofi and play the first video", "Check for updates"]),
+                 say: ["Search YouTube for lofi and play the first video", "Check for updates"], target: .ask),
             Idea(symbol: "doc.text.magnifyingglass", title: "Find and open files",
                  how: "Describe a file: its name, what's in it, what it looks like.",
                  say: ["Open my resume PDF", "Find my beach photos"]),
@@ -647,6 +709,7 @@ private struct ThingsToSay: View {
         .frame(maxWidth: .infinity, minHeight: 168, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
         .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.line))
+        .tourTarget(idea.target)
     }
 }
 
@@ -921,6 +984,7 @@ private struct CleanupSettings: View {
                 MurmurSwitch(label: "Fix grammar",
                              isOn: Binding(get: { dictation.grammarFix }, set: { dictation.grammarFix = $0 }))
             }
+            .tourTarget(.grammar)
             if dictation.aiCleanup || dictation.grammarFix {
                 RowDivider()
                 SettingRow(title: "Model", detail: modelDetail) {
@@ -1011,6 +1075,7 @@ private struct SettingsPage: View {
                 LanguageChoice(dictation: dictation)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
+                    .tourTarget(.speechModel)
                 if dictation.speechModel == .sarvam {
                     RowDivider()
                     SettingRow(title: "Sarvam listens for",
@@ -1097,6 +1162,15 @@ private struct SettingsPage: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(width: 290)
+                }
+                RowDivider()
+                SettingRow(title: "Tap to write",
+                           detail: "One tap of \(dictation.key.short) in a text box and Murmur writes what goes there: the "
+                               + "reply to the conversation above it, the message a note in the box asks for (“say yes but "
+                               + "after 5”), or your draft finished. It reads that window and asks your commands' AI. "
+                               + "Nothing is sent; ⌘Z takes it back. A tap anywhere else does nothing.") {
+                    MurmurSwitch(label: "Tap to write",
+                                 isOn: Binding(get: { dictation.writeOnTap }, set: { dictation.writeOnTap = $0 }))
                 }
                 RowDivider()
                 SettingRow(title: "Only type",
@@ -1501,6 +1575,8 @@ private struct MemoryPage: View {
             }
             RowDivider()
             driveRow
+            RowDivider()
+            AIAppsRow().tourTarget(.aiApps)
             if let download = ReaderDownload.shared.summary {
                 RowDivider()
                 note(download + " Notes, Mail, connected apps and what you work on are read with it, on this Mac.")
@@ -1572,6 +1648,7 @@ private struct MemoryPage: View {
                     get: { _ = brain.revision; return memory.settings.enabled },
                     set: { memory.set(enabled: $0); state.revision += 1 }))
             }
+            .tourTarget(.remember)
             if settings.enabled {
                 RowDivider()
                 SettingRow(title: "Only during work hours",
@@ -1729,6 +1806,7 @@ private struct MemoryPage: View {
                            detail: "What’s due and coming up, who’s waiting on you, and what you worked on, in full.") {
                     Button("Open") { state.section = .day }.buttonStyle(.murmurSecondaryCompact)
                 }
+                .tourTarget(.day)
                 if !todays.isEmpty { RowDivider() }
                 ForEach(Array(todays.reversed().enumerated()), id: \.offset) { index, nudge in
                     if index > 0 { RowDivider() }
@@ -2376,6 +2454,7 @@ private struct CommandsPage: View {
         VStack(alignment: .leading, spacing: 26) {
             PageHeader(title: "Commands & AI",
                        subtitle: "Common commands like “open Slack” run instantly with no model. Everything else goes to the model you pick here.")
+                .tourTarget(.commandsPage)
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel("Model for commands")
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12, alignment: .top)], alignment: .leading,
@@ -2383,6 +2462,7 @@ private struct CommandsPage: View {
                     ForEach(RouterChoice.allCases, id: \.self) { choice in modelCard(choice) }
                 }
             }
+            .tourTarget(.modelCards)
             SettingsSection("API keys") {
                 SettingRow(title: "Anthropic", detail: keyDetail(.anthropic)) {
                     HStack(spacing: 8) {
@@ -2474,6 +2554,7 @@ private struct CommandsPage: View {
                     .lineSpacing(2)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 12)
+                    .tourTarget(.cloudPrivacy)
             }
             SettingsSection("Local model") {
                 SettingRow(title: "Ollama model", detail: localModelDetail) {
@@ -2828,6 +2909,10 @@ private struct AboutPage: View {
                 updatesRow
             }
             SettingsSection("Help") {
+                SettingRow(title: "Take the tour", detail: "Two minutes around Murmur: what each part does, and where it is.") {
+                    Button("Start") { app.home.startTour() }.buttonStyle(.murmurSecondary)
+                }
+                RowDivider()
                 SettingRow(title: "Run setup again", detail: "Permissions, the talk key, the speech model and the folders to search.") {
                     Button("Start…") { app.showOnboarding() }.buttonStyle(.murmurSecondary)
                 }
@@ -2857,5 +2942,35 @@ private struct AboutPage: View {
                 .padding(18)
             }
         }
+    }
+}
+
+
+/// "Share memory with AI apps": Murmur's memory in Claude, Cursor, Codex and the other AI apps on this Mac (on unless
+/// turned off), with the apps that have it now.
+struct AIAppsRow: View {
+    @State private var on = MCPRegistration.enabled
+    @State private var apps = MCPRegistration.registered()
+
+    var body: some View {
+        SettingRow(title: "Share memory with AI apps", detail: detail) {
+            MurmurSwitch(label: "Share memory with AI apps", isOn: Binding(get: { on }, set: { value in
+                on = value
+                MCPRegistration.enabled = value
+                DispatchQueue.global(qos: .utility).async {
+                    MCPRegistration.sync(enabled: value)
+                    let now = MCPRegistration.registered()
+                    DispatchQueue.main.async { apps = now }
+                }
+            }))
+        }
+    }
+
+    private var detail: String {
+        let what = "Claude, Cursor, Codex and other AI apps on this Mac can ask Murmur what you did, who someone is and "
+            + "what you promised. Read-only, and nothing leaves this Mac but the answers they ask for."
+        guard on else { return what }
+        return what + (apps.isEmpty ? " No AI apps found yet; any you install get it when Murmur next opens."
+                       : " In: " + apps.joined(separator: ", ") + ". An app that's open picks it up when it next starts.")
     }
 }

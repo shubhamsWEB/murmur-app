@@ -522,27 +522,76 @@ public final class Journal: @unchecked Sendable {
     // MARK: Chronicle
 
     public enum Level: String, CaseIterable, Sendable {
-        case hour, day, month, year
+        case hour, day, week, month, year
 
-        /// The period a moment falls in, as kept: "2026-11-05T14", "2026-11-05", "2026-11", "2026".
+        /// The period a moment falls in, as kept: "2026-11-05T14", "2026-11-05", "2026-W45" (the ISO week),
+        /// "2026-11", "2026".
         public func period(of date: Date, calendar: Calendar = .current) -> String {
             let parts = calendar.dateComponents([.year, .month, .day, .hour], from: date)
             let (y, m, d, h) = (parts.year ?? 0, parts.month ?? 0, parts.day ?? 0, parts.hour ?? 0)
             switch self {
             case .hour: return String(format: "%04d-%02d-%02dT%02d", y, m, d, h)
             case .day: return String(format: "%04d-%02d-%02d", y, m, d)
+            case .week:
+                var iso = Calendar(identifier: .iso8601)
+                iso.timeZone = calendar.timeZone
+                let week = iso.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+                return String(format: "%04d-W%02d", week.yearForWeekOfYear ?? 0, week.weekOfYear ?? 0)
             case .month: return String(format: "%04d-%02d", y, m)
             case .year: return String(format: "%04d", y)
             }
         }
 
-        /// The level below, whose summaries make this one.
+        /// The level below, whose summaries make this one (a week and a month are both made of days).
         public var below: Level? {
             switch self {
             case .hour: return nil
             case .day: return .hour
-            case .month: return .day
+            case .week, .month: return .day
             case .year: return .month
+            }
+        }
+
+        /// The level a period key is at: "2026-W45" a week, "2026-11-05T14" an hour.
+        public static func of(_ period: String) -> Level {
+            if period.contains("-W") { return .week }
+            if period.contains("T") { return .hour }
+            switch period.count {
+            case 4: return .year
+            case 7: return .month
+            default: return .day
+            }
+        }
+
+        /// When a period starts: "2026-W45" its Monday, "2026-11" the 1st.
+        public static func start(of period: String, calendar: Calendar = .current) -> Date? {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = calendar.timeZone
+            switch of(period) {
+            case .week:
+                let parts = period.split(separator: "-")
+                guard parts.count == 2, let year = Int(parts[0]), let week = Int(parts[1].dropFirst()) else { return nil }
+                var iso = Calendar(identifier: .iso8601)
+                iso.timeZone = calendar.timeZone
+                return iso.date(from: DateComponents(weekday: 2, weekOfYear: week, yearForWeekOfYear: year))
+            case .hour: formatter.dateFormat = "yyyy-MM-dd'T'HH"
+            case .day: formatter.dateFormat = "yyyy-MM-dd"
+            case .month: formatter.dateFormat = "yyyy-MM"
+            case .year: formatter.dateFormat = "yyyy"
+            }
+            return formatter.date(from: period)
+        }
+
+        /// The periods one level down that make up a period: a week's seven days, a day's hours…
+        public static func parts(of period: String, calendar: Calendar = .current) -> (level: Level, keys: [String])? {
+            let level = of(period)
+            guard let below = level.below, let start = start(of: period, calendar: calendar) else { return nil }
+            switch level {
+            case .week:
+                return (below, (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: start) }.map { below.period(of: $0, calendar: calendar) })
+            default:
+                return (below, [period])   // a prefix: every day of "2026-11", every hour of "2026-11-05"
             }
         }
     }
@@ -558,10 +607,35 @@ public final class Journal: @unchecked Sendable {
             """, [level.rawValue, period, summary, now.timeIntervalSince1970])
     }
 
-    /// The summaries of a level within a period of the level above: the hours of "2026-11-05", the days of "2026-11".
+    /// The summaries of a level within a period of the level above: the hours of "2026-11-05", the days of "2026-11",
+    /// the days of "2026-W45".
     public func chronicles(_ level: Level, within period: String) -> [(period: String, summary: String)] {
-        db.rows("SELECT period, summary FROM chronicle WHERE level = ? AND substr(period, 1, ?) = ? ORDER BY period",
-                [level.rawValue, period.count, period]).map { ($0[0], $0[1]) }
+        chronicleParts(level, within: period).map { ($0.period, $0.summary) }
+    }
+
+    /// The same, with when each was written.
+    public func chronicleParts(_ level: Level, within period: String) -> [(period: String, summary: String, generated: Date)] {
+        let rows: [[String]]
+        if Level.of(period) == .week, let parts = Level.parts(of: period) {
+            rows = db.rows("SELECT period, summary, generated FROM chronicle WHERE level = ? AND period IN (\(parts.keys.map { _ in "?" }.joined(separator: ","))) ORDER BY period",
+                           [level.rawValue as Any?] + parts.keys.map { $0 as Any? })
+        } else {
+            rows = db.rows("SELECT period, summary, generated FROM chronicle WHERE level = ? AND substr(period, 1, ?) = ? ORDER BY period",
+                           [level.rawValue, period.count, period])
+        }
+        return rows.map { ($0[0], $0[1], Date(timeIntervalSince1970: Double($0[2]) ?? 0)) }
+    }
+
+    /// When a summary was written; nil when there's none.
+    public func chronicleGenerated(_ level: Level, _ period: String) -> Date? {
+        db.rows("SELECT generated FROM chronicle WHERE level = ? AND period = ?", [level.rawValue, period]).first
+            .flatMap { Double($0[0]) }.map { Date(timeIntervalSince1970: $0) }
+    }
+
+    /// The newest summaries of a level, newest first: the last fourteen days, the last eight weeks.
+    public func latestChronicles(_ level: Level, limit: Int) -> [(period: String, summary: String)] {
+        db.rows("SELECT period, summary FROM chronicle WHERE level = ? ORDER BY period DESC LIMIT ?", [level.rawValue, limit])
+            .map { ($0[0], $0[1]) }
     }
 
     /// One chronicle entry by its row ("2026-11-05: You…"), for search by meaning.

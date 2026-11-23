@@ -269,7 +269,8 @@ struct MemoryServerTests {
         #expect((hello?["result"] as? [String: Any])?["protocolVersion"] as? String == "2025-06-18")
         #expect(server.handle(["jsonrpc": "2.0", "method": "notifications/initialized"]) == nil)
         let list = server.handle(["jsonrpc": "2.0", "id": 2, "method": "tools/list"])
-        #expect(((list?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.count == 7)
+        #expect(((list?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.count == MemoryServer.toolNames.count)
+        #expect(MemoryServer.toolNames.contains("get_wiki_page") && MemoryServer.toolNames.contains("open_records"))
         func call(_ name: String, _ arguments: [String: Any]) -> String {
             let reply = server.handle(["jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["name": name, "arguments": arguments]])
             return (((reply?["result"] as? [String: Any])?["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
@@ -278,5 +279,84 @@ struct MemoryServerTests {
         #expect(call("get_open_loops", [:]).contains("Q3 deck"))
         #expect(call("get_chronicle", ["period": "2001-01-01"]).contains("Nothing recorded"))
         #expect((server.handle(["jsonrpc": "2.0", "id": 4, "method": "nope"])?["error"]) != nil)
+        // Every result says where it came from, and the source opens.
+        let found = call("search_memory", ["query": "who is Priya"])
+        #expect(found.contains("[memory:"))
+        if let source = found.range(of: #"memory:\d+"#, options: .regularExpression).map({ String(found[$0]) }) {
+            #expect(call("open_records", ["ids": source]).contains("leads design"))
+        }
+        #expect(call("get_profile", [:]).contains("No profile yet"))
+        #expect(call("get_wiki_page", ["name": "Priya"]).contains("No page"))
+    }
+
+    /// A page written from evidence comes back through MCP with its claims and sources, and what a rewrite leaves out
+    /// is kept as no longer true.
+    @Test func wikiPagesThroughMCP() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("wiki-\(UUID().uuidString).sqlite")
+        let brain = BrainStore(url: file), journal = Journal(url: file), wiki = Wiki(url: file)
+        brain.apply([BrainModel.Candidate(about: "Priya Shah", aboutKind: .person, text: "Priya Shah leads design at Acme",
+                                          kind: .fact, confidence: 0.9, origin: .contacts),
+                     BrainModel.Candidate(about: "Priya Shah", aboutKind: .person, text: "Priya Shah lives in Pune",
+                                          kind: .fact, confidence: 0.9, origin: .contacts)], item: nil)
+        let due = wiki.due()
+        let subject = try #require(due.first { $0.name == "Priya Shah" })
+        let first = WikiRules.Written(summary: "Design lead at Acme", claims: [
+            .init(text: "Priya Shah leads design at Acme", whose: "thing", basis: "seen", worth: "core", sources: ["memory:1"]),
+            .init(text: "Priya Shah lives in Pune", whose: "thing", basis: "seen", worth: "detail", sources: ["memory:2"]),
+        ], links: [], unsupported: 0)
+        wiki.save(subject, written: first, model: "test")
+        #expect(wiki.due().contains { $0.entity == subject.entity } == false)
+        let second = WikiRules.Written(summary: "Design lead at Acme", claims: [
+            .init(text: "Priya Shah leads design at Acme", whose: "thing", basis: "seen", worth: "core", sources: ["page"]),
+        ], links: [], unsupported: 0)
+        let saved = wiki.save(subject, written: second, model: "test")
+        #expect(saved.confirmed == 1 && saved.retired == 1)
+        let server = MemoryServer(brain: brain, journal: journal)
+        let page = server.call("get_wiki_page", ["name": "Priya"])
+        #expect(page.contains("leads design at Acme"))
+        #expect(page.contains("memory:1"))
+        #expect(page.contains("Earlier on this page") && page.contains("lives in Pune"))
+        #expect(server.call("list_wiki", [:]).contains("Priya Shah"))
+        #expect(server.call("search_memory", ["query": "Priya design"]).contains("[page:"))
+    }
+
+    /// A project kept under two names before they were one (Sarvam's "Modernizing Sudoku v2 game" beside Sudoku V2):
+    /// put together with its memories, connections and page, under the plainer name; "Shubham" put with the user.
+    @Test func duplicatesArePutTogether() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("merge-\(UUID().uuidString).sqlite")
+        let brain = BrainStore(url: file), graph = MemoryGraph(url: file), wiki = Wiki(url: file)
+        brain.apply([BrainModel.Candidate(about: "Sudoku V2", aboutKind: .project, text: "Sudoku V2 has two internal testers",
+                                          kind: .fact, confidence: 0.9, origin: .screen, importance: 0.9)], item: nil)
+        let keep = try #require(brain.entity(named: "Sudoku V2", kind: .project))
+        // Now one name finds the other: no second project.
+        #expect(brain.entity(named: "Modernizing Sudoku v2 game", kind: .project) == keep)
+        // The way it was before: a second entity, with a memory, a connection and a page of its own.
+        let raw = SQLiteConnection(url: file)
+        let other = raw.insert("INSERT INTO entity(kind, name, key, aliases, first_seen, last_seen) VALUES('project', ?, ?, '', 1, 1)",
+                               ["Modernizing Sudoku v2 game", "modernizing sudoku v2 game"])
+        raw.exec("""
+            INSERT INTO memory(entity, text, kind, confidence, created, confirmed, origin) VALUES(?, 'The fixes are done and tested',
+              'status', 0.9, 1, 1, 'screen')
+            """, [other])
+        let me = try #require(brain.entity(named: "You", kind: .me))
+        graph.connect(me, "worked_on", other, at: Date(), evidence: "episode:7")
+        graph.connect(me, "worked_on", keep, at: Date(timeIntervalSinceNow: -86400), evidence: "episode:3")
+        let subject = try #require(wiki.due(limit: 50).first { $0.entity == other })
+        wiki.save(subject, written: WikiRules.Written(summary: "Modernizing", claims: [
+            .init(text: "The fixes are done and tested", whose: "thing", basis: "seen", worth: "core", sources: ["memory:2"]),
+        ], links: [], unsupported: 0), model: "test")
+
+        #expect(brain.mergeProjects() == 1)
+        #expect(raw.rows("SELECT count(*) FROM entity WHERE kind = 'project'", []).first?.first == "1")
+        #expect(raw.rows("SELECT name FROM entity WHERE id = ?", [keep]).first?.first == "Sudoku V2")
+        #expect(raw.rows("SELECT count(*) FROM memory WHERE entity = ?", [keep]).first?.first == "2")
+        // One connection, with both episodes, the earlier first seen.
+        let edges = raw.rows("SELECT src, dst, evidence FROM edge WHERE dst = ? OR src = ?", [keep, keep])
+        #expect(edges.count == 1 && edges[0][2].contains("episode:7") && edges[0][2].contains("episode:3"))
+        #expect(raw.rows("SELECT count(*) FROM edge WHERE src = ? OR dst = ?", [other, other]).first?.first == "0")
+        // Its page is Sudoku V2's now, due to be written again from everything.
+        #expect(wiki.page(entity: keep) != nil && wiki.page(entity: other) == nil)
+        #expect(wiki.due(limit: 50).contains { $0.entity == keep })
     }
 }
+

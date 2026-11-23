@@ -14,6 +14,8 @@ public final class MemoryVectors: @unchecked Sendable {
         case memory, loop, chronicle, snapshot, episode
         /// What the user sent, posted, released or booked (MemoryGraph items), and their conversations.
         case item, thread
+        /// Wiki pages (`Wiki`): what Murmur knows about one person, project or topic.
+        case page
     }
 
     public struct Hit: Sendable, Equatable {
@@ -69,6 +71,11 @@ public final class MemoryVectors: @unchecked Sendable {
                 WHERE NOT EXISTS (SELECT 1 FROM vector v WHERE v.kind = 'thread' AND v.ref = thread.id)
                 ORDER BY id DESC LIMIT ?
                 """),
+            (.page, """
+                SELECT id, title || ': ' || summary || char(10) || substr(body, 1, 1500) FROM page
+                WHERE NOT EXISTS (SELECT 1 FROM vector v WHERE v.kind = 'page' AND v.ref = page.id)
+                ORDER BY updated DESC LIMIT ?
+                """),
             (.snapshot, """
                 SELECT id, app || ' ' || coalesce(domain, '') || ' ' || title || char(10) || substr(text, 1, 1500) FROM snapshot
                 WHERE NOT EXISTS (SELECT 1 FROM vector v WHERE v.kind = 'snapshot' AND v.ref = snapshot.id)
@@ -106,6 +113,7 @@ public final class MemoryVectors: @unchecked Sendable {
         db.exec("DELETE FROM vector WHERE kind = 'episode' AND ref NOT IN (SELECT id FROM episode WHERE read = 1)")
         db.exec("DELETE FROM vector WHERE kind = 'item' AND ref NOT IN (SELECT id FROM screen_item)")
         db.exec("DELETE FROM vector WHERE kind = 'thread' AND ref NOT IN (SELECT id FROM thread)")
+        db.exec("DELETE FROM vector WHERE kind = 'page' AND ref NOT IN (SELECT id FROM page)")
     }
 
     public func count() -> Int { Int(db.rows("SELECT count(*) FROM vector", []).first?.first ?? "") ?? 0 }

@@ -29,12 +29,13 @@ public final class BrainRecall: @unchecked Sendable {
         public let found: [Found]
         public var isEmpty: Bool { found.isEmpty }
 
-        /// The pack as lines a model reads: what kind of thing each is, when, and what it says.
-        public func text(limit: Int = 6000, calendar: Calendar = .current) -> String {
+        /// The pack as lines a model reads: what kind of thing each is, when, and what it says; with `sources`, where
+        /// each came from ("snapshot:744"), so an assistant can open the original before quoting it.
+        public func text(limit: Int = 6000, sources: Bool = false, calendar: Calendar = .current) -> String {
             var lines: [String] = []
             var length = 0
             for item in found {
-                let line = BrainRecall.line(item.record, calendar: calendar)
+                let line = BrainRecall.line(item.record, calendar: calendar) + (sources ? " [\(item.record.source)]" : "")
                 guard length + line.count <= limit else { break }
                 lines.append(line)
                 length += line.count + 1
@@ -72,10 +73,13 @@ public final class BrainRecall: @unchecked Sendable {
 
     let index: MemoryIndex
     let vectors: MemoryVectors?
+    /// The connections between people and projects, for the walk from what a question names to what it involves.
+    let graph: MemoryGraph?
 
-    public init(index: MemoryIndex, vectors: MemoryVectors?) {
+    public init(index: MemoryIndex, vectors: MemoryVectors?, graph: MemoryGraph? = nil) {
         self.index = index
         self.vectors = vectors
+        self.graph = graph
     }
 
     // MARK: Reading a question
@@ -192,6 +196,14 @@ public final class BrainRecall: @unchecked Sendable {
         }
         // Who and what it names, the span it names, what's owed.
         for name in reading.names { rank(index.naming(name), "name") }
+        // What the names lead to: the people and projects they're connected with (a walk over the connections), so
+        // "how's the launch going?" also finds what the people in the launch did. Weighed below what was asked for.
+        if let graph, !reading.names.isEmpty {
+            for hit in graph.related(to: graph.entities(named: reading.names), limit: 4, now: now) {
+                guard let name = graph.entityName(hit.id)?.name else { continue }
+                rank(index.naming(name, limit: 30), "graph")
+            }
+        }
         // A version is as exact as a name ("1.7": whatever holds 1.7 or 1.7.0).
         if !reading.versions.isEmpty {
             rank(index.search(reading.versions.sorted().map { "extra:\"\($0)\"" }.joined(separator: " OR "), limit: 80), "version")
@@ -202,14 +214,15 @@ public final class BrainRecall: @unchecked Sendable {
         }
         if reading.owed { rank(index.owed(), "owed") }
         // Nothing by words, nothing close in meaning, nothing by name, time or what's owed: memory doesn't have it.
-        let foundOtherwise = ranks.values.contains { arms in arms.keys.contains { arm in arm != "meaning" } }
+        let foundOtherwise = ranks.values.contains { arms in arms.keys.contains { arm in arm != "meaning" && arm != "graph" } }
         guard foundByWords || closest >= 0.72 || foundOtherwise else {
             return []
         }
         let records = index.records(Array(ranks.keys))
         guard !records.isEmpty else { return [] }
         let newest = records.values.compactMap(\.at).max() ?? now
-        let weights: [String: Double] = ["words": 1.0, "meaning": 1.0, "name": 1.2, "version": 1.2, "time": 1.0, "owed": 1.2]
+        let weights: [String: Double] = ["words": 1.0, "meaning": 1.0, "name": 1.2, "version": 1.2, "time": 1.0, "owed": 1.2,
+                                         "graph": 0.6]
         var scored: [(Double, MemoryIndex.Record)] = []
         for (id, arms) in ranks {
             guard let record = records[id] else { continue }
@@ -310,7 +323,7 @@ public final class BrainRecall: @unchecked Sendable {
         case .did: return "you did"
         case .yours: return "yours"
         case .conversation: return "a conversation"
-        case .fact: return record.source.hasPrefix("memory:") ? "known" : "fact"
+        case .fact: return record.source.hasPrefix("memory:") ? "known" : record.source.hasPrefix("page:") ? "Murmur's page" : "fact"
         case .summary: return "summary of your time"
         case .promise: return "owed or promised"
         case .murmur: return "Murmur did for you"

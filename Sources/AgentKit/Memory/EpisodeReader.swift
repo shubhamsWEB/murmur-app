@@ -73,7 +73,8 @@ public enum EpisodeReader {
 
     static func system(today: Date, user: [String]) -> String {
         let day = today.formatted(.dateTime.weekday(.wide).day().month(.wide).year())
-        let who = user.isEmpty ? "" : " The user is \(user.joined(separator: ", also called "))."
+        let who = user.isEmpty ? "" : " The user is \(user.joined(separator: ", also called ")): never write them as "
+            + "someone they worked with (\"with \(user[0])\"); they are the one doing it."
         return """
             You read one stretch of the user's work on their Mac (the windows they were in, one task: coding a \
             project, a conversation, booking a trip) and write what their assistant should know about it. Today is \
@@ -366,7 +367,10 @@ public enum EpisodeReader {
                 }
             }
             connect(episode: episode, items: items, memories: certain.memories + result.memories, graph: graph, brain: brain, now: now)
-            graph.setRead(episode.id, title: result.title, summary: result.summary, outcome: result.outcome, now: now)
+            // The user is "you", never someone they worked with.
+            graph.setRead(episode.id, title: WikiRules.withoutSelf(result.title, me: me),
+                          summary: WikiRules.withoutSelf(result.summary, me: me),
+                          outcome: WikiRules.withoutSelf(result.outcome, me: me), now: now)
             journal.consolidated(windows.map(\.id))
             if !result.title.isEmpty || applied.added > 0 || loops.opened > 0 {
                 MemoryLog.write("read \"\(result.title.isEmpty ? episode.name : result.title)\" (\(Int(episode.seconds / 60)) min): "
