@@ -126,12 +126,12 @@ public final class BrainStore: @unchecked Sendable {
         // same entity, which learns the name as an alias. A new one is named without the version.
         var named = name
         if kind == .project {
-            let core = BrainModel.projectCore(name)
+            let core = BrainModel.projectIdentity(name)
             if !core.isEmpty {
                 for row in rows("SELECT id, name, aliases FROM entity WHERE kind = 'project'", []) {
                     guard let id = Int64(row[0]) else { continue }
                     let names = [row[1]] + row[2].split(separator: "\n").map(String.init)
-                    if names.contains(where: { BrainModel.projectCore($0) == core }) {
+                    if names.contains(where: { BrainModel.projectIdentity($0) == core }) {
                         exec("UPDATE entity SET last_seen = ?, mentions = mentions + 1 WHERE id = ?", [at, id])
                         aliasLocked(key, to: id)
                         return id
@@ -153,6 +153,48 @@ public final class BrainStore: @unchecked Sendable {
         return id
     }
 
+    /// One entity into another: its memories, its connections (merged with the same ones of the other), its page
+    /// (kept when the other has none; the other's is written again either way), then it goes.
+    private func moveLocked(_ from: Int64, into: Int64) {
+        guard from != into else { return }
+        exec("UPDATE memory SET entity = ? WHERE entity = ?", [into, from])
+        func has(_ table: String) -> Bool {
+            !rows("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table]).isEmpty
+        }
+        if has("edge") {
+            for row in rows("SELECT src, rel, dst, first, last, weight, evidence FROM edge WHERE src = ? OR dst = ?", [from, from]) {
+                guard row.count == 7, let oldSrc = Int64(row[0]), let oldDst = Int64(row[2]) else { continue }
+                exec("DELETE FROM edge WHERE src = ? AND rel = ? AND dst = ?", [oldSrc, row[1], oldDst])
+                let src = oldSrc == from ? into : oldSrc, dst = oldDst == from ? into : oldDst
+                guard src != dst else { continue }
+                exec("""
+                    INSERT INTO edge(src, rel, dst, first, last, weight, evidence) VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(src, rel, dst) DO UPDATE SET first = min(first, excluded.first), last = max(last, excluded.last),
+                      weight = weight + excluded.weight,
+                      evidence = CASE WHEN instr(evidence, excluded.evidence) > 0 THEN evidence
+                        ELSE substr(evidence || ',' || excluded.evidence, -400) END
+                    """, [src, row[1], dst, Double(row[3]) ?? 0, Double(row[4]) ?? 0, Double(row[5]) ?? 1, row[6]])
+            }
+        }
+        if has("page") {
+            if rows("SELECT 1 FROM page WHERE entity = ?", [into]).isEmpty {
+                exec("UPDATE page SET entity = ? WHERE entity = ?", [into, from])
+            } else {
+                exec("DELETE FROM page_claim WHERE page IN (SELECT id FROM page WHERE entity = ?)", [from])
+                exec("DELETE FROM page WHERE entity = ?", [from])
+            }
+            // Written again from everything it now has.
+            exec("UPDATE page SET updated = 0 WHERE entity = ?", [into])
+        }
+        exec("""
+            UPDATE entity SET mentions = mentions + coalesce((SELECT mentions FROM entity WHERE id = ?), 0),
+              first_seen = min(coalesce(first_seen, 9e18), coalesce((SELECT first_seen FROM entity WHERE id = ?), 9e18)),
+              last_seen = max(coalesce(last_seen, 0), coalesce((SELECT last_seen FROM entity WHERE id = ?), 0))
+            WHERE id = ?
+            """, [from, from, from, into])
+        exec("DELETE FROM entity WHERE id = ?", [from])
+    }
+
     private func aliasLocked(_ key: String, to entity: Int64) {
         let current = rows("SELECT aliases, key FROM entity WHERE id = ?", [entity]).first ?? ["", ""]
         guard current[1] != key, !current[0].contains("\n\(key)\n") else { return }
@@ -168,27 +210,33 @@ public final class BrainStore: @unchecked Sendable {
             SELECT e.id, e.name, e.aliases, (SELECT count(*) FROM memory m WHERE m.entity = e.id AND m.archived = 0) AS n
             FROM entity e WHERE e.kind = 'project' ORDER BY n DESC, e.id
             """, [])
-        var keeper: [String: Int64] = [:]
+        var keeper: [String: Int64] = [:], names: [String: [String]] = [:]
         var merged = 0
         for row in projects {
             guard let id = Int64(row[0]) else { continue }
-            let core = BrainModel.projectCore(row[1])
+            let core = BrainModel.projectIdentity(row[1])
             guard !core.isEmpty else { continue }
+            names[core, default: []].append(row[1])
             guard let into = keeper[core] else { keeper[core] = id; continue }
-            exec("UPDATE memory SET entity = ? WHERE entity = ?", [into, id])
             for alias in [BrainModel.nameKey(row[1])] + row[2].split(separator: "\n").map(String.init) { aliasLocked(alias, to: into) }
-            exec("DELETE FROM entity WHERE id = ?", [id])
+            moveLocked(id, into: into)
             merged += 1
         }
-        // The one kept is called by its plain name ("Murmur", not "Murmur 1.6.0").
+        // The one kept is called by the plainest of its names ("Murmur", not "Murmur 1.6.0"; "Sudoku V2", not
+        // "Modernizing Sudoku v2 game"): the shortest, without its version.
         for (core, id) in keeper {
-            guard let name = rows("SELECT name FROM entity WHERE id = ?", [id]).first?.first,
-                  BrainModel.nameKey(name).contains(where: \.isNumber) else { continue }
-            let bare = name.replacingOccurrences(of: #"\s*\b(v(ersion)?\s?)?\d+(\.\d+)+[A-Za-z0-9.-]*\b"#, with: "",
-                                                 options: .regularExpression).trimmingCharacters(in: .whitespaces)
-            guard !bare.isEmpty, BrainModel.projectCore(bare) == core else { continue }
+            guard let name = rows("SELECT name FROM entity WHERE id = ?", [id]).first?.first else { continue }
+            let plainest = (names[core] ?? [name]).map { candidate in
+                candidate.replacingOccurrences(of: #"\s*\b(v(ersion)?\s?)?\d+(\.\d+)+[A-Za-z0-9.-]*\b"#, with: "",
+                                               options: .regularExpression).trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty && BrainModel.projectIdentity($0) == core }
+                .min { ($0.count, $0 == $0.lowercased() ? 1 : 0) < ($1.count, $1 == $1.lowercased() ? 1 : 0) }
+            guard let plainest, plainest != name,
+                  rows("SELECT 1 FROM entity WHERE kind = 'project' AND key = ? AND id != ?", [BrainModel.nameKey(plainest), id]).isEmpty
+            else { continue }
             aliasLocked(BrainModel.nameKey(name), to: id)
-            exec("UPDATE entity SET name = ?, key = ? WHERE id = ?", [bare, BrainModel.nameKey(bare), id])
+            exec("UPDATE entity SET name = ?, key = ? WHERE id = ?", [plainest, BrainModel.nameKey(plainest), id])
+            exec("UPDATE entity SET aliases = replace(aliases, ?, ?) WHERE id = ?", ["\n\(BrainModel.nameKey(plainest))\n", "\n", id])
         }
         return merged
     }
@@ -406,8 +454,7 @@ public final class BrainStore: @unchecked Sendable {
         for key in keys {
             for found in rows("SELECT id FROM entity WHERE kind != 'me' AND key = ?", [key]) {
                 guard let id = Int64(found[0]) else { continue }
-                exec("UPDATE memory SET entity = ? WHERE entity = ?", [me, id])
-                exec("DELETE FROM entity WHERE id = ?", [id])
+                moveLocked(id, into: me)
                 merged += 1
             }
         }

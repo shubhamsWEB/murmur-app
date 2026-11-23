@@ -49,8 +49,18 @@ public enum MemoryLog {
         return name.contains("xctest") || name.contains("PackageTests") || name.contains("swiftpm-testing-helper")
     }()
 
+    /// From Terminal (`murmur-memory knowledge`): each line printed as well, so what went wrong is in front of you.
+    nonisolated(unsafe) public static var echo = false
+
+    /// Printed when `echo` is on, never kept in the log (it may hold what a model answered).
+    public static func debug(_ line: String) {
+        guard echo else { return }
+        FileHandle.standardError.write(Data(("  · " + line + "\n").utf8))
+    }
+
     public static func write(_ line: String) {
         guard !testing else { return }
+        if echo { FileHandle.standardError.write(Data(("  · " + line + "\n").utf8)) }
         lock.lock(); defer { lock.unlock() }
         let text = "\(time.string(from: Date())) \(line)\n"
         if let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue,

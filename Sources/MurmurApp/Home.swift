@@ -1501,6 +1501,8 @@ private struct MemoryPage: View {
             }
             RowDivider()
             driveRow
+            RowDivider()
+            AIAppsRow()
             if let download = ReaderDownload.shared.summary {
                 RowDivider()
                 note(download + " Notes, Mail, connected apps and what you work on are read with it, on this Mac.")
@@ -2857,5 +2859,35 @@ private struct AboutPage: View {
                 .padding(18)
             }
         }
+    }
+}
+
+
+/// "Share memory with AI apps": Murmur's memory in Claude, Cursor, Codex and the other AI apps on this Mac (on unless
+/// turned off), with the apps that have it now.
+struct AIAppsRow: View {
+    @State private var on = MCPRegistration.enabled
+    @State private var apps = MCPRegistration.registered()
+
+    var body: some View {
+        SettingRow(title: "Share memory with AI apps", detail: detail) {
+            MurmurSwitch(label: "Share memory with AI apps", isOn: Binding(get: { on }, set: { value in
+                on = value
+                MCPRegistration.enabled = value
+                DispatchQueue.global(qos: .utility).async {
+                    MCPRegistration.sync(enabled: value)
+                    let now = MCPRegistration.registered()
+                    DispatchQueue.main.async { apps = now }
+                }
+            }))
+        }
+    }
+
+    private var detail: String {
+        let what = "Claude, Cursor, Codex and other AI apps on this Mac can ask Murmur what you did, who someone is and "
+            + "what you promised. Read-only, and nothing leaves this Mac but the answers they ask for."
+        guard on else { return what }
+        return what + (apps.isEmpty ? " No AI apps found yet; any you install get it when Murmur next opens."
+                       : " In: " + apps.joined(separator: ", ") + ". An app that's open picks it up when it next starts.")
     }
 }

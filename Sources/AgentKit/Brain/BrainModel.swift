@@ -343,6 +343,36 @@ public enum BrainModel {
         return words.joined(separator: " ")
     }
 
+    /// Which project a name means, whatever was said around it that day: `projectCore` without what the work on it
+    /// was ("Modernizing Sudoku v2 game" is Sudoku V2), a subtitle ("Sudoku Clan: Multiplayer" is Sudoku Clan) or what
+    /// it runs on. Two names with the same identity are one project.
+    public static func projectIdentity(_ name: String) -> String {
+        var text = name.trimmingCharacters(in: .whitespaces)
+        if let cut = text.range(of: #"\s*(:|\s[-–—|]\s)"#, options: .regularExpression),
+           text.distance(from: text.startIndex, to: cut.lowerBound) >= 3 {
+            text = String(text[..<cut.lowerBound])
+        }
+        var words = projectCore(text).split(separator: " ").map(String.init)
+        // What was being done to it ("modernizing", "working on", "setting up").
+        let doing: Set<String> = ["modernizing", "modernising", "building", "rebuilding", "developing", "designing",
+                                  "redesigning", "deploying", "launching", "testing", "fixing", "updating", "improving",
+                                  "refactoring", "migrating", "releasing", "shipping", "creating", "making", "porting",
+                                  "preparing", "finishing", "polishing", "reviewing"]
+        while words.count > 1 {
+            if doing.contains(words[0]) { words.removeFirst() }
+            else if words.count > 2, ["working", "setting"].contains(words[0]), ["on", "up"].contains(words[1]) { words.removeFirst(2) }
+            else if words[0] == "the" { words.removeFirst() }
+            else { break }
+        }
+        // What it is or runs on ("game", "web", "multiplayer"), and what was done to it ("modernization").
+        let what: Set<String> = ["app", "application", "project", "repo", "repository", "website", "site", "release",
+                                 "beta", "game", "games", "web", "mobile", "ios", "android", "multiplayer", "platform",
+                                 "modernization", "modernisation", "redesign", "launch", "deployment", "update",
+                                 "migration", "version", "build"]
+        while words.count > 1, let last = words.last, what.contains(last) { words.removeLast() }
+        return words.joined(separator: " ")
+    }
+
     public static func nameKey(_ name: String) -> String {
         var words = name.lowercased().split { $0.isWhitespace || $0 == "." || $0 == "," }.map(String.init)
         while let first = words.first, ["mr", "mrs", "ms", "dr", "prof", "sir"].contains(first) { words.removeFirst() }

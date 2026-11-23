@@ -246,7 +246,7 @@ public final class Brain {
             if embedded == nil { LocalReader.warm() }
         }
         let names = Grounding.vocabulary(brain: store, graph: graph, prefs: CommandMemory.preferences()).map(\.name)
-        let evidence = BrainRecall(index: index, vectors: vectors).recall(query, names: names, vectors: embedded, now: now, limit: limit)
+        let evidence = BrainRecall(index: index, vectors: vectors, graph: graph).recall(query, names: names, vectors: embedded, now: now, limit: limit)
         // Memories that were used fade more slowly.
         store.used(evidence.found.compactMap { $0.record.source.hasPrefix("memory:") ? Int64($0.record.source.dropFirst(7)) : nil })
         return evidence

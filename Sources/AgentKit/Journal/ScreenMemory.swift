@@ -74,6 +74,9 @@ public final class ScreenMemory {
     public func forgetAll() {
         journal.forgetAll()
         Brain.shared.graph.forgetAll()
+        // What was written from it: the wiki's pages, the profile and the digest.
+        Wiki(url: journal.url).forgetAll()
+        Profile(url: journal.url).forgetAll()
         Brain.shared.store.forget(origin: .screen)
     }
 

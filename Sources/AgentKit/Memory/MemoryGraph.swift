@@ -584,6 +584,73 @@ public final class MemoryGraph: @unchecked Sendable {
         }
     }
 
+    /// When an episode in a span was last read: a summary of the span written before then says less than memory knows.
+    public func lastRead(from: Date, to: Date) -> Date? {
+        db.rows("SELECT max(read_at) FROM episode WHERE read = 1 AND title != '' AND start < ? AND end >= ?",
+                [to.timeIntervalSince1970, from.timeIntervalSince1970]).first.flatMap { Double($0[0]) }
+            .map { Date(timeIntervalSince1970: $0) }
+    }
+
+    /// The episodes that show a connection, newest first.
+    public func evidence(src: Int64, rel: String, dst: Int64) -> [Int64] {
+        let text = db.rows("SELECT evidence FROM edge WHERE src = ? AND rel = ? AND dst = ?", [src, rel, dst]).first?.first ?? ""
+        return text.split(separator: ",").compactMap { $0.hasPrefix("episode:") ? Int64($0.dropFirst(8)) : nil }.reversed()
+    }
+
+    /// The entities a question's names lead to through their connections, best first, the names themselves left out:
+    /// a personalised PageRank from them over the connections (heavier and more recent ones count more), so "how is
+    /// the launch going?" also reaches the people and projects the launch involves. The user ("me") is a hub that
+    /// connects everything, so walks don't pass through it.
+    public func related(to seeds: [Int64], limit: Int = 6, now: Date = Date()) -> [(id: Int64, score: Double)] {
+        guard !seeds.isEmpty else { return [] }
+        let me = Set(db.rows("SELECT id FROM entity WHERE kind = 'me'", []).compactMap { Int64($0[0]) })
+        var links: [Int64: [(Int64, Double)]] = [:]
+        for row in db.rows("SELECT src, dst, weight, last FROM edge ORDER BY last DESC LIMIT 20000", []) {
+            guard row.count == 4, let src = Int64(row[0]), let dst = Int64(row[1]),
+                  !me.contains(src), !me.contains(dst) else { continue }
+            let days = max(0, now.timeIntervalSince1970 - (Double(row[3]) ?? 0)) / 86400
+            let weight = (Double(row[2]) ?? 1) / (1 + days / 30)
+            links[src, default: []].append((dst, weight))
+            links[dst, default: []].append((src, weight))
+        }
+        return Self.personalizedPageRank(links: links, seeds: seeds.filter { !me.contains($0) }, limit: limit)
+    }
+
+    /// Personalised PageRank: random walks that restart at the seeds 15% of the time; the seeds themselves are left
+    /// out of the answer.
+    static func personalizedPageRank(links: [Int64: [(Int64, Double)]], seeds: [Int64], limit: Int,
+                                     restart: Double = 0.15, steps: Int = 20) -> [(id: Int64, score: Double)] {
+        let start = Set(seeds).filter { links[$0] != nil }
+        guard !start.isEmpty else { return [] }
+        let share = 1.0 / Double(start.count)
+        var rank = Dictionary(uniqueKeysWithValues: start.map { ($0, share) })
+        let totals = links.mapValues { $0.reduce(0) { $0 + $1.1 } }
+        for _ in 0..<steps {
+            var next: [Int64: Double] = Dictionary(uniqueKeysWithValues: start.map { ($0, restart * share) })
+            for (node, value) in rank {
+                guard let out = links[node], let total = totals[node], total > 0 else {
+                    for seed in start { next[seed, default: 0] += (1 - restart) * value * share }
+                    continue
+                }
+                for (to, weight) in out { next[to, default: 0] += (1 - restart) * value * weight / total }
+            }
+            rank = next
+        }
+        return rank.filter { !start.contains($0.key) && $0.value > 0.001 }
+            .sorted { $0.value > $1.value }.prefix(limit).map { (id: $0.key, score: $0.value) }
+    }
+
+    /// Entities by name or other name, for seeding a walk.
+    public func entities(named names: [String]) -> [Int64] {
+        let keys = Set(names.map { BrainModel.nameKey($0) })
+        guard !keys.isEmpty else { return [] }
+        return db.rows("SELECT id, name, aliases FROM entity WHERE kind != 'me'", []).compactMap { row in
+            guard let id = Int64(row[0]) else { return nil }
+            let all = [row[1]] + row[2].split(separator: "\n").map(String.init)
+            return all.contains { keys.contains(BrainModel.nameKey($0)) } ? id : nil
+        }
+    }
+
     /// An entity's name and kind (the living memory's table, in the same file).
     public func entityName(_ id: Int64) -> (name: String, kind: String)? {
         db.rows("SELECT name, kind FROM entity WHERE id = ?", [id]).first.map { ($0[0], $0[1]) }

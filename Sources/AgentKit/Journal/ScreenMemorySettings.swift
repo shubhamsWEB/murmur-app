@@ -56,7 +56,9 @@ public struct ScreenMemorySettings: Codable, Sendable, Equatable {
     public func readsNow(_ date: Date = Date(), calendar: Calendar = .current) -> Bool {
         guard enabled else { return false }
         if always { return true }
-        if !weekends, calendar.isDateInWeekend(date) { return false }
+        // Saturday and Sunday wherever the Mac is: in India's calendar only Sunday is the weekend, and "not at
+        // weekends" read on Saturdays.
+        if !weekends, [1, 7].contains(calendar.component(.weekday, from: date)) { return false }
         let hour = calendar.component(.hour, from: date)
         return from <= to ? (hour >= from && hour < to) : (hour >= from || hour < to)
     }

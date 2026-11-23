@@ -956,6 +956,11 @@ public final class CommandAgent {
         if let brief = TaskBrief.make(heard, graph: Brain.shared.graph, brain: Brain.shared.store, prefs: prefs) {
             context += "\nMemory for this task (the user's words win, then the screen, then this):\n\(brief)"
         }
+        // Who the user is and what's going on for them now (the digest screen memory writes each day), so Murmur
+        // starts from what it knows instead of from nothing.
+        if let digest = Profile.shared.digestForPrompt() {
+            context += "\nWhat Murmur knows about the user right now (its daily digest; the user's words win):\n\(digest)"
+        }
         if let known = await Brain.shared.context(for: heard.text, limit: 1600) {
             context += "\nWhat Murmur knows about the people and things this may be about (from the user's Contacts, "
                 + "Calendar, Reminders, Notes and Mail; use it, but the user's words win):\n\(known)"
