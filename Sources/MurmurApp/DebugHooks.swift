@@ -2,6 +2,7 @@ import AppKit
 import Quartz
 import ServiceManagement
 import SwiftUI
+import VoiceKit
 
 /// Launch arguments for testing without clicks or keystrokes (the terminal has no Accessibility permission):
 ///
@@ -72,7 +73,8 @@ enum DebugHooks {
     /// A debug run that decides what to show (the window a launch by hand opens would get in its way).
     static var drivesUI: Bool {
         ["debugOnboarding", "debugWindow", "debugQuery", "debugLoginItem", "debugWaitForIndex", "debugMenu",
-         "debugMenuView", "debugIcon", "debugKeys", "debugType", "debugWrite"].contains { UserDefaults.standard.object(forKey: $0) != nil }
+         "debugMenuView", "debugIcon", "debugKeys", "debugType", "debugWrite", "debugDictateFiles", "debugVoices",
+         "debugDumpWindow"].contains { UserDefaults.standard.object(forKey: $0) != nil }
     }
 
     static func run(_ app: AppController) {
@@ -86,6 +88,15 @@ enum DebugHooks {
         }
         if let bundle = defaults.string(forKey: "debugWrite") {
             return write(in: bundle, app)
+        }
+        if let folder = defaults.string(forKey: "debugDictateFiles") {
+            return dictateFiles(in: folder, app)
+        }
+        if let folder = defaults.string(forKey: "debugVoices") {
+            return voices(in: folder)
+        }
+        if let bundle = defaults.string(forKey: "debugDumpWindow") {
+            return dumpWindow(of: bundle, to: defaults.string(forKey: "debugDumpTo") ?? "/tmp/murmur-window")
         }
         if defaults.bool(forKey: "debugLoginItem") {
             return loginItem(app)
@@ -451,6 +462,115 @@ enum DebugHooks {
     /// `-debugWrite BUNDLE`: brings that app forward and writes in the box that has the focus there, as a tap of
     /// the key does, logging what was read, what was written and what the box reads afterwards; then quits with
     /// -debugQuit YES.
+    /// `-debugDictateFiles FOLDER`: each recording in it (.wav, .aiff, .m4a, by name) through dictation as it would
+    /// go after you let go of the key, with the speech model and cleanup as set; nothing typed. Logs
+    /// "dictfile: NAME │ SECONDS │ heard │ typed" for each, then quits with -debugQuit YES.
+    private static func dictateFiles(in folder: String, _ app: AppController) {
+        let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath)
+        let files = ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [])
+            .filter { ["wav", "aiff", "aif", "m4a", "caf"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        Task { @MainActor in
+            // The speech model loads first (as at launch).
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            log("dictfile: \(files.count) recordings, speech model \(app.dictation.speechModel.rawValue), "
+                + "cleanup \(app.dictation.aiCleanup ? "on" : "off"), grammar \(app.dictation.grammarFix ? "on" : "off")")
+            for file in files {
+                let name = file.deletingPathExtension().lastPathComponent
+                guard let result = await app.dictation.dictateFile(file) else {
+                    log("dictfile: \(name) │ couldn't read it")
+                    continue
+                }
+                let line = { (text: String) in text.replacingOccurrences(of: "\n", with: " ⏎ ") }
+                log(String(format: "dictfile: %@ │ %.1f s │ %@ │ %@", name, result.seconds, line(result.heard),
+                           line(result.typed)))
+            }
+            log("dictfile: done")
+            if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+        }
+    }
+
+    /// `-debugVoices FOLDER`: its recordings (by name, each one person speaking) through the meeting's telling voices
+    /// apart, as one call: logs "voices: NAME │ SECONDS │ voice N" for each, then quits with -debugQuit YES.
+    private static func voices(in folder: String) {
+        let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath)
+        let files = ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [])
+            .filter { ["wav", "aiff", "aif", "m4a", "caf"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        Task { @MainActor in
+            let started = Date()
+            let results = await MeetingVoicesCheck.run(files)
+            for result in results {
+                log(String(format: "voices: %@ │ %.1f s │ %@", result.name, result.seconds,
+                           result.voice.map { "voice \($0)" } ?? "none"))
+            }
+            log(String(format: "voices: done in %.1f s", Date().timeIntervalSince(started)))
+            if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+        }
+    }
+
+    /// `-debugDumpWindow BUNDLE -debugDumpTo PATH`: what that app's windows show through Accessibility (each element's
+    /// role, name, description, value and place), four times three seconds apart, to PATH-1.txt … PATH-4.txt: to find
+    /// where a call app says who's speaking. Then quits with -debugQuit YES.
+    private static func dumpWindow(of bundle: String, to path: String) {
+        let base = (path as NSString).expandingTildeInPath
+        Task { @MainActor in
+            log("window: Accessibility \(AXIsProcessTrusted() ? "allowed" : "NOT allowed")")
+            for round in 1...4 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else {
+                    log("window: \(bundle) isn't running")
+                    break
+                }
+                let app = AXUIElementCreateApplication(running.processIdentifier)
+                AXUIElementSetMessagingTimeout(app, 1)
+                // Chrome, Edge, Teams and other web-built apps show what's inside the page only once asked.
+                if round == 1 {
+                    AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+                    AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                }
+                var lines: [String] = []
+                var queue: [(AXUIElement, Int)] = [(app, 0)]
+                var visited = 0
+                func text(_ element: AXUIElement, _ name: String) -> String {
+                    var value: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success, let value else { return "" }
+                    if let string = value as? String { return string }
+                    if let number = value as? NSNumber { return number.stringValue }
+                    if CFGetTypeID(value) == AXValueGetTypeID() {
+                        let ax = value as! AXValue
+                        var point = CGPoint.zero, size = CGSize.zero
+                        if AXValueGetValue(ax, .cgPoint, &point) { return "\(Int(point.x)),\(Int(point.y))" }
+                        if AXValueGetValue(ax, .cgSize, &size) { return "\(Int(size.width))×\(Int(size.height))" }
+                    }
+                    return ""
+                }
+                while !queue.isEmpty, visited < 8000 {
+                    let (element, depth) = queue.removeFirst()
+                    visited += 1
+                    let parts = [("role", kAXRoleAttribute), ("sub", kAXSubroleAttribute), ("title", kAXTitleAttribute),
+                                 ("desc", kAXDescriptionAttribute), ("value", kAXValueAttribute), ("help", kAXHelpAttribute),
+                                 ("id", "AXIdentifier"), ("at", kAXPositionAttribute), ("size", kAXSizeAttribute),
+                                 ("selected", kAXSelectedAttribute)]
+                        .map { ($0.0, text(element, $0.1)) }.filter { !$0.1.isEmpty }
+                        .map { "\($0.0)=\($0.1.prefix(120).replacingOccurrences(of: "\n", with: " "))" }
+                    lines.append(String(repeating: "  ", count: depth) + parts.joined(separator: " · "))
+                    var children: CFTypeRef?
+                    if depth < 40, AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+                       let list = children as? [AXUIElement] {
+                        queue.append(contentsOf: list.prefix(300).map { ($0, depth + 1) })
+                    }
+                }
+                let file = "\(base)-\(round).txt"
+                try? lines.joined(separator: "\n").write(toFile: file, atomically: true, encoding: .utf8)
+                log("window: round \(round): \(visited) elements → \(file)")
+            }
+            log("window: done")
+            if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+        }
+    }
+
     private static func write(in bundle: String, _ app: AppController) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             log("write: trusted for Accessibility: \(AXIsProcessTrusted())")

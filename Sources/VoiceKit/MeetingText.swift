@@ -51,12 +51,15 @@ public struct MeetingLine: Identifiable, Sendable, Equatable {
     public let speaker: Speaker
     public var text: String
     public let at: Date
+    /// Which voice on the call said it (1, 2…), when Murmur could tell (MeetingVoices).
+    public var voice: Int?
 
-    public init(id: Int, speaker: Speaker, text: String, at: Date) {
+    public init(id: Int, speaker: Speaker, text: String, at: Date, voice: Int? = nil) {
         self.id = id
         self.speaker = speaker
         self.text = text
         self.at = at
+        self.voice = voice
     }
 }
 
@@ -120,26 +123,53 @@ public enum MeetingText {
                                   "talk me through", "take me through", "describe how", "describe a time"]
 
     /// Whether `mine` (from your microphone) is the call's sound picked up again, on speakers rather than headphones:
-    /// most of its words are in `theirs`.
-    public static func isEcho(_ mine: String, of theirs: String) -> Bool {
-        let a = words(mine), b = words(theirs)
+    /// the same words in the same order, heard at the same moment (`apart`: seconds between the two). A reply that
+    /// takes up their words ("Can you share the pricing sheet?" / "Yes, I'll share the pricing sheet") is you
+    /// speaking: until 24 Nov such replies were dropped, and your side went missing from the transcript.
+    public static func isEcho(_ mine: String, of theirs: String, apart: TimeInterval = 0) -> Bool {
+        guard abs(apart) <= 6 else { return false }
+        let a = sequence(mine), b = sequence(theirs)
         guard a.count >= 3, b.count >= 3 else { return false }
-        let shared = a.intersection(b).count
-        return Double(shared) / Double(min(a.count, b.count)) >= 0.6
+        return Double(inOrder(a, b)) / Double(max(a.count, b.count)) >= 0.75
     }
 
-    private static func words(_ text: String) -> Set<String> {
-        Set(text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" }.map(String.init))
+    private static func sequence(_ text: String) -> [String] {
+        text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" }.map(String.init)
+    }
+
+    /// How many words the two have in the same order (the longest common subsequence).
+    private static func inOrder(_ a: [String], _ b: [String]) -> Int {
+        var row = [Int](repeating: 0, count: b.count + 1)
+        for x in a {
+            var diagonal = 0
+            for (j, y) in b.enumerated() {
+                let above = row[j + 1]
+                row[j + 1] = x == y ? diagonal + 1 : max(row[j + 1], row[j])
+                diagonal = above
+            }
+        }
+        return row[b.count]
+    }
+
+
+    /// Who said a line, as the transcript shows it: "You"; on the call's side the person's name once the screen gave
+    /// it, "Speaker 2" once more than one voice has spoken, and "Them" until then.
+    public static func label(_ line: MeetingLine, voices: Int, names: [Int: String]) -> String {
+        guard line.speaker == .them else { return "You" }
+        if let voice = line.voice, let name = names[voice], !name.isEmpty { return name }
+        if let voice = line.voice, voices > 1 { return "Speaker \(voice)" }
+        return "Them"
     }
 
     /// The transcript as the AI reads it, newest last, cut from the start to fit `limit` characters.
-    public static func transcript(_ lines: [MeetingLine], limit: Int = 14_000) -> String {
+    public static func transcript(_ lines: [MeetingLine], limit: Int = 14_000,
+                                  label: (MeetingLine) -> String = { $0.speaker.rawValue }) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         var kept: [String] = []
         var total = 0
         for line in lines.reversed() {
-            let row = "[\(formatter.string(from: line.at))] \(line.speaker.rawValue): \(line.text)"
+            let row = "[\(formatter.string(from: line.at))] \(label(line)): \(line.text)"
             if total + row.count + 1 > limit { break }
             kept.append(row)
             total += row.count + 1

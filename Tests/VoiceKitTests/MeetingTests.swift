@@ -62,6 +62,10 @@ final class MeetingTests: XCTestCase {
     func testEcho() {
         XCTAssertTrue(MeetingText.isEcho("we should ship it on friday", of: "I think we should ship it on Friday."))
         XCTAssertFalse(MeetingText.isEcho("sounds good to me", of: "I think we should ship it on Friday."))
+        // Your reply takes up their words: that's you speaking, not the call heard again.
+        XCTAssertFalse(MeetingText.isEcho("Yes, I'll share the pricing sheet", of: "Can you share the pricing sheet?"))
+        XCTAssertFalse(MeetingText.isEcho("we should ship it on friday", of: "So we should ship it on Friday?", apart: 12))
+        XCTAssertTrue(MeetingText.isEcho("we should ship it on friday", of: "I think we should ship it on Friday.", apart: 1.5))
     }
 
     func testTranscriptKeepsTheNewest() {

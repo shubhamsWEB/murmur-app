@@ -1132,7 +1132,8 @@ private struct SettingsPage: View {
                 RowDivider()
                 SettingRow(title: "Words on screen",
                            detail: "Listens for the names in the window's title, like a page or project. Only a word Murmur "
-                               + "wasn't sure it heard is corrected. English only; a one-time download, about 106 MB.") {
+                               + "wasn't sure it heard is corrected. English on this Mac only; a one-time download, about "
+                               + "106 MB. Sarvam is never sent the window's words, only the ones you list.") {
                     MurmurSwitch(label: "Words on screen",
                                  isOn: state.bind(get: { dictation.listensForScreenWords },
                                                   set: { dictation.listensForScreenWords = $0 }))

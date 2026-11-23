@@ -6,8 +6,12 @@ import Foundation
 public enum SarvamAudio {
     /// The longest piece, in seconds: under Sarvam's 30, with room to spare.
     public static let maxSeconds = 28.0
-    /// Where in a piece's last stretch a cut may go: the quietest point between this and `maxSeconds`.
-    public static let earliestCut = 20.0
+    /// Where in a piece's last stretch a cut may go: the quietest point between this and `maxSeconds`. From 15 s, so
+    /// there's nearly always a real pause to cut at, not the middle of a word.
+    public static let earliestCut = 15.0
+    /// Silence before and after each piece: a speech model drops a word that starts or ends right at the edge of its
+    /// audio (Parakeet gets the same after the recording).
+    public static let edgeSilence = 0.3
 
     /// The pieces of `samples` (at `rate`), in order, covering all of it.
     public static func pieces(_ samples: [Float], rate: Double = 16_000) -> [Range<Int>] {
@@ -17,7 +21,7 @@ public enum SarvamAudio {
         var pieces: [Range<Int>] = []
         var start = 0
         while samples.count - start > longest {
-            // The quietest 100 ms between 20 and 28 seconds into this piece.
+            // The quietest 100 ms between 15 and 28 seconds into this piece.
             var best = start + longest, quietest = Float.greatestFiniteMagnitude
             var position = start + earliest
             while position + window <= start + longest {
@@ -33,8 +37,10 @@ public enum SarvamAudio {
         return pieces
     }
 
-    /// Samples (−1…1) as a 16-bit PCM mono WAV file.
-    public static func wav(_ samples: ArraySlice<Float>, rate: Int = 16_000) -> Data {
+    /// Samples (−1…1) as a 16-bit PCM mono WAV file, with `edge` seconds of silence before and after.
+    public static func wav(_ samples: ArraySlice<Float>, rate: Int = 16_000, edge: Double = 0) -> Data {
+        let pad = [Float](repeating: 0, count: Int(edge * Double(rate)))
+        let samples = pad[...] + samples + pad[...]
         var data = Data()
         func append<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
         let bytes = samples.count * 2

@@ -242,7 +242,7 @@ private struct CardView: View {
                         Waiting(state: state, size: state.textSize)
                     }
                     if let last = state.lines.last {
-                        LastSaid(line: last)
+                        LastSaid(line: last, who: state.label(last))
                     }
                 }
                 .padding(.horizontal, 16)
@@ -671,11 +671,12 @@ private struct AskBox: View {
 /// The other side's or your last line, small, under the answer.
 private struct LastSaid: View {
     let line: MeetingLine
+    let who: String
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
-            Text(line.speaker == .you ? "You" : "Them")
+            Text(who)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(line.speaker == .you ? Palette.coralDeep : Ink(contrast: contrast).secondary)
             Text(line.text)
@@ -686,7 +687,7 @@ private struct LastSaid: View {
         }
         .padding(.horizontal, 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Last said, \(line.speaker == .you ? "by you" : "by them"): \(line.text)")
+        .accessibilityLabel("Last said, by \(line.speaker == .you ? "you" : who): \(line.text)")
     }
 }
 
@@ -927,7 +928,7 @@ private struct Footer: View {
     /// The notes, or the transcript when there are no notes yet.
     private func copyNotes() {
         let text = state.notesText.isEmpty
-            ? state.lines.map { "\($0.speaker.rawValue): \($0.text)" }.joined(separator: "\n")
+            ? state.lines.map { "\(state.label($0)): \($0.text)" }.joined(separator: "\n")
             : MarkdownBlocks.plain(state.notesText)
         TextInserter.copy(text)
         state.copied = true
@@ -1047,7 +1048,7 @@ private struct TranscriptView: View {
                             .font(.system(size: 13.5)).foregroundStyle(Ink(contrast: contrast).secondary)
                     }
                     ForEach(state.lines) { line in
-                        (Text(line.speaker == .you ? "You  " : "Them  ")
+                        (Text(state.label(line) + "  ")
                             .font(.system(size: 12.5, weight: .semibold))
                             .foregroundColor(line.speaker == .you ? Palette.coralDeep : Ink(contrast: contrast).secondary)
                             + Text(line.text).font(.system(size: 14)).foregroundColor(Palette.text))
