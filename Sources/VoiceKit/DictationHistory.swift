@@ -8,6 +8,8 @@ public final class DictationHistory: ObservableObject {
         public enum Kind: String, Codable, Sendable {
             case dictation
             case command
+            /// Written by Murmur on a tap of the key ("write it for me").
+            case written
         }
 
         public let id: UUID

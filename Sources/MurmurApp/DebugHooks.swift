@@ -32,6 +32,7 @@ import SwiftUI
 ///     -debugLoginItem YES     turn open-at-login on, log what macOS says, then off again (a signed build in
 ///                             /Applications; macOS shows a notification)
 ///     -debugQuit YES          quit after that
+///     -debugWrite BUNDLE      bring that app forward and write in its focused box, as a tap of the key does
 ///     -debugPauseAfter S / -debugResumeAfter S   press Pause / Resume S seconds after launch
 ///     -debugFolders a:b -debugFoldersAfter S     choose these folders S seconds after launch (as Settings would)
 ///     -debugCodeFolders a:b|off -debugCodeFoldersAfter S   the same for code search's folders ("off" turns it off)
@@ -43,7 +44,10 @@ import SwiftUI
 ///     -debugWindow PAGE       open a window instead of the panel and snapshot it: search (with -debugQuery),
 ///                             settings:general|folders|code|storage, settings:add (Folders with Add Folders open),
 ///                             settings:addcode (Code with its folders' sheet open),
-///                             onboarding:welcome|folders|code|shortcut|ready
+///                             onboarding:welcome|folders|code|shortcut|ready,
+///                             tour (every stop of the tour, <snapshot>-tour-NN-<stop>.png, no flying) or
+///                             tour:<stop> (one: hello, talk, ask, find, offer, live, notes, transcript,
+///                             context, ended, memory, ai, yours, bye), or tour:live[:<stop>] (flying, as you'd see it)
 ///                             (-debugCloseWindow YES closes it afterwards, to measure what closing gives back;
 ///                             -debugWindowAfter S opens it S seconds after launch, once the helper has reported)
 ///     -debugChoices "open:real;click:real/videos;add:<path>"   before the snapshot, act on the folder list of
@@ -68,7 +72,7 @@ enum DebugHooks {
     /// A debug run that decides what to show (the window a launch by hand opens would get in its way).
     static var drivesUI: Bool {
         ["debugOnboarding", "debugWindow", "debugQuery", "debugLoginItem", "debugWaitForIndex", "debugMenu",
-         "debugMenuView", "debugIcon", "debugKeys", "debugType"].contains { UserDefaults.standard.object(forKey: $0) != nil }
+         "debugMenuView", "debugIcon", "debugKeys", "debugType", "debugWrite"].contains { UserDefaults.standard.object(forKey: $0) != nil }
     }
 
     static func run(_ app: AppController) {
@@ -79,6 +83,9 @@ enum DebugHooks {
         }
         if let page = defaults.string(forKey: "debugWindow") {
             return showWindow(page, app)
+        }
+        if let bundle = defaults.string(forKey: "debugWrite") {
+            return write(in: bundle, app)
         }
         if defaults.bool(forKey: "debugLoginItem") {
             return loginItem(app)
@@ -171,6 +178,40 @@ enum DebugHooks {
                     if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                 }
             }
+        }
+    }
+
+    /// The tour, step by step: each drawn once its spotlight has moved and its page has scrolled, with where its
+    /// target was logged.
+    private static func runTour(_ app: AppController, only: String?) {
+        let home = app.home!
+        let tour = home.tour
+        tour.frozen = true
+        home.startTour()
+        let all = Array(tour.steps.indices)
+        let indices = only.flatMap { name in tour.steps.firstIndex { $0.id == name } }.map { [$0] } ?? all
+        func shoot(_ k: Int) {
+            guard k < indices.count else {
+                tour.finish()
+                log("tour: \(indices.count) snapshots")
+                if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                return
+            }
+            let i = indices[k]
+            tour.go(to: i)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+                let step = tour.steps[i]
+                let frame = step.target.flatMap { tour.frame(of: $0) }
+                log("tour: \(step.id) → \(step.target.map { "\($0)" } ?? "the middle")"
+                    + (frame.map { " drawn at \(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))×\(Int($0.height))" } ?? "")
+                    + " (shift \(Int(tour.shift.x)),\(Int(tour.shift.y)))")
+                save("tour \(step.id)", { try home.snapshot(to: $0) },
+                     to: snapshotPath(String(format: "tour-%02d-", i + 1) + step.id))
+                shoot(k + 1)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5 + UserDefaults.standard.double(forKey: "debugWindowAfter")) {
+            shoot(0)
         }
     }
 
@@ -304,6 +345,16 @@ enum DebugHooks {
         let defaults = UserDefaults.standard
         let started = Date()
         let parts = page.split(separator: ":").map(String.init)
+        if parts.first == "tour", parts.count > 1, parts[1] == "live" {
+            // The tour as you'd see it, flying; tour:live:<stop> starts at that stop.
+            let home = app.home!
+            home.startTour()
+            if parts.count > 2, let i = home.tour.steps.firstIndex(where: { $0.id == parts[2] }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { home.tour.go(to: i) }
+            }
+            return
+        }
+        if parts.first == "tour" { return runTour(app, only: parts.count > 1 ? parts[1] : nil) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 + defaults.double(forKey: "debugWindowAfter")) {
             let loaded: () -> Bool
             let draw: (URL) throws -> Void
@@ -396,6 +447,23 @@ enum DebugHooks {
     }
 
     // MARK: Open at login
+
+    /// `-debugWrite BUNDLE`: brings that app forward and writes in the box that has the focus there, as a tap of
+    /// the key does, logging what was read, what was written and what the box reads afterwards; then quits with
+    /// -debugQuit YES.
+    private static func write(in bundle: String, _ app: AppController) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            log("write: trusted for Accessibility: \(AXIsProcessTrusted())")
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first?.activate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                Task { @MainActor in
+                    await app.dictation.writeNow(echo: true)
+                    log("write: finished")
+                    if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                }
+            }
+        }
+    }
 
     private static func loginItem(_ app: AppController) {
         func status() -> String {

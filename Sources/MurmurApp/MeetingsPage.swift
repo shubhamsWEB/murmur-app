@@ -25,6 +25,7 @@ struct MeetingsPage: View {
                     .buttonStyle(.murmurPrimary)
                 }
             }
+            .tourTarget(.meetingsPage)
             SettingsSection {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(Theme.ink3)
@@ -41,6 +42,7 @@ struct MeetingsPage: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
             }
+            .tourTarget(.meetingsSearch)
             let shown = filtered
             if meetings.isEmpty {
                 SettingsSection {
@@ -50,11 +52,14 @@ struct MeetingsPage: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(18)
                 }
+                .tourTarget(.meetingsList)
             } else if shown.isEmpty {
                 Text("No meeting mentions “\(query)”.").font(.system(size: 13)).foregroundStyle(Theme.ink2)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(shown) { meeting in card(meeting) }
+                    ForEach(shown) { meeting in
+                        card(meeting).tourTarget(meeting.url == shown.first?.url ? .meetingsList : nil)
+                    }
                 }
             }
         }

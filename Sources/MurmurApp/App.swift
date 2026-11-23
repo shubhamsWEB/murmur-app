@@ -149,7 +149,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
         NSApp.windowsMenu = windowMenu
 
-        for submenu in [appMenu, fileMenu, editMenu, windowMenu] {
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(ActionMenuItem("Take the Tour") { [weak app] in app?.home.startTour() })
+        NSApp.helpMenu = helpMenu
+
+        for submenu in [appMenu, fileMenu, editMenu, windowMenu, helpMenu] {
             let item = NSMenuItem()
             item.submenu = submenu
             mainMenu.addItem(item)

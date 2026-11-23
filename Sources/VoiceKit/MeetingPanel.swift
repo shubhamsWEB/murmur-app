@@ -166,6 +166,8 @@ private struct Ink {
 private struct CardView: View {
     @ObservedObject var state: MeetingState
     let mode: MeetingMode
+    /// Where the tabs are, in the window (the tour points at them).
+    var onTabs: ((CGRect) -> Void)?
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
@@ -200,6 +202,7 @@ private struct CardView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.large)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { onTabs?($0) }
             .padding(.horizontal, 14)
             .padding(.bottom, 10)
             Rectangle().fill(ink.line).frame(height: 1)
@@ -1322,5 +1325,208 @@ private struct PromptView: View {
         .frame(width: MeetingPrompt.size.width, height: MeetingPrompt.size.height)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Palette.paper))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Palette.line))
+    }
+}
+
+// MARK: - In the tour
+
+/// Meeting notes as the tour shows them: the real offer card and the real panel, playing a made-up call instead of
+/// listening to one. Nothing records and nothing is sent anywhere; the panel's buttons don't act (the tour moves it
+/// from tab to tab). Its AI and speech settings are the real ones, as the panel shows them.
+@MainActor
+public final class MeetingDemo: ObservableObject {
+    public enum Scene: Equatable, Sendable { case offer, live, notes, transcript, context, ended }
+
+    let state = MeetingState()
+    let mode: MeetingMode
+    @Published public private(set) var scene: Scene?
+    private var playing: Task<Void, Never>?
+    private var levels: Timer?
+    private var nextLine = 0
+
+    public init(mode: MeetingMode) {
+        self.mode = mode
+    }
+
+    /// Shows a part of the call: at once (`animated` false, as in a snapshot), or as it happens.
+    public func show(_ scene: Scene, animated: Bool) {
+        guard scene != self.scene else { return }
+        self.scene = scene
+        playing?.cancel()
+        switch scene {
+        case .offer:
+            reset()
+        case .live:
+            if state.lines.isEmpty { reset() }
+            state.tab = .live
+            playing = Task { [weak self] in await self?.ask(animated: animated) }
+        case .notes:
+            state.tab = .notes
+            playing = Task { [weak self] in await self?.writeNotes(animated: animated) }
+        case .transcript:
+            state.tab = .transcript
+            if animated {
+                playing = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_400_000_000)
+                    self?.say(.you, "Yes, and the first month of onboarding is on us.")
+                }
+            } else {
+                say(.you, "Yes, and the first month of onboarding is on us.")
+            }
+        case .context:
+            state.tab = .context
+        case .ended:
+            stopLevels()
+        }
+        if scene != .offer, scene != .ended, animated, levels == nil { startLevels() }
+    }
+
+    /// The tour's over (or left the meeting part).
+    public func stop() {
+        playing?.cancel()
+        playing = nil
+        stopLevels()
+        scene = nil
+    }
+
+    private func reset() {
+        state.reset()
+        state.running = true
+        state.app = "Zoom"
+        state.started = Date().addingTimeInterval(-12 * 60 - 40)
+        state.sharing = .hidden
+        state.autoAnswer = true
+        state.about = "Acme's renewal. They want fifty seats and will push for a discount."
+        state.instructions = "Keep answers short. Don't promise dates."
+        state.ai = MeetingMode.aiChoice
+        state.speech = MeetingMode.speechChoice
+        state.documents = [MeetingDocument(url: URL(fileURLWithPath: "/Pricing v3.pdf"), text: "")]
+        nextLine = 0
+        say(.them, "Thanks for making time. We've looked at the renewal with the team.")
+        say(.you, "Great. Where did you land?")
+        say(.them, "We'd like to go from twenty seats to fifty.")
+    }
+
+    private func say(_ speaker: MeetingLine.Speaker, _ text: String) {
+        nextLine += 1
+        state.lines.append(MeetingLine(id: nextLine, speaker: speaker, text: text, at: Date()))
+    }
+
+    /// They ask; once they've finished, the answer is written in as it comes.
+    private func ask(animated: Bool) async {
+        let question = "What would fifty seats cost us on the yearly plan?"
+        let answer = """
+            ANSWER: Fifty seats on the yearly plan come to ₹40,000 a month.
+            POINTS:
+            - That's **20% less** than paying month to month.
+            - Onboarding and single sign-on are included.
+            EXAMPLE: Twenty seats today cost ₹19,000 a month, so it's about ₹800 a seat instead of ₹950.
+            """
+        guard state.answers.isEmpty else { return }
+        if !animated {
+            say(.them, question)
+            let index = state.beginAnswer(question: question)
+            state.updateAnswer(index, text: answer, done: true)
+            return
+        }
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        guard !Task.isCancelled else { return }
+        say(.them, question)
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+        guard !Task.isCancelled else { return }
+        let index = state.beginAnswer(question: question)
+        let words = answer.split(separator: " ", omittingEmptySubsequences: false)
+        var written = ""
+        for (i, word) in words.enumerated() {
+            guard !Task.isCancelled else { break }
+            written += (i == 0 ? "" : " ") + word
+            state.updateAnswer(index, text: written)
+            try? await Task.sleep(nanoseconds: 55_000_000)
+        }
+        state.updateAnswer(index, text: answer, done: true)
+    }
+
+    private func writeNotes(animated: Bool) async {
+        let notes = """
+            ## Summary
+            Acme renews for a year and grows from twenty seats to fifty. They asked for a discount.
+
+            ## Decisions
+            - Yearly plan, fifty seats.
+            - 10% off if they sign by Friday.
+
+            ## Action items
+            - **You:** send the updated contract today.
+            - **Rahul:** share the pricing sheet with their finance team.
+            """
+        guard state.notes.isEmpty else { return }
+        if animated {
+            state.writingNotes = true
+            try? await Task.sleep(nanoseconds: 1_300_000_000)
+            guard !Task.isCancelled else { state.writingNotes = false; return }
+        }
+        state.setNotes(notes)
+        state.writingNotes = false
+    }
+
+    /// The level chips move as they would in a call: theirs mostly, yours now and then.
+    private func startLevels() {
+        levels = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let t = Date().timeIntervalSinceReferenceDate
+                self.state.callLevel = Float(max(0, sin(t * 1.3))) * Float.random(in: 0.35...0.9)
+                self.state.micLevel = Float(max(0, sin(t * 0.7 + 2))) * Float.random(in: 0.2...0.6)
+            }
+        }
+    }
+
+    private func stopLevels() {
+        levels?.invalidate()
+        levels = nil
+        state.callLevel = 0
+        state.micLevel = 0
+    }
+}
+
+/// The offer card, as it appears at the top right of the screen when a call starts.
+public struct MeetingDemoOffer: View {
+    let take: () -> Void
+    let later: () -> Void
+
+    public init(take: @escaping () -> Void, later: @escaping () -> Void) {
+        self.take = take
+        self.later = later
+    }
+
+    @MainActor public static var size: CGSize { MeetingPrompt.size }
+
+    public var body: some View {
+        PromptView(app: "Zoom", start: take, dismiss: later)
+            .shadow(color: .black.opacity(0.22), radius: 18, y: 10)
+    }
+}
+
+/// The notes panel, as it sits beside a call, playing the tour's call. `tabs` gets where its tabs are.
+public struct MeetingDemoPanel: View {
+    @ObservedObject var demo: MeetingDemo
+    let tabs: (CGRect) -> Void
+
+    public init(demo: MeetingDemo, tabs: @escaping (CGRect) -> Void) {
+        self.demo = demo
+        self.tabs = tabs
+    }
+
+    /// The panel's width, as it first opens beside a call.
+    public static let width: CGFloat = 430
+
+    public var body: some View {
+        CardView(state: demo.state, mode: demo.mode, onTabs: tabs)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(Palette.paper)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.line))
+            .shadow(color: .black.opacity(0.22), radius: 18, y: 10)
+            .allowsHitTesting(false)
     }
 }

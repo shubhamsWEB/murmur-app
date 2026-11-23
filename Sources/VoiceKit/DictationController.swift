@@ -123,6 +123,7 @@ public final class DictationController: ObservableObject {
     private static let showLogoDefault = "dictation.showLogo"
     private static let aiCleanupDefault = "dictation.aiCleanup"
     private static let grammarFixDefault = "dictation.grammarFix"
+    private static let writeOnTapDefault = "dictation.writeOnTap"
 
     /// The microphone picked in Settings (its Core Audio UID); nil chooses automatically: the system's input, or the
     /// Mac's own microphone instead of a Bluetooth headset when `preferBuiltInMic` is on.
@@ -333,6 +334,13 @@ public final class DictationController: ObservableObject {
     public var grammarFix: Bool {
         get { UserDefaults.standard.bool(forKey: Self.grammarFixDefault) }
         set { UserDefaults.standard.set(newValue, forKey: Self.grammarFixDefault); objectWillChange.send() }
+    }
+
+    /// One tap of the key in a text box writes what goes there (on by default): the reply to the conversation above,
+    /// what the box asks for ("say yes but after 5"), or the draft finished. Nothing is sent; ⌘Z takes it back.
+    public var writeOnTap: Bool {
+        get { UserDefaults.standard.object(forKey: Self.writeOnTapDefault) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.writeOnTapDefault); objectWillChange.send() }
     }
 
     public func cleanupStyle(for category: DictationCleanup.Category) -> DictationCleanup.Style {
@@ -799,6 +807,14 @@ public final class DictationController: ObservableObject {
     // MARK: - Key handling
 
     private func keyDown() {
+        // A second tap: hands-free dictation, not writing. A press while Murmur writes: you've moved on.
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        if let writing = writeTask {
+            log("write: the key was pressed; stopping")
+            writing.cancel()
+            writeTask = nil
+        }
         switch phase {
         case .listening(handsFree: true):
             finish()                       // a tap ends hands-free dictation
@@ -832,7 +848,17 @@ public final class DictationController: ObservableObject {
             recorder.cancel()
             phase = .idle
             hud.hide()
+            // The first tap of a double-tap, or a single tap: in a text box, a single one writes what goes there.
+            let doubleTapped = Date().timeIntervalSince(lastTapAt) < doubleTapWindow * 2
             lastTapAt = Date()
+            if writeOnTap, !commandRequested, !typingRequested, !doubleTapped {
+                let wait = UInt64(doubleTapWindow * 1_000_000_000)
+                pendingWrite = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: wait)
+                    guard !Task.isCancelled else { return }
+                    self?.writeHere()
+                }
+            }
         } else {
             finish()
         }
@@ -858,6 +884,12 @@ public final class DictationController: ObservableObject {
             cancel()                       // Fn was part of a shortcut (Fn+Delete, Fn+arrow…), not dictation
         default:
             // Esc while a command runs stops it. (Keys Murmur presses itself never reach here.)
+            if code == Int64(kVK_Escape), let writing = writeTask {
+                log("write: Esc pressed; stopping")
+                writing.cancel()
+                writeTask = nil
+                hud.hide()
+            }
             if code == Int64(kVK_Escape), let running = commandTask {
                 log("command: Esc pressed; stopping")
                 agent.stop()
@@ -878,6 +910,97 @@ public final class DictationController: ObservableObject {
     }
 
     public var isRunningCommand: Bool { commandTask != nil }
+
+    // MARK: - Write it for me
+
+    /// The single tap waiting to see whether a second one follows.
+    private var pendingWrite: Task<Void, Never>?
+    /// Writing now, so Esc or the next press can stop it.
+    private var writeTask: Task<Void, Never>?
+    /// Debug runs: what was read and written goes in the log too.
+    private var writeEcho = false
+
+    /// Debug runs: writes in the focused box now, as a tap would, and returns once it's in.
+    public func writeNow(echo: Bool) async {
+        writeEcho = echo
+        writeHere()
+        await writeTask?.value
+        writeEcho = false
+    }
+
+    /// One tap of the key in a text box: reads the box and the window round it, asks the commands' model what goes
+    /// there (with what memory knows about this conversation), and puts it in the box: in place of an instruction
+    /// or draft, over the selection, or into the empty box. Nothing is sent. Nothing happens outside a text box, so
+    /// a stray tap stays harmless.
+    private func writeHere() {
+        pendingWrite = nil
+        guard case .idle = phase, writeTask == nil, commandTask == nil, AXIsProcessTrusted() else { return }
+        guard let read = ReplyWriter.read() else {
+            log("write: a tap, but the focus isn't a text box Murmur may write in")
+            return
+        }
+        let (context, field) = read
+        if context.selection == nil, context.draft.count > 3000 {
+            hud.flash("This box is long · select the part to write", seconds: 3)
+            return
+        }
+        let app = NSWorkspace.shared.frontmostApplication
+        let box = context.selection != nil ? "text selected"
+            : context.draft.isEmpty ? "empty" : ReplyWriter.isInstruction(context.draft) ? "an instruction" : "a draft"
+        log("write: \(context.app), \(context.above.count) lines above the box, \(context.below.count) below; the box: \(box)")
+        let me = Brain.shared.store.meNames()
+        let digest = Profile.shared.digestForPrompt()
+        let router = agent.currentRouter()
+        let oneLine = { (text: Substring) in text.replacingOccurrences(of: "\n", with: " ⏎ ") }
+        if writeEcho {
+            log("write: app \(context.app) — \(context.title)")
+            for line in context.above.suffix(6) { log("write:   above │ \(line.prefix(160))") }
+            log("write:   box   │ \(oneLine(context.draft.prefix(200)))")
+            if let selection = context.selection { log("write:   selected │ \(oneLine(selection.prefix(200)))") }
+            for line in context.below.prefix(3) { log("write:   below │ \(line.prefix(160))") }
+        }
+        hud.show(.working("Writing · Esc stops"))
+        let started = Date()
+        writeTask = Task { @MainActor [weak self] in
+            let memory = await Brain.shared.context(for: context.title + "\n" + context.recent, limit: 900)
+            let text = await ReplyWriter.write(context, router: router, me: me, digest: digest, memory: memory)
+            guard let self, !Task.isCancelled else { return }
+            writeTask = nil
+            let took = Date().timeIntervalSince(started)
+            guard let text else {
+                log(String(format: "write: nothing usable from %@ in %.1f s", router.name, took))
+                hud.flash("Couldn't write anything here", seconds: 2.5)
+                return
+            }
+            log(String(format: "write: %ld characters from %@ in %.1f s", text.count, router.name, took))
+            if writeEcho { log("write: wrote │ \(oneLine(text[...]))") }
+            DictationHistory.shared.add(text, app: context.app, kind: .written)
+            lastText = text
+            // Moved on meanwhile (another app, or typed in the box): copied, not put where it no longer fits.
+            let now = ReplyWriter.text(in: field)
+            let moved = NSWorkspace.shared.frontmostApplication != app
+            let trimmed = { (s: String) in s.prefix(4000).trimmingCharacters(in: .whitespacesAndNewlines) }
+            if moved || trimmed(now) != trimmed(context.draft) {
+                TextInserter.copy(text)
+                log("write: \(moved ? "another app is in front" : "the box changed") now; copied instead")
+                hud.flash(moved ? "Written and copied · you'd switched apps" : "The box changed · copied instead", seconds: 3)
+                return
+            }
+            // An instruction or a draft is replaced by what was written; a selection is pasted over.
+            if context.selection == nil, !context.draft.isEmpty {
+                if !ReplyWriter.selectAll(in: field) {
+                    TextInserter.selectAll()
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                }
+            }
+            hud.hide()
+            report(TextInserter.insert(text))
+            if writeEcho {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                log("write: the box now reads │ \(oneLine(ReplyWriter.text(in: field).prefix(400)))")
+            }
+        }
+    }
 
     // MARK: - Dictation
 

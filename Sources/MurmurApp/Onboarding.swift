@@ -191,6 +191,11 @@ final class OnboardingState {
         if launchAtLogin != app.launchesAtLogin { _ = app.setLaunchAtLogin(launchAtLogin) }
         log("onboarding: done (\(model.settings.roots.count) folders, login item \(launchAtLogin ? "on" : "off"))")
         close()
+        // Set up: now where everything is, once (About & Help has it again).
+        if !TourModel.seen, !AppController.offscreen {
+            let app = self.app
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { app.home.startTour() }
+        }
     }
 
     /// The window is closing (Done or its close button).
