@@ -32,6 +32,8 @@ public final class DictationController: ObservableObject {
     @Published public private(set) var modelStatus = "Speech model not loaded"
     /// Where log lines go (the app passes its own logger).
     public var log: (String) -> Void = { print($0) }
+    /// Watching what becomes of the last text written into a box (`watchWritten`).
+    private var writtenWatch: Task<Void, Never>?
 
     private let recorder = MicRecorder()
     private var transcriber: SpeechTranscriber
@@ -967,9 +969,16 @@ public final class DictationController: ObservableObject {
     private func writeHere() {
         pendingWrite = nil
         guard case .idle = phase, writeTask == nil, commandTask == nil, AXIsProcessTrusted() else { return }
-        guard let read = ReplyWriter.read() else {
+        guard var read = ReplyWriter.read() else {
             log("write: a tap, but the focus isn't a text box Murmur may write in")
             return
+        }
+        // Next to nothing above the box: asked again, with more patience (an app that only describes itself once
+        // asked, or answers slowly).
+        if read.context.above.count < ReplyWriter.fewLines, let again = ReplyWriter.read(patient: true),
+           again.context.above.count > read.context.above.count {
+            log("write: a second, slower read found \(again.context.above.count) lines (the first: \(read.context.above.count))")
+            read = again
         }
         let (context, field) = read
         if context.selection == nil, context.draft.count > 3000 {
@@ -979,23 +988,74 @@ public final class DictationController: ObservableObject {
         let app = NSWorkspace.shared.frontmostApplication
         let box = context.selection != nil ? "text selected"
             : context.draft.isEmpty ? "empty" : ReplyWriter.isInstruction(context.draft) ? "an instruction" : "a draft"
-        log("write: \(context.app), \(context.above.count) lines above the box, \(context.below.count) below; the box: \(box)")
+        log("write: \(context.app), \(context.above.count) lines above the box, \(context.below.count) below; the box: \(box)"
+            + "; mine \(context.sides.filter { $0 == .me }.count), theirs \(context.sides.filter { $0 == .them }.count)")
         let me = Brain.shared.store.meNames()
         let digest = Profile.shared.digestForPrompt()
         let router = agent.currentRouter()
         let oneLine = { (text: Substring) in text.replacingOccurrences(of: "\n", with: " ⏎ ") }
         if writeEcho {
             log("write: app \(context.app) — \(context.title)")
-            for line in context.above.suffix(6) { log("write:   above │ \(line.prefix(160))") }
+            let marks = context.sides.isEmpty ? [ReplyWriter.Side?](repeating: nil, count: context.above.count) : context.sides
+            log("write: whose message is whose: \(context.sides.isEmpty ? "not shown by this window" : "by side")")
+            for (line, side) in zip(context.above, marks).suffix(12) {
+                log("write:   above │ \(side?.rawValue ?? "-") │ \(line.prefix(160))")
+            }
             log("write:   box   │ \(oneLine(context.draft.prefix(200)))")
             if let selection = context.selection { log("write:   selected │ \(oneLine(selection.prefix(200)))") }
             for line in context.below.prefix(3) { log("write:   below │ \(line.prefix(160))") }
         }
         hud.show(.working("Writing · Esc stops"))
         let started = Date()
+        let echo = writeEcho, log = log
         writeTask = Task { @MainActor [weak self] in
-            let memory = await Brain.shared.context(for: context.title + "\n" + context.recent, limit: 900)
-            let text = await ReplyWriter.write(context, router: router, me: me, digest: digest, memory: memory)
+            // An app that tells Accessibility next to nothing of the conversation: read from a picture of its window.
+            var context = context
+            let thin = context.above.count < ReplyWriter.fewLines
+            let pictured = thin ? await ReplyWriter.readPicture(context, field: field) : nil
+            if thin { log("write: a picture of the window: \(ReplyWriter.pictureNote)") }
+            if echo, thin {
+                for line in context.above { log("write:   the one read │ \(line.prefix(120))") }
+            }
+            if let seen = pictured {
+                context = seen
+                log("write: read from a picture of the window: \(seen.above.count) lines above the box; mine "
+                    + "\(seen.sides.filter { $0 == .me }.count), theirs \(seen.sides.filter { $0 == .them }.count)")
+                if echo {
+                    let marks = seen.sides.isEmpty ? [ReplyWriter.Side?](repeating: nil, count: seen.above.count) : seen.sides
+                    for (line, side) in zip(seen.above, marks).suffix(14) {
+                        log("write:   seen  │ \(side?.rawValue ?? "-") │ \(line.prefix(160))")
+                    }
+                }
+            }
+            // What Murmur knows, gathered together: who they're writing to and what memory holds about that person,
+            // what it holds about this conversation, who the user is, and how they've written here before.
+            let head = ([context.title] + context.above.prefix(4)).joined(separator: "\n")
+            let partner = ReplyWriter.partner(context, known: Brain.shared.store.knownPeople(in: head), me: me)
+            let thread = await Brain.shared.context(for: context.title + "\n" + context.recent, limit: 1800)
+            var about: String?
+            if let partner { about = ReplyWriter.about(partner, in: await Brain.shared.context(for: partner, limit: 2400)) }
+            let profile = Profile.shared.text("profile")?.text
+            // The digest even when it's a few days old (it says its date): old news about the user beats none.
+            let current = digest ?? Profile.shared.text("digest").map {
+                "As of \(DateFormatter.localizedString(from: $0.generated, dateStyle: .medium, timeStyle: .none)):\n"
+                    + String($0.text.prefix(2200))
+            }
+            let knowing = ReplyWriter.Knowledge(
+                profile: profile, digest: current, partner: partner, dossier: about, memory: thread,
+                sent: WriteMemory.shared.examples(app: context.app, partner: partner),
+                corrections: WriteMemory.shared.corrections(app: context.app))
+            let kept = [knowing.digest, knowing.memory].compactMap { ReplyWriter.relevant($0, to: context, me: me) }
+                .reduce(0) { $0 + $1.count }
+            log("write: to \(partner == nil ? "nobody named" : "a named person"); memory: \(knowing.dossier?.count ?? 0) characters about "
+                + "them, \(kept) about this conversation; profile \(profile == nil ? "none" : "in"); the user's own "
+                + "messages here: \(ReplyWriter.ownLines(context).count), sent before: \(knowing.sent.count), corrections: "
+                + "\(knowing.corrections.count)")
+            if echo {
+                for line in (knowing.dossier ?? "").split(separator: "\n").prefix(6) { log("write:   about │ \(line.prefix(160))") }
+            }
+            let (text, rechecked) = await ReplyWriter.write(context, router: router, me: me, knowing: knowing)
+            if !rechecked.isEmpty { log("write: \(rechecked.count) made-up detail(s) taken out on a second pass") }
             guard let self, !Task.isCancelled else { return }
             writeTask = nil
             let took = Date().timeIntervalSince(started)
@@ -1027,9 +1087,49 @@ public final class DictationController: ObservableObject {
             }
             hud.hide()
             report(TextInserter.insert(text))
+            watchWritten(text, before: context.draft, in: field, app: app, name: context.app, partner: partner)
             if writeEcho {
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 log("write: the box now reads │ \(oneLine(ReplyWriter.text(in: field).prefix(400)))")
+            }
+        }
+    }
+
+    /// What becomes of text Murmur wrote into a box, so it learns how you write: the box is looked at every second
+    /// for up to two minutes. Emptied, with your text now in the conversation above it: sent, as written or as you
+    /// changed it. Back to what it held before, or your own words in its place: taken back. Anything else (you
+    /// moved away with it still there) isn't recorded.
+    private func watchWritten(_ wrote: String, before: String, in field: AXUIElement, app: NSRunningApplication?,
+                              name: String, partner: String?) {
+        writtenWatch?.cancel()
+        let log = log
+        writtenWatch = Task { @MainActor in
+            var last = wrote, landed = false
+            let was = before.trimmingCharacters(in: .whitespacesAndNewlines)
+            for round in 0..<120 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication == app else { return }
+                let now = ReplyWriter.text(in: field).trimmingCharacters(in: .whitespacesAndNewlines)
+                // Until the text is seen in the box, the box as it was before means it hasn't gone in yet.
+                if !landed {
+                    if now != was { landed = true } else if round < 4 { continue } else { return }
+                }
+                if !now.isEmpty { last = now; if now != was { continue } }
+                // Empty, or back to what it was: sent only if it's in the conversation now.
+                var shown = false
+                if now.isEmpty {
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    var seen = ReplyWriter.read(patient: true)?.context
+                    if let context = seen, context.above.count < ReplyWriter.fewLines {
+                        seen = await ReplyWriter.readPicture(context, field: field) ?? context
+                    }
+                    let above = (seen?.above.suffix(12) ?? []).joined(separator: " ")
+                    shown = WriteMemory.overlap(above, last) >= 0.8
+                }
+                guard let (outcome, sent) = WriteMemory.outcome(wrote: wrote, before: before, last: last, emptied: shown) else { return }
+                WriteMemory.shared.add(.init(app: name, partner: partner, wrote: wrote, sent: sent, outcome: outcome))
+                log("write: what you did with it: \(outcome.rawValue)")
+                return
             }
         }
     }
