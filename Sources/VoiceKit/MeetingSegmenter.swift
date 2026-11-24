@@ -52,6 +52,10 @@ public struct MeetingSegmenter {
         return Double(voiced) * frameSeconds >= leastSpeech ? piece : nil
     }
 
+    /// Seconds of sound held for the piece being made (after a long piece was cut at a pause, what came after the
+    /// pause): a piece just finished began this much earlier than its length says.
+    public var held: Double { Double(piece.count) / rate }
+
     /// Someone is speaking now (speech within the last 0.3 s), so a question may not be over yet.
     public var isSpeaking: Bool { heard && Double(silentRun) * frameSeconds < 0.3 }
 

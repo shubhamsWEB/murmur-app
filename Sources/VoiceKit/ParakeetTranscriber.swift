@@ -74,6 +74,8 @@ public actor ParakeetTranscriber {
     /// The last transcription's words with how sure Parakeet was of each, and the spotter's proposed swaps.
     public private(set) var lastHeard: [DictationVocabulary.HeardWord] = []
     public private(set) var lastSwaps: [DictationVocabulary.Replacement] = []
+    /// The last transcription's words with when each was said (meetings cut a stretch between two speakers by it).
+    public private(set) var lastTimes: [TimedWord] = []
 
     /// Whether the word spotter is on this Mac already.
     public static var vocabularyModelIsDownloaded: Bool {
@@ -141,6 +143,7 @@ public actor ParakeetTranscriber {
         let timings = result.tokenTimings ?? []
         lastHeard = DictationVocabulary.words(fromPieces: timings.map { ($0.token, $0.confidence) })
         lastSwaps = []
+        lastTimes = buildWordTimings(from: timings).map { TimedWord($0.word, $0.startTime, $0.endTime) }
         guard model == .english, !vocabulary.isEmpty, let spotter, !timings.isEmpty else { return result.text }
         // Any failure here keeps Parakeet's text as it is.
         guard let session = try? await boostingSession(for: vocabulary, models: spotter),

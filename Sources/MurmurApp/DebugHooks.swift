@@ -73,7 +73,7 @@ enum DebugHooks {
     /// A debug run that decides what to show (the window a launch by hand opens would get in its way).
     static var drivesUI: Bool {
         ["debugOnboarding", "debugWindow", "debugQuery", "debugLoginItem", "debugWaitForIndex", "debugMenu",
-         "debugMenuView", "debugIcon", "debugKeys", "debugType", "debugWrite", "debugDictateFiles", "debugVoices",
+         "debugMenuView", "debugIcon", "debugKeys", "debugType", "debugWrite", "debugDictateFiles", "debugVoices", "debugMeeting", "debugSimulate",
          "debugDumpWindow"].contains { UserDefaults.standard.object(forKey: $0) != nil }
     }
 
@@ -94,6 +94,12 @@ enum DebugHooks {
         }
         if let folder = defaults.string(forKey: "debugVoices") {
             return voices(in: folder)
+        }
+        if let folder = defaults.string(forKey: "debugMeeting") {
+            return meetingScript(in: folder, app)
+        }
+        if let folder = defaults.string(forKey: "debugSimulate") {
+            return simulate(in: folder, app)
         }
         if let bundle = defaults.string(forKey: "debugDumpWindow") {
             return dumpWindow(of: bundle, to: defaults.string(forKey: "debugDumpTo") ?? "/tmp/murmur-window")
@@ -499,12 +505,82 @@ enum DebugHooks {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         Task { @MainActor in
             let started = Date()
+            // `-debugVoiceExport PATH`: every recording's voiceprint written to a file, instead.
+            if let path = UserDefaults.standard.string(forKey: "debugVoiceExport") {
+                let count = await MeetingVoicesCheck.export(
+                    files, to: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+                log(String(format: "voices: %d voiceprints written; done in %.1f s", count, Date().timeIntervalSince(started)))
+                if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                return
+            }
+            // `-debugVoiceTurns YES`: how well a stretch is cut where the speaker changes, instead.
+            if UserDefaults.standard.bool(forKey: "debugVoiceTurns") {
+                for line in await MeetingVoicesCheck.turns(files) { log("turns: \(line)") }
+                log(String(format: "turns: done in %.1f s", Date().timeIntervalSince(started)))
+                if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                return
+            }
+            // `-debugVoicePairs YES`: how far apart the recordings' voiceprints are, by person, instead.
+            if UserDefaults.standard.bool(forKey: "debugVoicePairs") {
+                for line in await MeetingVoicesCheck.distances(files) { log("voices: \(line)") }
+                log(String(format: "voices: done in %.1f s", Date().timeIntervalSince(started)))
+                if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                return
+            }
             let results = await MeetingVoicesCheck.run(files)
             for result in results {
                 log(String(format: "voices: %@ │ %.1f s │ %@", result.name, result.seconds,
                            result.voice.map { "voice \($0)" } ?? "none"))
             }
             log(String(format: "voices: done in %.1f s", Date().timeIntervalSince(started)))
+            if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+        }
+    }
+
+    /// `-debugMeeting FOLDER`: its recordings (by name, in order; "NN-you-…" as your microphone, the rest as the call)
+    /// through meeting notes as one meeting: transcribed, voices told apart, names found, notes written and the
+    /// record saved. Logs "meeting script: …" lines, then quits with -debugQuit YES.
+    private static func meetingScript(in folder: String, _ app: AppController) {
+        let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath)
+        let files = ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [])
+            .filter { ["wav", "aiff", "aif", "m4a", "caf"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        Task { @MainActor in
+            // The speech model loads first (as at launch).
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            log("meeting script: \(files.count) recordings")
+            let started = Date()
+            let defaults = UserDefaults.standard
+            let keep = (defaults.string(forKey: "debugMeetingRemember") ?? "").split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            await app.dictation.meeting.runScript(files, nameRest: defaults.bool(forKey: "debugMeetingNameRest"),
+                                                  remember: keep)
+            log(String(format: "meeting script: finished in %.1f s", Date().timeIntervalSince(started)))
+            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+        }
+    }
+
+    /// `-debugSimulate FOLDER`: fourteen meetings between twenty Sarvam voices (`MeetingSimulation`), made once with
+    /// your Sarvam key and kept in FOLDER, then run through meeting notes' voice telling-apart and voice library, one
+    /// after the other: each person is named by hand in their first meeting and remembered, and should be recognised
+    /// in every later one. Logs "simulate: …" and "meeting script: …" lines.
+    private static func simulate(in folder: String, _ app: AppController) {
+        let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true)
+        Task { @MainActor in
+            guard let meetings = await MeetingSimulation.prepare(in: url, log: { log($0) }) else {
+                log("simulate: stopped")
+                if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                return
+            }
+            for (index, meeting) in meetings.enumerated() {
+                let files = ((try? FileManager.default.contentsOfDirectory(at: meeting, includingPropertiesForKeys: nil)) ?? [])
+                    .filter { $0.pathExtension == "wav" && !$0.lastPathComponent.hasPrefix(".") }
+                    .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                log("simulate: meeting \(index + 1) starts, \(files.count) recordings")
+                let people = Set(files.compactMap { $0.deletingPathExtension().lastPathComponent.split(separator: "-").last.map(String.init) })
+                await app.dictation.meeting.runScript(files, voicesOnly: true, nameRest: true, remember: Array(people))
+            }
+            log("simulate: done")
             if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
         }
     }
@@ -531,7 +607,13 @@ enum DebugHooks {
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
                 }
                 var lines: [String] = []
-                var queue: [(AXUIElement, Int)] = [(app, 0)]
+                // Its windows, asked for directly (an app's children can be only its menu bar), every one: the call
+                // can be in any of them.
+                var windowsValue: CFTypeRef?
+                AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsValue)
+                let windows = (windowsValue as? [AXUIElement]) ?? []
+                lines.append("windows: \(windows.count)")
+                var queue: [(AXUIElement, Int)] = windows.map { ($0, 0) }
                 var visited = 0
                 func text(_ element: AXUIElement, _ name: String) -> String {
                     var value: CFTypeRef?
@@ -557,6 +639,8 @@ enum DebugHooks {
                         .map { "\($0.0)=\($0.1.prefix(120).replacingOccurrences(of: "\n", with: " "))" }
                     lines.append(String(repeating: "  ", count: depth) + parts.joined(separator: " · "))
                     var children: CFTypeRef?
+                    let role = text(element, kAXRoleAttribute)
+                    if role == "AXMenuBar" || role == "AXMenu" { continue }
                     if depth < 40, AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
                        let list = children as? [AXUIElement] {
                         queue.append(contentsOf: list.prefix(300).map { ($0, depth + 1) })

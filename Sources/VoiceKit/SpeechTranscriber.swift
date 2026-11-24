@@ -210,6 +210,11 @@ public actor SpeechTranscriber {
         get async { await parakeet?.lastHeard ?? [] }
     }
 
+    /// The last transcription's words and when each was said, when it was Parakeet's (else none).
+    public var lastTimes: [TimedWord] {
+        get async { await parakeet?.lastTimes ?? [] }
+    }
+
     /// The swaps the spotter proposed for the last transcription, not made.
     public var lastSwaps: [DictationVocabulary.Replacement] {
         get async { await parakeet?.lastSwaps ?? [] }
