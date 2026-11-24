@@ -89,6 +89,24 @@ public final class MeetingMode {
     /// The meeting app (its bundle identifier), whose window is the meeting's screen.
     private var appBundle: String?
 
+    // Who's speaking.
+    /// Lines when the conversation was last asked for names, and that request.
+    private var linesAtNames = 0
+    private var namesTask: Task<Void, Never>?
+    /// Which of the meeting's stretches (MeetingVoices) each line is, so lines follow when voices are grouped again.
+    private var stretchOfLine: [Int: Int] = [:]
+    /// Saved people you confirmed for a voice (a yes to "possibly Priya", or Remember this voice), and the
+    /// "voice profile" pairs you said no to.
+    private var confirmed: [Int: UUID] = [:]
+    private var declined: Set<String> = []
+    /// What your microphone heard for each of your lines, before any of the call's words were taken out of it: it's
+    /// compared again, whole, as more of what they said then is written down.
+    private var micHeard: [Int: String] = [:]
+    /// The people the meeting app lists (its roster), for spelling names right; empty until it's read.
+    var roster: [String] = []
+    /// When words were last heard from either side: a meeting you started yourself ends after long silence.
+    private var lastWords = Date()
+
     // Notes.
     private var notesTask: Task<Void, Never>?
     private var linesAtNotes = 0
@@ -211,6 +229,14 @@ public final class MeetingMode {
         linesAtNotes = 0
         lastNotes = Date()
         lastVoice = nil
+        linesAtNames = 0
+        namesTask = nil
+        stretchOfLine = [:]
+        micHeard = [:]
+        confirmed = [:]
+        declined = []
+        roster = []
+        lastWords = Date()
         Task { [weak self, voiceprints] in
             await voiceprints.reset()
             let started = Date()
@@ -323,6 +349,10 @@ public final class MeetingMode {
             await answerTask?.value
             await notesTask?.value
             if !state.lines.isEmpty {
+                // Names first, so the final notes and the file say who said what.
+                await namesTask?.value
+                await guessNames(force: true)?.value
+                await learnRememberedVoices()
                 await writeNotes(final: true)
                 save()
             }
@@ -462,66 +492,366 @@ public final class MeetingMode {
     /// transcribes (OpenAI, Sarvam), else Sarvam or OpenAI when there's a key. Claude doesn't transcribe.
     private func transcribe(_ piece: MeetingPiece) async {
         do {
-            let raw: String
-            switch speech {
-            case .sarvam, .openai:
-                do {
-                    raw = speech == .sarvam ? try await sarvam.transcribe(piece.samples)
-                        : try await OpenAITranscriber.transcribe(piece.samples)
-                } catch {
-                    // The cloud couldn't be reached: this Mac's model for this piece, rather than losing it.
-                    log("meeting: cloud speech failed (\(error.localizedDescription)); this piece on this Mac")
-                    guard let transcriber = transcriber(), await transcriber.isReady else { throw error }
-                    raw = try await transcriber.transcribe(piece.samples)
-                }
-            case .dictation:
-                guard let transcriber = transcriber() else { return }
-                guard await transcriber.isReady else {
-                    state.problem = "The speech model isn't ready yet. It's set up under Settings › Speech."
-                    return
-                }
-                raw = try await transcriber.transcribe(piece.samples)
+            guard let whole = try await words(piece.samples) else { return }
+            // A stretch of the call can hold two people (the next one started without a pause): each one's part
+            // gets a line of its own, so nobody's words go under someone else's name.
+            let parts = piece.speaker == .them ? await voiceprints.turns(piece.samples) : [0..<piece.samples.count]
+            guard parts.count > 1 else {
+                let text = TextCleanup.basic(whole.text)
+                if MeetingText.isWorthKeeping(text) { await heard(piece, text) }
+                return
             }
-            let text = TextCleanup.basic(raw)
-            guard MeetingText.isWorthKeeping(text) else { return }
+            log("meeting: \(parts.count) people in one stretch: a line each")
+            // Whose words are whose: by when each was said, the stretch transcribed once and whole, when the speech
+            // model says when; otherwise each part is transcribed by itself.
+            let texts = SpeakerTurns.texts(whole.times, cuts: parts.dropFirst().map { Double($0.lowerBound) / 16_000 },
+                                           whole: whole.text)
+            let before = nextID
+            for (index, part) in parts.enumerated() {
+                let samples = Array(piece.samples[part])
+                var said = texts?[index]
+                if said == nil { said = try await words(samples)?.text }
+                let text = TextCleanup.basic(said ?? "")
+                guard MeetingText.isWorthKeeping(text) else { continue }
+                await heard(MeetingPiece(speaker: .them, samples: samples,
+                                         at: piece.at.addingTimeInterval(Double(part.lowerBound) / 16_000),
+                                         afterChange: true, first: index == 0), text)
+            }
+            rejoin(before..<nextID)
+        } catch {
+            log("meeting: couldn't transcribe: \(error.localizedDescription)")
+        }
+    }
+
+    /// What was said in `samples`, and when each word was (when the speech model says: Parakeet does). nil when
+    /// there's no speech model to ask.
+    private func words(_ samples: [Float]) async throws -> (text: String, times: [TimedWord])? {
+        switch speech {
+        case .sarvam, .openai:
+            do {
+                let text = speech == .sarvam ? try await sarvam.transcribe(samples)
+                    : try await OpenAITranscriber.transcribe(samples)
+                return (text, [])
+            } catch {
+                // The cloud couldn't be reached: this Mac's model for this piece, rather than losing it.
+                log("meeting: cloud speech failed (\(error.localizedDescription)); this piece on this Mac")
+                guard let transcriber = transcriber(), await transcriber.isReady else { throw error }
+                let text = try await transcriber.transcribe(samples)
+                return (text, await transcriber.lastTimes)
+            }
+        case .dictation:
+            guard let transcriber = transcriber() else { return nil }
+            guard await transcriber.isReady else {
+                state.problem = "The speech model isn't ready yet. It's set up under Settings › Speech."
+                return nil
+            }
+            let text = try await transcriber.transcribe(samples)
+            return (text, await transcriber.lastTimes)
+        }
+    }
+
+    /// The parts of one stretch are written down (`ids`: their lines): parts next to each other that turned out to
+    /// be one voice are one line again, so a cut that wasn't needed leaves no trace.
+    private func rejoin(_ ids: Range<Int>) {
+        // A part too short to tell by voice, between two parts of one voice, is that person's too.
+        for at in state.lines.indices.dropFirst().dropLast() where state.lines[at].voice == nil
+            && state.lines[at].speaker == .them && ids.contains(state.lines[at].id) {
+            let earlier = state.lines[at - 1], later = state.lines[at + 1]
+            if ids.contains(earlier.id), ids.contains(later.id), earlier.speaker == .them, later.speaker == .them,
+               let voice = earlier.voice, voice == later.voice {
+                state.lines[at].voice = voice
+            }
+        }
+        var index = 1
+        while index < state.lines.count {
+            let earlier = state.lines[index - 1], later = state.lines[index]
+            if ids.contains(earlier.id), ids.contains(later.id), earlier.speaker == .them, later.speaker == .them,
+               let voice = earlier.voice, voice == later.voice {
+                state.lines[index - 1].text = earlier.text + " " + later.text
+                state.lines[index - 1].seconds = later.end.timeIntervalSince(earlier.at)
+                state.lines.remove(at: index)
+                if index < linesAtNotes { linesAtNotes -= 1 }
+                turn.removeAll { $0.id == later.id }
+                if let at = turn.firstIndex(where: { $0.id == earlier.id }) { turn[at] = state.lines[index - 1] }
+            } else {
+                index += 1
+            }
+        }
+        linesAtNotes = min(linesAtNotes, state.lines.count)
+        state.refreshSpeakers()
+    }
+
+    /// A stretch's words are known: whose voice it was, then into the transcript.
+    private func heard(_ piece: MeetingPiece, _ text: String) async {
+        do {
             // Which of them said it: by voice; a stretch too short to tell, straight after one that wasn't, is theirs.
             var voice: Int?
             if piece.speaker == .them {
-                voice = await voiceprints.who(piece.samples)
-                if voice == nil, let lastVoice, piece.at.timeIntervalSince(lastVoice.until) < 3 { voice = lastVoice.voice }
+                let placed = await voiceprints.hear(piece.samples)
+                if let placed {
+                    stretchOfLine[nextID] = placed.index
+                    voice = placed.voices[placed.index]
+                    // Hearing more can change who said earlier stretches: those lines move too.
+                    regrouped(placed.voices)
+                }
+                // (Not a part cut off where the speaker changed: whoever it is, it isn't the last one.)
+                if voice == nil, let lastVoice, piece.at.timeIntervalSince(lastVoice.until) < 3,
+                   !piece.afterChange || piece.first { voice = lastVoice.voice }
                 let end = piece.at.addingTimeInterval(Double(piece.samples.count) / 16_000)
-                if let voice { lastVoice = (voice, end) }
+                if let voice { lastVoice = (voice, end) } else if piece.afterChange { lastVoice = nil }
                 let heard = await voiceprints.count
                 if heard != state.voices {
                     state.voices = heard
                     if heard > 1 { log("meeting: \(heard) voices on the call") }
                 }
             }
-            add(MeetingLine(id: nextID, speaker: piece.speaker, text: text, at: piece.at, voice: voice))
+            add(MeetingLine(id: nextID, speaker: piece.speaker, text: text, at: piece.at, voice: voice,
+                            seconds: Double(piece.samples.count) / 16_000))
             nextID += 1
-        } catch {
-            log("meeting: couldn't transcribe: \(error.localizedDescription)")
+            if piece.speaker == .them { await recognise() }
         }
     }
 
+    /// The voices were grouped again: each line follows its stretch, and a voice that's gone (it turned out to be
+    /// someone already heard) hands its name on.
+    private func regrouped(_ voices: [Int?]) {
+        var went: [Int: [Int: Int]] = [:]   // old voice → where its lines are now
+        var changed = false
+        for index in state.lines.indices {
+            let line = state.lines[index]
+            guard let stretch = stretchOfLine[line.id], voices.indices.contains(stretch) else { continue }
+            let now = voices[stretch]
+            guard now != line.voice else { continue }
+            if let old = line.voice, let now { went[old, default: [:]][now, default: 0] += 1 }
+            state.lines[index].voice = now
+            changed = true
+        }
+        guard changed else { return }
+        let left = Set(state.lines.compactMap(\.voice))
+        for (old, to) in went where !left.contains(old) {
+            guard let into = to.max(by: { $0.value < $1.value })?.key else { continue }
+            if let name = state.names[old] { state.names[into] = VoiceName.merge(name, state.names[into] ?? name) }
+            state.names[old] = nil
+            if confirmed[into] == nil, let profile = confirmed[old] { confirmed[into] = profile }
+            confirmed[old] = nil
+            if lastVoice?.voice == old { lastVoice?.voice = into }
+        }
+        state.refreshSpeakers()
+    }
+
     private func add(_ line: MeetingLine) {
-        let recent = state.lines.filter { abs($0.at.timeIntervalSince(line.at)) < 25 }
+        var line = line
         switch line.speaker {
         case .you:
-            // On speakers, your microphone hears the call too: that isn't you speaking.
-            if recent.contains(where: { $0.speaker == .them
-                && MeetingText.isEcho(line.text, of: $0.text, apart: line.at.timeIntervalSince($0.at)) }) {
+            // On speakers, your microphone hears the call too: that isn't you speaking. It's compared with all they
+            // said while it was being heard, not one of their lines: the microphone cuts elsewhere than the call.
+            guard let yours = MeetingText.withoutEcho(line.text, theirs: MeetingText.during(line, in: state.lines).map(\.text)) else {
                 log("meeting: your microphone picked up the call (speakers?): left out once")
                 return
             }
+            micHeard[line.id] = line.text
+            if yours != line.text {
+                log("meeting: your microphone picked up the call under your words: their part left out")
+                line.text = yours
+            }
         case .them:
-            let echoes = Set(recent.filter { $0.speaker == .you
-                && MeetingText.isEcho($0.text, of: line.text, apart: line.at.timeIntervalSince($0.at)) }.map(\.id))
-            if !echoes.isEmpty { state.lines.removeAll { echoes.contains($0.id) } }
+            break
         }
-        state.lines.append(line)
+        // Lines stay in the order they were said: a long stretch finishes after shorter ones that began later.
+        let index = state.lines.lastIndex(where: { $0.at <= line.at }).map { $0 + 1 } ?? 0
+        state.lines.insert(line, at: index)
+        linesAtNotes = min(linesAtNotes, index)
+        if line.speaker == .them {
+            // What your microphone heard of this, written down before their line was, goes now.
+            for yours in state.lines where yours.speaker == .you && yours.end >= line.at.addingTimeInterval(-MeetingText.echoSlack)
+                && yours.at <= line.end.addingTimeInterval(MeetingText.echoSlack) {
+                let rest = MeetingText.withoutEcho(micHeard[yours.id] ?? yours.text,
+                                                   theirs: MeetingText.during(yours, in: state.lines).map(\.text))
+                guard rest != yours.text, let at = state.lines.firstIndex(where: { $0.id == yours.id }) else { continue }
+                if let rest {
+                    state.lines[at].text = rest
+                } else {
+                    state.lines.remove(at: at)
+                    if at < linesAtNotes { linesAtNotes -= 1 }
+                }
+            }
+        }
+        lastWords = Date()
+        state.endingIn = nil
+        state.refreshSpeakers()
         if line.speaker == .them { joinTurn(line) }
+        if state.lines.count - linesAtNames >= 20 { guessNames() }
         writeNotesIfDue()
+    }
+
+    // MARK: - Who's speaking
+
+    /// Asks the meeting's AI for the names in what's said, when some voice has no name of yours or the library's;
+    /// `force` at the end of the meeting. A voice is named only when it says its own name on its own line
+    /// (`MeetingNameGuess.read`); the other names heard are offered when you name someone.
+    @discardableResult
+    private func guessNames(force: Bool = false) -> Task<Void, Never>? {
+        guard namesTask == nil, let router = router(),
+              let content = MeetingNameGuess.content(state.lines, numbers: state.numbers, names: state.names,
+                                                     start: state.started, roster: roster) else { return nil }
+        // An answer being written goes first (a model on this Mac does one thing at a time); names can wait.
+        guard force || (state.lines.count - linesAtNames >= 20 && answerTask == nil) else { return nil }
+        linesAtNames = state.lines.count
+        let lines = state.lines, numbers = state.numbers, start = state.started
+        let task = Task { [weak self] in
+            defer { self?.namesTask = nil }
+            let reply: String
+            do {
+                reply = ModelOutput.answer(try await Self.collect(router.write(
+                    system: MeetingNameGuess.instruction + "\n\n" + content, prompt: "Reply with the JSON only.",
+                    maxTokens: 400, thorough: false)))
+            } catch {
+                self?.log("meeting: speaker names: \(error.localizedDescription)")
+                return
+            }
+            guard let self else { return }
+            let (found, refuted) = MeetingNameGuess.read(reply, lines: lines, numbers: numbers, start: start)
+            // Earlier conversation names that no longer hold go, as do names given without evidence.
+            for (voice, name) in state.names where name.source == .conversation {
+                if refuted[voice] == name.name || !MeetingNameGuess.holds(name, voice: voice, in: state.lines, start: start) {
+                    state.names[voice] = nil
+                }
+            }
+            for (voice, name) in found { setName(voice, name) }
+            let people = MeetingNameGuess.people(reply)
+            if !people.isEmpty, people != state.people { state.people = people }
+            log("meeting: speaker names: \(found.count) said their own name, \(refuted.count) not kept, "
+                + "\(people.count) names heard")
+        }
+        namesTask = task
+        return task
+    }
+
+    /// Gives a voice a name unless it already has one from a higher source (you, then the library, the window, the
+    /// conversation).
+    private func setName(_ voice: Int, _ name: VoiceName) {
+        let merged = VoiceName.merge(state.names[voice], name)
+        guard merged != state.names[voice] else { return }
+        state.names[voice] = merged
+        state.refreshSpeakers()
+    }
+
+    /// Compares the call's voices with the ones you asked Murmur to remember, from everything heard of each so far
+    /// and all together (one saved person is one voice): a clear match names the voice, a likely one is offered
+    /// ("possibly Priya"). Done again as more is heard, so a name can arrive, or change, during the meeting; a name
+    /// you gave is never touched.
+    private func recognise() async {
+        let profiles = VoiceLibrary.shared.profiles
+        guard !profiles.isEmpty else { return }
+        var prints = await voiceprints.prints()
+        // Voices you named, and saved people you confirmed for a voice, are settled.
+        for (voice, name) in state.names where name.source == .user { prints[voice] = nil }
+        let settled = Set(confirmed.values)
+        let matches = VoiceMatching.assign(prints, in: profiles.filter { !settled.contains($0.id) }, declined: declined)
+        var found = confirmed
+        for (voice, name) in state.names where name.source == .library && matches[voice]?.sure != true {
+            state.names[voice] = nil
+        }
+        var offers: [Int: VoiceMatching.Match] = [:]
+        for (voice, match) in matches {
+            if match.sure {
+                found[voice] = match.profile
+                let name = VoiceName(name: match.name, source: .library,
+                                     evidence: "\(Int((match.score * 100).rounded())) % like the voice you saved")
+                if state.names[voice] != name {
+                    if state.names[voice]?.name != match.name { log("meeting: a remembered voice is on the call") }
+                    setName(voice, name)
+                }
+            } else {
+                offers[voice] = match
+            }
+        }
+        if state.suggestions != offers { state.suggestions = offers }
+        state.profiles = found
+        state.refreshSpeakers()
+    }
+
+    /// The meeting has ended: each remembered voice that was on the call learns from it.
+    private func learnRememberedVoices() async {
+        for (voice, profile) in state.profiles {
+            let samples = await voiceprints.samples(voice)
+            guard let print = VoiceMatching.enroll(samples) else { continue }
+            VoiceLibrary.shared.learn(profile, print: print, samples: samples.count)
+        }
+    }
+
+    /// You named a voice (an empty name: "Not them", it shows as Speaker N).
+    func rename(_ voice: Int, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        state.names[voice] = VoiceName(name: name, source: .user)
+        state.suggestions[voice] = nil
+        state.refreshSpeakers()
+        log("meeting: you named a voice")
+    }
+
+    /// You said two voices are one person: `from`'s lines become `into`'s.
+    func merge(_ from: Int, into: Int) {
+        guard from != into else { return }
+        joined(from, into: into)
+        Task { [weak self, voiceprints] in
+            await voiceprints.merge(from, into: into)
+            await self?.recognise()
+        }
+        log("meeting: you merged two voices")
+    }
+
+    /// Two voices are one (you said so, or their voiceprints came together): `from`'s lines, name and saved-voice
+    /// match become `into`'s.
+    private func joined(_ from: Int, into: Int) {
+        for index in state.lines.indices where state.lines[index].voice == from { state.lines[index].voice = into }
+        if let name = state.names[from] { state.names[into] = VoiceName.merge(name, state.names[into] ?? name) }
+        state.names[from] = nil
+        state.suggestions[from] = nil
+        if confirmed[into] == nil, let profile = confirmed[from] { confirmed[into] = profile }
+        confirmed[from] = nil
+        if state.profiles[into] == nil, let profile = state.profiles[from] { state.profiles[into] = profile }
+        state.profiles[from] = nil
+        if lastVoice?.voice == from { lastVoice?.voice = into }
+        state.refreshSpeakers()
+    }
+
+    /// Yes or no to "possibly Priya".
+    func answerSuggestion(_ voice: Int, yes: Bool) {
+        guard let match = state.suggestions.removeValue(forKey: voice) else { return }
+        guard yes else {
+            declined.insert("\(voice) \(match.profile)")
+            return
+        }
+        confirmed[voice] = match.profile
+        state.profiles[voice] = match.profile
+        setName(voice, VoiceName(name: match.name, source: .user))
+    }
+
+    /// Why a voice can't be remembered yet, or nil when it can.
+    func cantRemember(_ voice: Int) async -> String? {
+        guard let name = state.names[voice]?.name, !name.isEmpty else { return "Name this person first." }
+        let stretches = await voiceprints.samples(voice)
+        if VoiceMatching.enroll(stretches) == nil {
+            return "Murmur needs to hear a bit more of them: at least 3 sentences, about 6 seconds."
+        }
+        return nil
+    }
+
+    /// Remembers a named voice, so later meetings recognise it. Returns what to tell you.
+    func remember(_ voice: Int) async -> String {
+        if let why = await cantRemember(voice) { return why }
+        guard let name = state.names[voice]?.name else { return "Name this person first." }
+        let stretches = await voiceprints.samples(voice)
+        guard let print = VoiceMatching.enroll(stretches),
+              let profile = VoiceLibrary.shared.remember(name: name, print: print, samples: stretches.count) else {
+            return "Couldn't remember this voice."
+        }
+        confirmed[voice] = profile.id
+        state.profiles[voice] = profile.id
+        state.names[voice] = VoiceName(name: name, source: .user)
+        state.refreshSpeakers()
+        log("meeting: a voice was remembered")
+        return "Murmur will recognise \(name) in your next meetings."
     }
 
     // MARK: - Turn-taking
@@ -553,6 +883,7 @@ public final class MeetingMode {
     /// ("I'd love to hear how you handled the outage") are answered too. With a model on this Mac, a pause decides.
     private func tick() {
         state.setLevels(call: callFeed?.level ?? 0, mic: micFeed?.level ?? 0)
+        endIfSilent()
         guard state.autoAnswer, !turn.isEmpty, answerTask == nil, !checking else { return }
         let quiet = Date().timeIntervalSince(turnChanged)
         // Wait for them to stop (a call that never goes quiet, like background noise, doesn't hold it up for long).
@@ -610,6 +941,37 @@ public final class MeetingMode {
                 if asks { fire(turn, replace: state.consumeReplace()) }
             }
         }
+    }
+
+    /// A meeting you started yourself (a call in a browser, the room) ends after `silentMinutes` with no words from
+    /// anyone, after a 30 s countdown in the panel; words, not sound, keep it going, so hold music doesn't. A meeting
+    /// Murmur started because a meeting app turned on its microphone ends when that app lets go instead.
+    private func endIfSilent() {
+        guard state.running, !automatic, Self.silentMinutes > 0 else { return }
+        let left = Int((Double(Self.silentMinutes) * 60 + 30 - Date().timeIntervalSince(lastWords)).rounded(.up))
+        if left > 30 {
+            if state.endingIn != nil { state.endingIn = nil }
+            return
+        }
+        if left <= 0 {
+            log("meeting: nobody spoke for \(Self.silentMinutes) minutes; ended")
+            stop()
+            return
+        }
+        if state.endingIn != left { state.endingIn = left }
+    }
+
+    /// Keep going: the silence countdown starts again.
+    func keepGoing() {
+        lastWords = Date()
+        state.endingIn = nil
+    }
+
+    static let silentMinutesKey = "meeting.silentMinutes"
+    /// Minutes without words before a meeting you started yourself ends (0: never). 10 unless set.
+    public static var silentMinutes: Int {
+        get { UserDefaults.standard.object(forKey: silentMinutesKey) as? Int ?? 10 }
+        set { UserDefaults.standard.set(newValue, forKey: silentMinutesKey) }
     }
 
     /// Writes an answer for `lines` into the panel (a new one, or over the last when they carried on).
@@ -825,6 +1187,7 @@ public final class MeetingMode {
         state.writingNotes = true
         defer { state.writingNotes = false }
         var prompt = contextText.isEmpty ? "" : "\(contextText)\n\n"
+        prompt += speakersNote
         if final {
             prompt += state.notesText.isEmpty ? "" : "Notes taken during the meeting:\n\(state.notesText)\n\n"
             prompt += "The whole meeting (newest last):\n\(MeetingText.transcript(substantive, limit: 30_000, label: state.label))\n\n"
@@ -841,8 +1204,10 @@ public final class MeetingMode {
                 + "new is worth noting, reply exactly: NO CHANGE"
         }
         do {
+            // The final notes cover the whole meeting: room for a long one, so they don't stop mid-sentence.
             let reply = ModelOutput.answer(try await Self.collect(router.write(system: Self.notesSystem, prompt: prompt,
-                                                                               maxTokens: 3_000, thorough: true)))
+                                                                               maxTokens: final ? 8_000 : 3_000,
+                                                                               thorough: true)))
             if !final, MeetingText.isNoChange(reply) {
                 log("meeting: notes: nothing new worth noting")
                 return
@@ -855,9 +1220,27 @@ public final class MeetingMode {
         }
     }
 
+    /// Who the transcript's labels are, for the notes: the labels in use now, so a label from earlier notes that has
+    /// since changed (a voice got a name, two voices turned out to be one person) isn't carried on.
+    private var speakersNote: String {
+        var labels: [String] = []
+        for line in state.lines {
+            let label = state.label(line)
+            if !labels.contains(label) { labels.append(label) }
+        }
+        guard labels.count > 1 else { return "" }
+        return "The speakers, as labelled in the transcript now: \(labels.joined(separator: ", ")). Notes written "
+            + "earlier may use a label that isn't in this list any more: say who it is from the transcript, or leave "
+            + "the name out.\n\n"
+    }
+
     /// Where meeting notes are saved: Documents › Murmur Meetings.
     public static var folder: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+        // Debug runs (`-debugMeetingsFolder FOLDER`) keep their meetings out of yours.
+        if let debug = UserDefaults.standard.string(forKey: "debugMeetingsFolder") {
+            return URL(fileURLWithPath: (debug as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Murmur Meetings", isDirectory: true)
     }
 
@@ -878,10 +1261,129 @@ public final class MeetingMode {
             let url = folder.appendingPathComponent(name.replacingOccurrences(of: "/", with: "-"))
             try text.write(to: url, atomically: true, encoding: .utf8)
             state.saved = url
-            log("meeting: notes saved to Documents/Murmur Meetings/\(url.lastPathComponent)")
+            log("meeting: notes saved to \(folder.lastPathComponent)/\(url.lastPathComponent)")
         } catch {
             state.problem = "Couldn't save the notes: \(error.localizedDescription)"
         }
+        // The meeting as data too (lines, voices and names), for what comes next: playing a line back, renaming
+        // speakers afterwards, notes that point at lines.
+        if let root = MeetingRecord.folder {
+            let record = MeetingRecord(started: state.started, ended: Date(), app: state.app, about: state.about,
+                                       lines: state.lines, numbers: state.numbers, names: state.names,
+                                       notes: state.notesText)
+            do {
+                lastRecord = try record.write(under: root)
+            } catch {
+                log("meeting: couldn't keep the meeting's record: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Where the last meeting's record went (debug runs print it).
+    private(set) var lastRecord: URL?
+
+    // MARK: - Debug
+
+    /// `-debugMeeting FOLDER`: plays its recordings (by name, in order) through the meeting as if they'd been heard:
+    /// "NN-you-…" as your microphone, anything else as the call ("NN-them-person": the person is who really spoke,
+    /// for checking). Each is transcribed, given a voice, checked for echo, then the names are asked for and the notes
+    /// written, as at the end of a meeting, and the record saved. Nothing is captured from the Mac.
+    /// `voicesOnly`: no transcription, names from the conversation or notes (a simulation of many meetings, where only
+    /// who is told apart and recognised matters): every recording counts as a real sentence.
+    /// `nameRest`: voices on show that nothing named get the name you'd type; `remember`: these people's voices are
+    /// then remembered, as the button would.
+    @discardableResult
+    public func runScript(_ files: [URL], voicesOnly: Bool = false, nameRest: Bool = false,
+                          remember keep: [String] = []) async -> URL? {
+        guard !state.running, !state.finishing else { return nil }
+        state.reset()
+        state.app = "Scripted meeting"
+        speech = Self.speechChoice.hasKey ? Self.speechChoice : .dictation
+        nextID = 0
+        linesAtNotes = 0
+        // Voices only: the conversation isn't real, so it isn't asked for names.
+        linesAtNames = voicesOnly ? Int.max / 2 : 0
+        lastVoice = nil
+        stretchOfLine = [:]
+        micHeard = [:]
+        confirmed = [:]
+        declined = []
+        roster = []
+        await voiceprints.reset()
+        do { try await voiceprints.prepare() } catch { log("meeting script: no voice model: \(error)") }
+        var at = state.started
+        // Who really said each line kept ("03-them-emma": emma).
+        var said: [Int: String] = [:]
+        for file in files {
+            guard let samples = AudioFile16k.read(file) else {
+                log("meeting script: couldn't read \(file.lastPathComponent)")
+                continue
+            }
+            let parts = file.deletingPathExtension().lastPathComponent.lowercased().split(separator: "-").map(String.init)
+            let speaker: MeetingLine.Speaker = parts.contains("you") ? .you : .them
+            let piece = MeetingPiece(speaker: speaker, samples: samples, at: at)
+            let before = nextID
+            if voicesOnly {
+                await heard(piece, "this is sentence number \(nextID + 1) of the meeting")
+            } else {
+                await transcribe(piece)
+            }
+            at = at.addingTimeInterval(Double(samples.count) / 16_000 + 0.5)
+            if nextID > before, speaker == .them, parts.count >= 3 { said[before] = parts[2] }
+            if !voicesOnly {
+                let line = state.lines.last.map { "\(state.label($0)) (voice \($0.voice.map(String.init) ?? "-")): \($0.text)" }
+                log("meeting script: \(file.deletingPathExtension().lastPathComponent) │ \(line ?? "(nothing kept)")")
+            }
+        }
+        if !voicesOnly {
+            await notesTask?.value
+            await namesTask?.value
+            await guessNames(force: true)?.value
+        }
+        // Whose lines each voice ended up with (after any merging), and the lines left without a voice.
+        var spoke: [Int: [String: Int]] = [:], unvoiced: [String: Int] = [:]
+        for line in state.lines {
+            guard let person = said[line.id] else { continue }
+            if let voice = line.voice { spoke[voice, default: [:]][person, default: 0] += 1 } else { unvoiced[person, default: 0] += 1 }
+        }
+        for (voice, people) in spoke.sorted(by: { $0.key < $1.key }) {
+            let shown = state.numbers[voice] != nil || state.single == voice
+            log("meeting script: final voice \(voice) \(shown ? "shown" : "hidden") = "
+                + people.sorted { $0.value > $1.value }.map { "\($0.key):\($0.value)" }.joined(separator: " "))
+        }
+        if !unvoiced.isEmpty {
+            log("meeting script: final no voice = " + unvoiced.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }
+                .joined(separator: " "))
+        }
+        // What the voice library said before anything is named by hand.
+        for (voice, name) in state.names.sorted(by: { $0.key < $1.key }) {
+            log("meeting script: voice \(voice) → \(name.name.isEmpty ? "(none)" : name.name) [\(name.source.rawValue)]"
+                + (name.evidence.map { " \($0)" } ?? ""))
+        }
+        for (voice, maybe) in state.suggestions.sorted(by: { $0.key < $1.key }) {
+            log("meeting script: voice \(voice) is possibly \(maybe.name) (\(Int(maybe.score * 100)) %)")
+        }
+        await learnRememberedVoices()
+        if nameRest {
+            for voice in spoke.keys.sorted() where (state.names[voice]?.name ?? "").isEmpty
+                && (state.numbers[voice] != nil || state.single == voice) {
+                guard let person = spoke[voice]?.max(by: { $0.value < $1.value })?.key else { continue }
+                rename(voice, to: person.prefix(1).uppercased() + person.dropFirst())
+                log("meeting script: voice \(voice) named by hand: \(person)")
+            }
+        }
+        let wanted = keep.map { $0.lowercased() }
+        for (voice, name) in state.names.sorted(by: { $0.key < $1.key }) where wanted.contains(name.name.lowercased())
+            && state.profiles[voice] == nil {
+            let told = await remember(voice)
+            log("meeting script: remember \(name.name): \(told)")
+        }
+        if !voicesOnly {
+            await writeNotes(final: true)
+            save()
+        }
+        log("meeting script: done, \(state.lines.count) lines, record at \(lastRecord?.path ?? "-")")
+        return voicesOnly ? nil : lastRecord
     }
 
     /// Adds documents to the meeting's context (up to five), read on this Mac.
@@ -986,6 +1488,10 @@ public final class MeetingMode {
         You are an excellent note-taker sitting in on the user's meeting. In the transcript, "You" is the user and the \
         other people are "Them", "Speaker 1", "Speaker 2" or their names; it's speech-to-text, so fix obvious mishearings from context and ignore \
         fragments that make no sense.
+        Say who said or will do something only by the label on their lines, exactly as written. Never work out a \
+        name for "Speaker 2" or "Them" from what others call them, never give anyone a gender, role or title that \
+        wasn't stated, and never credit the user ("You") with a point from someone else's line. When it isn't \
+        clear who said something, state the point without a name.
         Note only what someone would want to look back at: what was decided, who will do what and by when, the \
         facts, numbers, names, dates and terms that came up, problems raised and how they were resolved, and \
         questions left open. Leave out small talk, greetings, audio and screen-sharing logistics, filler, repeats, \
@@ -1007,6 +1513,9 @@ struct MeetingPiece: Sendable {
     let speaker: MeetingLine.Speaker
     let samples: [Float]
     let at: Date
+    /// One person's part of a stretch that held several (`SpeakerTurns`), and whether it's the first of them.
+    var afterChange = false
+    var first = true
 }
 
 /// One side's sound on its way to the transcript: cut into stretches of speech, each turned to 16 kHz and sent on.
@@ -1048,12 +1557,13 @@ final class MeetingFeed: @unchecked Sendable {
 
     /// On the audio thread: only the cutting happens here; the rest on a queue of its own.
     func add(_ samples: [Float]) {
-        let done: [[Float]] = lock.withLock {
-            guard !finished, !isMuted else { return [] }
+        let (done, held): ([[Float]], Double) = lock.withLock {
+            guard !finished, !isMuted else { return ([], 0) }
             if !sound, samples.contains(where: { abs($0) > 1e-5 }) { sound = true }
-            return segmenter.add(samples)
+            let done = segmenter.add(samples)
+            return (done, segmenter.held)
         }
-        for piece in done { deliver(piece) }
+        for (index, piece) in done.enumerated() { deliver(piece, held: index == done.count - 1 ? held : 0) }
     }
 
     /// What was still being said when the meeting stopped.
@@ -1066,8 +1576,10 @@ final class MeetingFeed: @unchecked Sendable {
         if let last { deliver(last) }
     }
 
-    private func deliver(_ piece: [Float]) {
-        let at = Date().addingTimeInterval(-Double(piece.count) / rate)
+    /// `held`: sound that came after the piece and is already waiting for the next one (a long piece is cut at its
+    /// last pause, not where it ends), so the piece began that much earlier.
+    private func deliver(_ piece: [Float], held: Double = 0) {
+        let at = Date().addingTimeInterval(-held - Double(piece.count) / rate)
         let rate = self.rate, speaker = self.speaker, send = self.send
         work.async {
             let samples = rate == 16_000 ? piece : ((try? AudioConverter().resample(piece, from: rate)) ?? [])
@@ -1158,9 +1670,21 @@ final class MeetingState: ObservableObject {
     @Published var copied = false
     @Published var autoAnswer = true
     @Published var micMuted = false
-    /// How many voices on the call have spoken (MeetingVoices), and the names the screen gave them.
+    /// How many voices on the call have spoken (MeetingVoices).
     @Published var voices = 0
-    @Published var names: [Int: String] = [:]
+    /// Voice → the name it's shown under, and where that came from (you, the voice library, the meeting app's
+    /// window, the conversation). Voice → speaker number for the voices on show (`MeetingSpeakers.numbers`).
+    @Published var names: [Int: VoiceName] = [:]
+    @Published var numbers: [Int: Int] = [:]
+    /// A remembered voice this one may be ("possibly Priya, 63 %"), waiting for a yes.
+    @Published var suggestions: [Int: VoiceMatching.Match] = [:]
+    /// Names heard in the conversation (the people taking part, as far as it shows): offered when you name a voice,
+    /// never put on one by Murmur.
+    @Published var people: [String] = []
+    /// Voice → the remembered profile it was matched to (learns from this meeting when it ends).
+    var profiles: [Int: UUID] = [:]
+    /// A meeting you started yourself, nobody heard for a long while: seconds until it ends by itself.
+    @Published var endingIn: Int?
     @Published var callLevel: Float = 0
     @Published var micLevel: Float = 0
     @Published var about = ""
@@ -1209,12 +1733,26 @@ final class MeetingState: ObservableObject {
 
     /// Who said a line, as the transcript shows it ("You", "Them", "Speaker 2", a name).
     func label(_ line: MeetingLine) -> String {
-        MeetingText.label(line, voices: voices, names: names)
+        MeetingSpeakers.label(line, numbers: numbers, names: names, single: single)
+    }
+
+    /// The other side's only voice in a one-to-one call, so it can be named though it has no number.
+    var single: Int? { numbers.isEmpty ? MeetingSpeakers.singleVoice(lines) : nil }
+
+    /// The voices on show again, after a line or a name changed.
+    func refreshSpeakers() {
+        let fresh = MeetingSpeakers.numbers(lines, known: MeetingSpeakers.known(names, lines: lines))
+        if fresh != numbers { numbers = fresh }
     }
 
     func reset() {
         voices = 0
         names = [:]
+        numbers = [:]
+        suggestions = [:]
+        people = []
+        profiles = [:]
+        endingIn = nil
         running = false
         finishing = false
         app = nil

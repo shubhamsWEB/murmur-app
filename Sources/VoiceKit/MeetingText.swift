@@ -50,17 +50,24 @@ public struct MeetingLine: Identifiable, Sendable, Equatable {
     public let id: Int
     public let speaker: Speaker
     public var text: String
+    /// When it began.
     public let at: Date
     /// Which voice on the call said it (1, 2…), when Murmur could tell (MeetingVoices).
     public var voice: Int?
+    /// How long it took to say (0: not known).
+    public var seconds: Double
 
-    public init(id: Int, speaker: Speaker, text: String, at: Date, voice: Int? = nil) {
+    public init(id: Int, speaker: Speaker, text: String, at: Date, voice: Int? = nil, seconds: Double = 0) {
         self.id = id
         self.speaker = speaker
         self.text = text
         self.at = at
         self.voice = voice
+        self.seconds = seconds
     }
+
+    /// When it ended.
+    public var end: Date { at.addingTimeInterval(seconds) }
 }
 
 /// The text side of meeting notes: telling a question from a statement, finding your microphone's echo of the call,
@@ -133,6 +140,79 @@ public enum MeetingText {
         return Double(inOrder(a, b)) / Double(max(a.count, b.count)) >= 0.75
     }
 
+    /// How much of `mine` is found in `theirs`, 0…1, in word pairs: the microphone hears the speakers worse than the
+    /// call is heard, and cuts it elsewhere, so a whole-line comparison misses some echoes. From Cicada's `EchoMatch`
+    /// (github.com/wquguru/cicada, Apache-2.0, © wquguru); a single word counts as itself.
+    public static func contained(_ mine: String, in theirs: [String]) -> Double {
+        let a = pairs(sequence(mine))
+        guard a.count >= 2 else { return 0 }
+        let b = Set(theirs.flatMap { pairs(sequence($0)) })
+        return Double(a.filter(b.contains).count) / Double(a.count)
+    }
+
+    /// Echo by containment: at least this share of your line is in what they said around then.
+    public static let containedEcho = 0.6
+
+    /// The echo comes back within this long of the call playing it.
+    public static let echoSlack: TimeInterval = 6
+
+    /// The other side's lines being said while `line` was: their time overlaps its, give or take `echoSlack`. A
+    /// microphone that hears the speakers doesn't cut where the call does (in a room it rarely hears a pause, so its
+    /// stretches run long), so one of your lines can cover several of theirs.
+    public static func during(_ line: MeetingLine, in lines: [MeetingLine]) -> [MeetingLine] {
+        let from = line.at.addingTimeInterval(-echoSlack), to = line.end.addingTimeInterval(echoSlack)
+        return lines.filter { $0.speaker == .them && $0.end >= from && $0.at <= to }
+    }
+
+    /// What's left of `mine` (what your microphone heard) once the call's own words are taken out, given what they
+    /// said meanwhile: nil when it's all the call; otherwise your words, without the sentences that are the call's.
+    ///
+    /// Mostly the call (the same words in order as one of their lines, or most of its word pairs found in theirs):
+    /// only sentences with next to nothing of theirs in them are yours ("Sorry, can I jump in?" said over the
+    /// speakers). Mostly yours: only a long sentence that's nearly all theirs goes, because answering someone often
+    /// repeats their words ("Yes, I'll share the pricing sheet").
+    public static func withoutEcho(_ mine: String, theirs: [String]) -> String? {
+        guard !theirs.isEmpty else { return mine }
+        if theirs.contains(where: { isEcho(mine, of: $0) }) { return nil }
+        let share = contained(mine, in: theirs)
+        guard share > 0 else { return mine }
+        let mostly = share >= containedEcho
+        let sentences = Self.sentences(mine)
+        guard sentences.count > 1 else { return mostly ? nil : mine }
+        let kept = sentences.filter { sentence in
+            let words = sequence(sentence).count, found = contained(sentence, in: theirs)
+            if mostly { return words >= yoursWords && found <= yoursShare && wordsFound(sentence, in: theirs) < yoursWordsShare }
+            return words < echoSentenceWords || found < echoSentence
+        }
+        if kept.count == sentences.count { return mine }
+        let rest = kept.joined(separator: " ")
+        return isWorthKeeping(rest) ? rest : nil
+    }
+
+    /// In a line that's partly yours, one sentence is the call's only when it's this long (words) and this much of
+    /// it is theirs.
+    static let echoSentenceWords = 6
+    static let echoSentence = 0.8
+    /// In a line that's mostly the call, a sentence is yours when it's this long and no more than this much of it is
+    /// theirs (a sentence of the call the microphone misheard still shares more than that).
+    static let yoursWords = 3
+    static let yoursShare = 0.2
+    /// …and fewer than this share of its words are in what they said at all: "You're in lockdown" against their
+    /// "you're lockdown and…" shares no pair of words, and is still the call.
+    static let yoursWordsShare = 0.6
+
+    /// The share of `mine`'s words found anywhere in `theirs`.
+    static func wordsFound(_ mine: String, in theirs: [String]) -> Double {
+        let words = sequence(mine)
+        guard !words.isEmpty else { return 0 }
+        let said = Set(theirs.flatMap { sequence($0) })
+        return Double(words.filter(said.contains).count) / Double(words.count)
+    }
+
+    private static func pairs(_ words: [String]) -> [String] {
+        words.count < 2 ? words : (0..<words.count - 1).map { "\(words[$0]) \(words[$0 + 1])" }
+    }
+
     private static func sequence(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" }.map(String.init)
     }
@@ -152,14 +232,6 @@ public enum MeetingText {
     }
 
 
-    /// Who said a line, as the transcript shows it: "You"; on the call's side the person's name once the screen gave
-    /// it, "Speaker 2" once more than one voice has spoken, and "Them" until then.
-    public static func label(_ line: MeetingLine, voices: Int, names: [Int: String]) -> String {
-        guard line.speaker == .them else { return "You" }
-        if let voice = line.voice, let name = names[voice], !name.isEmpty { return name }
-        if let voice = line.voice, voices > 1 { return "Speaker \(voice)" }
-        return "Them"
-    }
 
     /// The transcript as the AI reads it, newest last, cut from the start to fit `limit` characters.
     public static func transcript(_ lines: [MeetingLine], limit: Int = 14_000,

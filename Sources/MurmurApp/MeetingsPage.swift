@@ -11,6 +11,7 @@ struct MeetingsPage: View {
     @State private var query = ""
     @State private var open: URL?
     @State private var copied: URL?
+    @State private var silentMinutes = 10
 
     var body: some View {
         let _ = state.revision
@@ -62,8 +63,27 @@ struct MeetingsPage: View {
                     }
                 }
             }
+            PeopleSection()
+            SettingsSection {
+                SettingRow(title: "End by itself",
+                           detail: "A meeting you start yourself (a call in a browser, a room) ends after this long "
+                               + "with no one speaking. One Murmur starts for a call ends when the call does.") {
+                    Picker("", selection: $silentMinutes) {
+                        Text("5 min").tag(5)
+                        Text("10 min").tag(10)
+                        Text("20 min").tag(20)
+                        Text("Never").tag(0)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .onChange(of: silentMinutes) { MeetingMode.silentMinutes = silentMinutes }
+                }
+            }
         }
-        .onAppear(perform: load)
+        .onAppear {
+            load()
+            silentMinutes = MeetingMode.silentMinutes
+        }
         .onChange(of: app.dictation.meetingNotesRunning) { load() }
     }
 
@@ -192,5 +212,94 @@ struct SavedMeeting: Identifiable {
         notes.components(separatedBy: .newlines)
             .first { $0.hasPrefix("- ") && !$0.hasPrefix("- [") }
             .map { String($0.dropFirst(2)) }
+    }
+}
+
+/// People: the voices you asked Murmur to remember, so later meetings name them. Kept only on this Mac.
+private struct PeopleSection: View {
+    @State private var people: [VoiceProfile] = []
+    @State private var confirmAll = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("People").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.ink)
+                Spacer()
+                if !people.isEmpty {
+                    Button("Delete all") { confirmAll = true }.buttonStyle(.murmurSecondaryCompact)
+                }
+            }
+            Text("Voices you asked Murmur to remember, so your next meetings name them. Their voiceprints stay on this "
+                 + "Mac. In a meeting, click a speaker on the Transcript tab and choose Remember this voice.")
+                .font(.system(size: 12.5)).foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+            if !people.isEmpty {
+                SettingsSection {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(people) { person in
+                            PersonRow(person: person) { load() }
+                            if person.id != people.last?.id { RowDivider() }
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear(perform: load)
+        .alert("Delete every saved voice?", isPresented: $confirmAll) {
+            Button("Delete all", role: .destructive) {
+                VoiceLibrary.shared.forgetAll()
+                load()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your next meetings won't name anyone by voice. Past meetings keep their names.")
+        }
+    }
+
+    private func load() { people = VoiceLibrary.shared.profiles }
+}
+
+private struct PersonRow: View {
+    let person: VoiceProfile
+    let changed: () -> Void
+    @State private var name = ""
+    @State private var notes = ""
+    @State private var confirm = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("Name", text: $name)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .semibold))
+                    .onSubmit { VoiceLibrary.shared.update(person.id, name: name); changed() }
+                TextField("Notes: company, role, what to remember", text: $notes)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Theme.ink2)
+                    .onSubmit { VoiceLibrary.shared.update(person.id, notes: notes); changed() }
+                Text("Learned from \(person.samples) stretches of speech · last heard "
+                     + person.lastSeen.formatted(date: .abbreviated, time: .omitted))
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
+            }
+            Spacer(minLength: 8)
+            Button("Delete") { confirm = true }.buttonStyle(.murmurSecondaryCompact)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .onAppear {
+            name = person.name
+            notes = person.notes
+        }
+        .onChange(of: notes) { VoiceLibrary.shared.update(person.id, notes: notes) }
+        .alert("Delete \(person.name)'s voiceprint?", isPresented: $confirm) {
+            Button("Delete", role: .destructive) {
+                VoiceLibrary.shared.forget(person.id)
+                changed()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your next meetings won't recognise them. Past meetings keep their names.")
+        }
     }
 }

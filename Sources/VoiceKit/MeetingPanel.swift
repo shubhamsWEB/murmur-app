@@ -209,9 +209,10 @@ private struct CardView: View {
             switch state.tab {
             case .live: live(ink)
             case .notes: NotesView(state: state, mode: mode)
-            case .transcript: TranscriptView(state: state)
+            case .transcript: TranscriptView(state: state, mode: mode)
             case .context: ContextView(state: state, mode: mode)
             }
+            EndingLine(state: state, mode: mode)
             ProblemLine(state: state)
             Rectangle().fill(ink.line).frame(height: 1)
             Footer(state: state, mode: mode)
@@ -870,6 +871,175 @@ private struct SharingLine: View {
     }
 }
 
+/// The people on the call over the transcript, one chip each (a name, or Speaker N): click one to name them, say
+/// they're the same person as another, or have Murmur remember their voice.
+private struct PeopleRow: View {
+    @ObservedObject var state: MeetingState
+    let mode: MeetingMode
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let voices = state.numbers.sorted { $0.value < $1.value }.map(\.key) + (state.single.map { [$0] } ?? [])
+        if !voices.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Text("On the call").font(.system(size: 11.5)).foregroundStyle(Ink(contrast: contrast).secondary)
+                        ForEach(voices, id: \.self) { PersonChip(state: state, mode: mode, voice: $0) }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                }
+                Rectangle().fill(Ink(contrast: contrast).line).frame(height: 1)
+            }
+        }
+    }
+}
+
+private struct PersonChip: View {
+    @ObservedObject var state: MeetingState
+    let mode: MeetingMode
+    let voice: Int
+    @State private var editing = false
+
+    var body: some View {
+        Button { editing = true } label: {
+            HStack(spacing: 5) {
+                Text(SpeakerEditor.title(state, voice)).font(.system(size: 12, weight: .semibold))
+                if let maybe = state.suggestions[voice] {
+                    Text("possibly \(maybe.name)?").font(.system(size: 11.5)).foregroundStyle(Palette.coralDeep)
+                }
+            }
+            .foregroundStyle(Palette.text)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(Capsule().fill(Palette.control.opacity(0.55)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Name this person, merge them with another, or remember their voice")
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            SpeakerEditor(state: state, mode: mode, voice: voice) { editing = false }
+        }
+    }
+}
+
+/// Naming one voice on the call.
+private struct SpeakerEditor: View {
+    @ObservedObject var state: MeetingState
+    let mode: MeetingMode
+    let voice: Int
+    let done: () -> Void
+    @State private var name = ""
+    @State private var message: String?
+    @State private var remembering = false
+
+    static func title(_ state: MeetingState, _ voice: Int) -> String {
+        if let name = state.names[voice]?.name, !name.isEmpty { return name }
+        return state.numbers[voice].map { "Speaker \($0)" } ?? "Them"
+    }
+
+    private var source: String? {
+        guard let name = state.names[voice], !name.name.isEmpty else { return nil }
+        switch name.source {
+        case .user: return "You named them."
+        case .library: return "Recognised from a voice you saved" + (name.evidence.map { " (\($0))." } ?? ".")
+        case .window: return "Named by the meeting app."
+        case .conversation: return "From what was said" + (name.evidence.map { ": \($0)" } ?? ".")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text(Self.title(state, voice)).font(.system(size: 14, weight: .semibold))
+            if let source { Text(source).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            if let maybe = state.suggestions[voice] {
+                HStack(spacing: 8) {
+                    Text("Possibly \(maybe.name) (\(Int((maybe.score * 100).rounded())) %)").font(.system(size: 12.5))
+                    Spacer(minLength: 4)
+                    Button("Yes") { mode.answerSuggestion(voice, yes: true) }
+                    Button("No") { mode.answerSuggestion(voice, yes: false) }
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("Name", text: $name).textFieldStyle(.roundedBorder)
+                    .onSubmit(save)
+                Button("Save", action: save).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            // Names heard in the meeting that nobody has yet: one click, spelled right.
+            let taken = Set(state.names.values.map { $0.name.lowercased() })
+            let heard = state.people.filter { !taken.contains($0.lowercased()) }
+            if !heard.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Names heard in this meeting").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(heard, id: \.self) { person in
+                                Button(person) { mode.rename(voice, to: person); name = person; message = nil }
+                                    .controlSize(.small)
+                            }
+                        }
+                    }
+                }
+            }
+            let others = state.numbers.keys.filter { $0 != voice }.sorted { state.numbers[$0]! < state.numbers[$1]! }
+            if !others.isEmpty {
+                Menu("Same person as…") {
+                    ForEach(others, id: \.self) { other in
+                        Button(Self.title(state, other)) { mode.merge(voice, into: other); done() }
+                    }
+                }
+                .menuStyle(.button).buttonStyle(.borderless).fixedSize()
+            }
+            if let current = state.names[voice], !current.name.isEmpty, current.source != .user {
+                Button("Not them") { mode.rename(voice, to: ""); done() }.buttonStyle(.link)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Button(remembering ? "Remembering…" : "Remember this voice") {
+                    remembering = true
+                    Task {
+                        message = await mode.remember(voice)
+                        remembering = false
+                    }
+                }
+                .disabled(remembering || (state.names[voice]?.name ?? "").isEmpty)
+                Text("Check with them first. Their voiceprint stays on this Mac, and you can delete it under Meetings › People.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let message { Text(message).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true) }
+            }
+        }
+        .padding(14)
+        .frame(width: 290)
+        .onAppear { name = state.names[voice]?.name ?? "" }
+    }
+
+    private func save() {
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else { return }
+        mode.rename(voice, to: typed)
+        message = nil
+    }
+}
+
+/// A meeting you started yourself, with nobody talking for a long while: it ends by itself unless you keep it going.
+private struct EndingLine: View {
+    @ObservedObject var state: MeetingState
+    let mode: MeetingMode
+
+    var body: some View {
+        if let left = state.endingIn {
+            HStack(spacing: 8) {
+                Image(systemName: "hourglass").font(.system(size: 12)).accessibilityHidden(true)
+                Text("No one has spoken for \(MeetingMode.silentMinutes) min. Ending in \(left) s and writing the notes.")
+                    .font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button("Keep going") { mode.keepGoing() }
+            }
+            .foregroundStyle(Palette.text)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+        }
+    }
+}
+
 private struct ProblemLine: View {
     @ObservedObject var state: MeetingState
 
@@ -1037,9 +1207,17 @@ private struct EmailCard: View {
 
 private struct TranscriptView: View {
     @ObservedObject var state: MeetingState
+    let mode: MeetingMode
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PeopleRow(state: state, mode: mode)
+            lines
+        }
+    }
+
+    private var lines: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
