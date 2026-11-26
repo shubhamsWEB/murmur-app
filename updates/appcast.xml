@@ -6,24 +6,26 @@
     <description>Murmur's updates</description>
     <language>en</language>
     <item>
-      <title>Murmur 1.9.2</title>
-      <pubDate>Tue, 24 Nov 2026 19:18:40 +0000</pubDate>
-      <sparkle:version>28</sparkle:version>
-      <sparkle:shortVersionString>1.9.2</sparkle:shortVersionString>
+      <title>Murmur 1.9.3</title>
+      <pubDate>Thu, 26 Nov 2026 15:31:11 +0000</pubDate>
+      <sparkle:version>29</sparkle:version>
+      <sparkle:shortVersionString>1.9.3</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h3>Meetings on the Mac: who said what</h3>
-<p><b>Each person on a call gets their own lines.</b> Murmur now tells the voices on a call apart and labels them Speaker 1, Speaker 2 and so on. When someone starts talking the moment another person stops, the line is cut where the voice changes, so one person's words no longer run on under another's label.</p>
-<p><b>Name a voice once and Murmur knows it next time.</b> Click a speaker in the meeting panel to name them, and choose "Remember this voice" to keep it. In later meetings that person is named by voice alone, or Murmur asks when it isn't sure. Saved voices stay on this Mac; manage them under Meetings › People.</p>
-<p><b>Names are only applied when they're certain.</b> A voice is named from the conversation only when that person says their own name ("Hi, I'm Priya"). Other names heard in the meeting are offered as one-click choices when you name someone. Before, a name spoken near a voice could be put on the wrong person.</p>
-<p><b>The call is no longer written down as "You".</b> On speakers, your microphone hears the call too. Those lines are now left out, and your own words are kept when you speak over the speakers.</p>
-<p><b>Smaller fixes.</b> Lines stay in the order they were said. No words are lost where a line is cut between two speakers (with the on-Mac English model). Final notes use the speakers' current labels, don't invent a name or gender for anyone, and have room for long meetings. A meeting with nobody speaking ends itself after ten minutes (Meetings › End by itself).</p>
-<h3>Tap to write on the Mac</h3>
-<p><b>It knows which messages are yours.</b> In a chat, Murmur now marks your messages and the other person's before asking the AI, so a reply is written from your side.</p>
-<p><b>It reads apps that say little about themselves.</b> When a window gives Murmur next to nothing to read (WhatsApp is one), it asks again more patiently, reads the descriptions the app gives for its messages, and as a last step reads the conversation from a picture of the window. The picture is read on this Mac and isn't kept.</p>
-<p><b>It uses what Murmur remembers.</b> The reply now draws on your profile, on what memory holds about the person you're writing to, and on what it holds about the conversation.</p>
-<p><b>It learns how you write.</b> Your own messages in the thread, messages you sent before in that app, and what you changed in Murmur's text are shown to the AI as examples. This starts empty and improves as you use it; it's kept in a file on this Mac.</p>
-<p><b>It checks itself.</b> A time, date, amount or link that isn't in anything the AI was given is caught, and the reply is written again without it.</p>]]></description>
-      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.9.2/Murmur-1.9.2.dmg" type="application/octet-stream" sparkle:edSignature="k22yv7G5Ljl1UQjQzhg+m23KwwFqQDqFABaptyEeiqbBwAVHK21khJ/AyJrOeDV1YgCWrjfSuHqEIC+pT3EfBg==" length="19778793"/>
+      <description><![CDATA[<h3>The Murmur button, on Mac and Windows</h3>
+<p><b>It opens when you point at it.</b> Rest the pointer on the small Murmur button and it opens into three icons: the starling opens Murmur, the microphone starts dictation, and the note takes meeting notes. A small label names the one you're on. While notes are being taken the note becomes a stop square, and the small button shows a coral dot.</p>
+<p><b>The listening pill opens smoothly.</b> Its words no longer change while it's still opening. "Starting the microphone…" only shows when the microphone is slow to come on.</p>
+<h3>On the Mac</h3>
+<p><b>Drag Murmur to Applications.</b> The download now opens as a window with Murmur and your Applications folder side by side.</p>
+<h3>Windows catches up</h3>
+<p><b>A tour of Murmur.</b> The first time you open Murmur after this update, a starling shows you around the window: talking, commands, file search, meeting notes and the settings worth knowing. It's in About &amp; Help whenever you want it again.</p>
+<p><b>Meetings: who said what.</b> Murmur now tells the voices on a call apart on your PC and labels them Speaker 1, Speaker 2 and so on. A line is cut where the voice changes, so one person's words don't run on under another's label. Click a speaker in the transcript to name them, and choose "Remember this voice" to have Murmur know them in later meetings (Meetings › People). A voice is named from the conversation only when that person says their own name. The voice models are downloaded once (32 MB).</p>
+<p><b>The call is no longer written down as "You".</b> On speakers, your microphone hears the call too. Those lines are left out, and your own words are kept when you speak over the speakers.</p>
+<p><b>Smaller meeting fixes.</b> Lines stay in the order they were said. Final notes use the speakers' labels and have room for long meetings. A meeting with nobody speaking ends itself after ten minutes (Meetings › End by itself).</p>
+<p><b>Dictation is typed, not run as a command, when it's meant for someone else.</b> What you dictate into Claude, ChatGPT, Cursor or another AI app, or at length into any text box, is typed. Saying "Murmur, …" or holding Alt still makes it a command.</p>
+<p><b>Long dictations keep every word.</b> A dictation over 30 seconds goes to Sarvam in pieces. They're now cut at a real pause, with a moment of silence at each edge.</p>
+<p><b>Numbers in digits.</b> With AI clean-up on, numbers you say are written the way people write them: "version one point three" → "version 1.3".</p>
+<p><b>Clean-up never drops what you said.</b> It may take out fillers, words said twice and the phrase you corrected, and nothing else. If it leaves out anything more, your words go in as you said them.</p>]]></description>
+      <enclosure url="https://github.com/shubhamsWEB/murmur-app/releases/download/v1.9.3/Murmur-1.9.3.dmg" type="application/octet-stream" sparkle:edSignature="vS2wN9wzFDnoO0d7Dgb7Z58+9wDVZSl6GgkHDfPCHVMvKHk3PJidODGCnzOqkc1rQSXi3Ah3Zr6LwVzXnvK1AA==" length="20090450"/>
     </item>
   </channel>
 </rss>
