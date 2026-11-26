@@ -690,7 +690,7 @@ fn main() {
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, dictation_info,
-            set_dictation, download_speech_model, logo_clicked, logo_menu, dictation_action, assistant_info,
+            set_dictation, download_speech_model, logo_clicked, logo_open, logo_action, logo_menu, dictation_action, assistant_info,
             set_assistant, save_api_key, check_ai, ollama_models, download_cleanup_model, forget_memory, answer_text, answer_fit, answer_close,
             set_hide_from_sharing, meeting_state, meeting_action, meetings_list
         ])
@@ -874,7 +874,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     let meeting = {
         let reader = shell.clone();
         let writer = shell.clone();
-        meeting::Meeting::new(&handle, &shell.logs, meeting::Store {
+        let data = shell.settings_path.parent().map(PathBuf::from).unwrap_or_else(|| shell.logs.clone());
+        meeting::Meeting::new(&handle, &shell.logs, &data, meeting::Store {
             read: Box::new(move || reader.settings.lock().unwrap().clone()),
             edit: Box::new(move |change| {
                 let mut settings = writer.settings.lock().unwrap();
@@ -1884,6 +1885,7 @@ fn meetings_list(app: AppHandle) -> Value {
         "folder": meeting::Meeting::folder().map(|f| f.display().to_string()),
         "running": meeting.is_running(),
         "state": meeting.snapshot(),
+        "people": meeting.people(),
     })
 }
 
@@ -1911,13 +1913,45 @@ fn logo_clicked(app: AppHandle) {
     show_window_or_setup(&app);
 }
 
-/// The Murmur button's menu (a right-click): open Murmur, Settings, or hide the button.
+/// The pointer came to rest on the Murmur button (it opens into its three buttons) or left it. Says whether it's open.
+#[tauri::command]
+fn logo_open(app: AppHandle, open: bool) -> bool {
+    dictation::logo::open(&app, open)
+}
+
+/// One of the opened Murmur button's other two: "dictate" (hands-free dictation) or "notes" (meeting notes, taken or
+/// stopped).
+#[tauri::command]
+fn logo_action(app: AppHandle, action: String) -> Result<(), String> {
+    match action.as_str() {
+        "dictate" => app.state::<dictation::Dictation>().hands_free(),
+        "notes" => toggle_meeting_notes(&app),
+        _ => return Err(format!("no Murmur button action called {action}")),
+    }
+    Ok(())
+}
+
+/// Meeting notes: taken if they aren't being, stopped if they are.
+fn toggle_meeting_notes(app: &AppHandle) {
+    let meeting = app.state::<Arc<meeting::Meeting>>().inner().clone();
+    std::thread::spawn(move || {
+        if meeting.is_running() {
+            meeting.stop();
+        } else {
+            meeting.start(None, false);
+        }
+    });
+}
+
+/// The Murmur button's menu (a right-click): open Murmur, meeting notes, Settings, or hide the button.
 #[tauri::command]
 fn logo_menu(app: AppHandle) -> Result<(), String> {
     let window = app.get_webview_window(dictation::logo::LABEL).ok_or("no Murmur button")?;
     let item = |id: &str, text: &str| MenuItem::with_id(&app, id, text, true, None::<&str>);
+    let taking_notes = app.state::<Arc<meeting::Meeting>>().is_running();
     let menu = Menu::with_items(&app, &[
         &item("logo-open", "Open Murmur").map_err(|e| e.to_string())?,
+        &item("logo-notes", if taking_notes { "Stop Meeting Notes" } else { "Take Meeting Notes" }).map_err(|e| e.to_string())?,
         &item("logo-settings", "Settings…").map_err(|e| e.to_string())?,
         &PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?,
         &item("logo-hide", "Hide Murmur Button").map_err(|e| e.to_string())?,
@@ -1929,6 +1963,7 @@ fn logo_menu(app: AppHandle) -> Result<(), String> {
 fn logo_menu_chosen(app: &AppHandle, id: &str) {
     match id {
         "logo-open" => show_window_or_setup(app),
+        "logo-notes" => toggle_meeting_notes(app),
         "logo-settings" => later(app, |app| {
             let _ = show_settings(app);
         }),

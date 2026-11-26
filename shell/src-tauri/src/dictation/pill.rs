@@ -143,7 +143,8 @@ pub(super) mod windows {
     use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetWindowLongPtrW, GetWindowRect, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-        GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SWP_SHOWWINDOW,
         SW_HIDE, SW_SHOWNOACTIVATE, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
         WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
@@ -174,12 +175,34 @@ pub(super) mod windows {
 
     /// The Murmur button's centre on screen (physical pixels), read from Windows.
     pub fn logo_centre() -> Option<(i32, i32)> {
+        // Opened into its three buttons: it's the small button's place the pill opens out of.
+        if let Some((x, y, width, height)) = super::super::logo::small_frame() {
+            return Some((x + width / 2, y + height / 2));
+        }
         let hwnd = handle(super::super::logo::LABEL)?;
         let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
             return None;
         }
         Some(((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2))
+    }
+
+    /// A window's place and size in one step (physical pixels), without activating it or changing what it's above.
+    pub fn set_frame(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+        unsafe {
+            SetWindowPos(hwnd, std::ptr::null_mut(), x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+    }
+
+    /// Whether the pointer is over a window (or within `margin` pixels of it). None: Windows didn't say.
+    pub fn pointer_inside(hwnd: HWND, margin: i32) -> Option<bool> {
+        let mut pointer = POINT { x: 0, y: 0 };
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetCursorPos(&mut pointer) } == 0 || unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+            return None;
+        }
+        Some(pointer.x >= rect.left - margin && pointer.x < rect.right + margin
+            && pointer.y >= rect.top - margin && pointer.y < rect.bottom + margin)
     }
 
     /// The screen at a point: its work area (without the taskbar) and its scale.
