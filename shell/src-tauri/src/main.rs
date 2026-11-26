@@ -1866,7 +1866,8 @@ fn forget_memory(app: AppHandle, id: String) {
 
 #[tauri::command(async)]
 fn meeting_state(app: AppHandle) -> Value {
-    app.state::<Arc<meeting::Meeting>>().snapshot()
+    // The Murmur button's page asks as it loads, which can be before meeting notes are set up: nothing yet.
+    app.try_state::<Arc<meeting::Meeting>>().map_or(Value::Null, |meeting| meeting.snapshot())
 }
 
 /// One of the panel's (or the Meetings page's) controls: "start", "stop", "answerNow", "ask" (text), "auto" (on)…
@@ -1924,7 +1925,11 @@ fn logo_open(app: AppHandle, open: bool) -> bool {
 #[tauri::command]
 fn logo_action(app: AppHandle, action: String) -> Result<(), String> {
     match action.as_str() {
-        "dictate" => app.state::<dictation::Dictation>().hands_free(),
+        "dictate" => {
+            if let Some(dictation) = app.try_state::<dictation::Dictation>() {
+                dictation.hands_free();
+            }
+        }
         "notes" => toggle_meeting_notes(&app),
         _ => return Err(format!("no Murmur button action called {action}")),
     }
@@ -1933,7 +1938,7 @@ fn logo_action(app: AppHandle, action: String) -> Result<(), String> {
 
 /// Meeting notes: taken if they aren't being, stopped if they are.
 fn toggle_meeting_notes(app: &AppHandle) {
-    let meeting = app.state::<Arc<meeting::Meeting>>().inner().clone();
+    let Some(meeting) = app.try_state::<Arc<meeting::Meeting>>().map(|meeting| meeting.inner().clone()) else { return };
     std::thread::spawn(move || {
         if meeting.is_running() {
             meeting.stop();
@@ -1948,7 +1953,7 @@ fn toggle_meeting_notes(app: &AppHandle) {
 fn logo_menu(app: AppHandle) -> Result<(), String> {
     let window = app.get_webview_window(dictation::logo::LABEL).ok_or("no Murmur button")?;
     let item = |id: &str, text: &str| MenuItem::with_id(&app, id, text, true, None::<&str>);
-    let taking_notes = app.state::<Arc<meeting::Meeting>>().is_running();
+    let taking_notes = app.try_state::<Arc<meeting::Meeting>>().is_some_and(|meeting| meeting.is_running());
     let menu = Menu::with_items(&app, &[
         &item("logo-open", "Open Murmur").map_err(|e| e.to_string())?,
         &item("logo-notes", if taking_notes { "Stop Meeting Notes" } else { "Take Meeting Notes" }).map_err(|e| e.to_string())?,

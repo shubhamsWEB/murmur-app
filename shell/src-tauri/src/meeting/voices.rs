@@ -384,6 +384,7 @@ impl Clusters {
     }
 
     /// How many voices there are.
+    #[cfg(test)]
     pub fn count(&self) -> usize {
         self.numbers().len()
     }

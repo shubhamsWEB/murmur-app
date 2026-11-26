@@ -44,6 +44,7 @@ impl Segmenter {
     }
 
     /// Adds sound; returns the pieces it finished, in order.
+    #[cfg(test)]
     pub fn add(&mut self, samples: &[f32]) -> Vec<Vec<f32>> {
         self.add_timed(samples).into_iter().map(|(piece, _)| piece).collect()
     }
