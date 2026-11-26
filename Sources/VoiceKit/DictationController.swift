@@ -3,6 +3,7 @@ import ApplicationServices
 import AgentKit
 import AVFoundation
 import Carbon.HIToolbox
+import Combine
 import FluidAudio
 
 /// Murmur's dictation: hold the dictation key to talk and release to insert, or double-tap it for hands-free and tap
@@ -73,6 +74,7 @@ public final class DictationController: ObservableObject {
     /// AI cleanup changed the last dictation.
     private var lastCleaned = false
     private let logo = FloatingLogo()
+    private var meetingRunning: AnyCancellable?
 
     /// Decide from the words whether you're dictating or giving a command (on by default). Fn+⌃ always means a command.
     public var detectCommands: Bool {
@@ -510,12 +512,20 @@ public final class DictationController: ObservableObject {
             guard let self else { return }
             meeting.askForKey = { [weak self] in self?.askForKey($0) ?? false }
             meeting.watch()
+            // The Murmur button shows when notes are being taken, and offers to stop them.
+            meetingRunning = meeting.state.$running.receive(on: DispatchQueue.main).sink { [weak self] on in
+                self?.logo.setMeeting(on)
+            }
         }
         hud.onVisible = { [weak self] frame in self?.logo.pillMoved(frame) }
         // With the Murmur button on screen, the listening pill grows out of it (one pill, not two).
         hud.anchor = { [weak self] in self?.logo.anchor }
         logo.onOpen = { [weak self] in self?.onOpenApp?() }
         logo.onStartDictation = { [weak self] in self?.logoClicked() }
+        logo.onMeetingNotes = { [weak self] in
+            guard let self else { return }
+            if meeting.isOn { meeting.stop() } else { meeting.start() }
+        }
         logo.onHide = { [weak self] in
             self?.showLogo = false
             self?.hud.flash("Murmur button hidden · turn it back on in Settings", seconds: 3, tone: .info)
@@ -1145,7 +1155,9 @@ public final class DictationController: ObservableObject {
         // The pill first, so you see Murmur listening the moment you press the key; the microphone starts off the
         // main thread and keeps everything from the start. A Bluetooth headset can take a second to wake, and what
         // was said meanwhile was lost while the pill already said "Listening": until audio is coming in it says
-        // the microphone is starting.
+        // the microphone is starting. Only once the pill has opened, though (it takes about half a second): most
+        // microphones are on in a quarter of a second, and changing the words twice while the pill was still
+        // opening made it stutter.
         phase = .listening(handsFree: handsFree)
         micLive = false
         // Murmur's cleanup model loads while you speak: unloaded (Ollama lets it go after 30 idle minutes, or for
@@ -1157,7 +1169,7 @@ public final class DictationController: ObservableObject {
         hud.show(listeningMode(handsFree: handsFree))
         let attempt = UUID()
         micAttempt = attempt
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self, micAttempt == attempt, !micLive, case .listening = phase else { return }
             showingMicStart = true
             hud.show(.startingMic)

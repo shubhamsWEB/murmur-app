@@ -250,7 +250,8 @@ private struct HUDView: View {
             Capsule()
                 .fill(Palette.ink.opacity(0.94))
                 .overlay(Capsule().strokeBorder(Color.white.opacity(open ? 0.08 : 0.10)))
-                .shadow(color: .black.opacity(open ? 0.25 : 0.22), radius: open ? 10 : 4, y: open ? 4 : 2)
+                // One shadow throughout: a blur that changes size is redrawn every frame of the opening.
+                .shadow(color: .black.opacity(0.24), radius: 6, y: 3)
                 .frame(width: size.width, height: size.height)
 
             // The open pill's contents, at full size always, shown through the capsule as it grows.
