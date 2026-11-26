@@ -5,23 +5,71 @@
   <title>Murmur</title>
   <style>
     /* The Murmur button (src-tauri/src/dictation/logo.rs), as the Mac's FloatingLogo: the charcoal capsule with the
-       cream Starling, the listening pill's closed look. */
+       cream Starling, the listening pill's closed look. With the pointer resting on it, it opens into three round
+       buttons, icons only (the starling, a microphone, a note), the one under the pointer lit and named in a small
+       label above it. The window is the small capsule's size, or (opened) the three buttons' with the label's room
+       above; the capsule stays at its bottom centre either way, so it grows where it is. */
+    :root { --ink: rgba(34, 30, 28, 0.94); --cream: #fbf7f2; --coral: #ff6f61; }
     html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; cursor: default; user-select: none; }
-    .stage { height: 100%; display: grid; place-items: center; }
+    body { font: 500 11px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+
     .logo {
-      width: 44px; height: 22px; border-radius: 999px; display: grid; place-items: center;
-      background: rgba(34, 30, 28, 0.94);
+      position: absolute; left: 50%; bottom: 6px; width: 44px; height: 22px; margin-left: -22px;
+      border-radius: 999px; background: var(--ink); overflow: hidden;
       box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.10) inset, 0 2px 8px rgba(0, 0, 0, 0.22);
-      transition: transform 0.15s ease-out;
+      /* Quick out of the blocks, a soft landing, no bounce; its middle stays where it is. */
+      transition: width 0.26s cubic-bezier(0.2, 0.9, 0.25, 1), height 0.26s cubic-bezier(0.2, 0.9, 0.25, 1),
+        margin-left 0.26s cubic-bezier(0.2, 0.9, 0.25, 1), bottom 0.26s cubic-bezier(0.2, 0.9, 0.25, 1);
+      will-change: width;
     }
-    .logo:hover { transform: scale(1.06); }
-    .logo:active { transform: scale(0.97); }
-    .logo svg { width: 17px; height: 17px; }
+    .logo.open { width: 110px; height: 28px; margin-left: -55px; bottom: 3px; }
+
+    /* Small: the starling, and a coral dot while meeting notes are being taken. */
+    .small {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 5px;
+      transition: opacity 0.16s ease-out;
+    }
+    .small svg { width: 17px; height: 17px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--coral); display: none; }
+    .meeting .dot { display: block; }
+    .open .small { opacity: 0; }
+
+    /* Opened: the three, laid out at full size the whole time and shown as the capsule widens. */
+    .buttons {
+      position: absolute; left: 50%; top: 0; bottom: 0; width: 102px; margin-left: -51px; display: flex;
+      opacity: 0; pointer-events: none; transition: opacity 0.1s ease-out;
+    }
+    .open .buttons { opacity: 1; pointer-events: auto; transition: opacity 0.18s 0.06s ease-out; }
+    .button { width: 34px; display: grid; place-items: center; }
+    .button span {
+      width: 28px; height: 22px; border-radius: 999px; display: grid; place-items: center;
+      transition: background-color 0.1s ease-out;
+    }
+    .button:hover span { background: rgba(255, 255, 255, 0.14); }
+    .button:active span { background: rgba(255, 255, 255, 0.22); }
+    .button svg { width: 15px; height: 15px; }
+    .button[data-zone="murmur"] svg { width: 17px; height: 17px; }
+    .stop { width: 10px; height: 10px; border-radius: 2.5px; background: var(--coral); display: none; }
+    .meeting .stop { display: block; }
+    .meeting .note { display: none; }
+
+    /* The name of the button under the pointer, above it. */
+    .tip {
+      position: absolute; bottom: 38px; left: 50%; transform: translateX(-50%); white-space: nowrap;
+      padding: 5px 8px; border-radius: 999px; background: var(--ink); color: var(--cream);
+      opacity: 0; transition: opacity 0.1s ease-out; pointer-events: none;
+    }
+    .tip.shown { opacity: 1; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .logo, .small, .buttons, .open .buttons, .tip { transition-duration: 0.01s; transition-delay: 0s; }
+    }
   </style>
 </head>
 <body>
-  <div class="stage">
-    <div class="logo" id="logo" title="Click to open Murmur · drag to move · right-click for more">
+  <div class="tip" id="tip"></div>
+  <div class="logo" id="logo">
+    <div class="small">
       <svg viewBox="10 26 82 62" aria-hidden="true">
         <path d="M30 58 L12 47 L16 67 Z" fill="#FBF7F2"/>
         <ellipse cx="48" cy="60" rx="24" ry="19" fill="#FBF7F2"/>
@@ -30,35 +78,148 @@
         <circle cx="69" cy="39" r="2.6" fill="#221E1C"/>
         <path d="M31 60 q4.5 -8 9 0 t9 0 t9 0" stroke="#221E1C" stroke-width="3.6" stroke-linecap="round" fill="none"/>
       </svg>
+      <span class="dot"></span>
+    </div>
+    <div class="buttons">
+      <div class="button" data-zone="murmur" data-name="Open Murmur"><span>
+        <svg viewBox="10 26 82 62" aria-hidden="true">
+          <path d="M30 58 L12 47 L16 67 Z" fill="#FBF7F2"/>
+          <ellipse cx="48" cy="60" rx="24" ry="19" fill="#FBF7F2"/>
+          <circle cx="66" cy="42" r="13" fill="#FBF7F2"/>
+          <path d="M78 40.5 L89 44 L78 47.5 Z" fill="#FBF7F2"/>
+          <circle cx="69" cy="39" r="2.6" fill="#221E1C"/>
+          <path d="M31 60 q4.5 -8 9 0 t9 0 t9 0" stroke="#221E1C" stroke-width="3.6" stroke-linecap="round" fill="none"/>
+        </svg>
+      </span></div>
+      <div class="button" data-zone="dictate" data-name="Dictate"><span>
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="5.5" y="1.5" width="5" height="8" rx="2.5" fill="#FBF7F2"/>
+          <path d="M3.2 7.6a4.8 4.8 0 0 0 9.6 0M8 12.4v2.1" stroke="#FBF7F2" stroke-width="1.4" stroke-linecap="round" fill="none"/>
+        </svg>
+      </span></div>
+      <div class="button" data-zone="notes"><span>
+        <svg class="note" viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="2.7" y="1.7" width="10.6" height="12.6" rx="2.2" stroke="#FBF7F2" stroke-width="1.4" fill="none"/>
+          <path d="M5.4 5.4h5.2M5.4 8h5.2M5.4 10.6h3" stroke="#FBF7F2" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        <i class="stop"></i>
+      </span></div>
     </div>
   </div>
   <script>
-    // A click opens Murmur; pressing and moving drags it (a few pixels of movement is a drag, not a click); a
-    // right-click shows its menu. The shell keeps where it's left.
+    // Resting the pointer on it opens it (after a moment, so passing over it does nothing); leaving closes it (shortly
+    // after, so a slip off the edge doesn't snap it shut). A click does what's under the pointer (the small button:
+    // open Murmur); pressing and moving drags it, small (a few pixels of movement is a drag, not a click); a
+    // right-click shows its menu. The shell sizes the window (logo_open) and keeps where the small button is left.
     "use strict";
-    const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+    const tauri = window.__TAURI__;
+    const invoke = (command, args) => tauri.core.invoke(command, args);
+    const logo = document.getElementById("logo"), tip = document.getElementById("tip");
+    const OPEN_AFTER = 180, CLOSE_AFTER = 350, CLOSING = 280;
+
+    let open = false;          // what's wanted: the window follows
+    let opening = null, closing = null;
+    let rested = false;        // a click was just done: nothing opens until the pointer has left
     let down = null, dragging = false;
+
+    function name(button) {
+      if (button.dataset.zone !== "notes") return button.dataset.name;
+      return logo.classList.contains("meeting") ? "Stop meeting notes" : "Take meeting notes";
+    }
+
+    function point(button) {
+      if (!button || !open) return tip.classList.remove("shown");
+      const box = button.getBoundingClientRect();
+      tip.textContent = name(button);
+      tip.style.left = box.left + box.width / 2 + "px";
+      tip.classList.add("shown");
+    }
+
+    /// Opens it, or makes it small again (`now`: without waiting for the capsule to close first).
+    async function setOpen(on, now) {
+      clearTimeout(opening);
+      clearTimeout(closing);
+      opening = closing = null;
+      if (open === on) return;
+      open = on;
+      if (on) {
+        // The window first, then the capsule widens in it. (Not while the listening pill is out: the shell says no.)
+        const opened = await invoke("logo_open", { open: true }).catch(() => false);
+        if (!opened) open = false;
+        // Two frames on, so the bigger window has been drawn (the pill still small in it) before the pill grows.
+        if (open) requestAnimationFrame(() => requestAnimationFrame(() => { if (open) logo.classList.add("open"); }));
+      } else {
+        logo.classList.remove("open");
+        point(null);
+        if (!now) await new Promise((done) => setTimeout(done, CLOSING));
+        if (!open) await invoke("logo_open", { open: false }).catch(() => {});
+      }
+    }
+
+    document.addEventListener("mousemove", (event) => {
+      if (down && !dragging && (event.buttons & 1)) {
+        const dx = event.screenX - down.x, dy = event.screenY - down.y;
+        if (dx * dx + dy * dy < 9) return;
+        dragging = true;
+        down = null;
+        // It's the small button that's dragged: an opened one closes first.
+        setOpen(false, true).then(() => tauri.window.getCurrentWindow().startDragging()).catch(() => {});
+        return;
+      }
+      if (closing) { clearTimeout(closing); closing = null; }
+      if (open) return point(event.target.closest ? event.target.closest(".button") : null);
+      if (!opening && !rested && !down && !dragging) opening = setTimeout(() => setOpen(true), OPEN_AFTER);
+    });
+    document.documentElement.addEventListener("mouseleave", () => {
+      rested = false;
+      clearTimeout(opening);
+      opening = null;
+      point(null);
+      if (open && !closing) closing = setTimeout(() => setOpen(false), CLOSE_AFTER);
+    });
     document.addEventListener("mousedown", (event) => {
       if (event.button !== 0) return;
+      clearTimeout(opening);
+      opening = null;
       down = { x: event.screenX, y: event.screenY };
       dragging = false;
     });
-    document.addEventListener("mousemove", (event) => {
-      if (!down || dragging || !(event.buttons & 1)) return;
-      const dx = event.screenX - down.x, dy = event.screenY - down.y;
-      if (dx * dx + dy * dy < 9) return;
-      dragging = true;
-      down = null;
-      window.__TAURI__.window.getCurrentWindow().startDragging().catch(() => {});
-    });
     document.addEventListener("mouseup", (event) => {
-      if (event.button === 0 && down && !dragging) invoke("logo_clicked").catch(() => {});
+      if (event.button !== 0) return;
+      const clicked = down && !dragging;
       down = null;
+      dragging = false;
+      if (!clicked) return;
+      if (!open) {
+        rested = true;
+        return void invoke("logo_clicked").catch(() => {});
+      }
+      const button = event.target.closest ? event.target.closest(".button") : null;
+      if (!button) return;
+      rested = true;
+      setOpen(false, true);
+      if (button.dataset.zone === "murmur") invoke("logo_clicked").catch(() => {});
+      else invoke("logo_action", { action: button.dataset.zone }).catch(() => {});
     });
     document.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       invoke("logo_menu").catch(() => {});
     });
+
+    // The shell made it small itself (dictation started, or the pointer left without the page being told).
+    tauri.event.listen("logo-open", ({ payload }) => {
+      if (payload || !open) return;
+      clearTimeout(opening);
+      clearTimeout(closing);
+      opening = closing = null;
+      open = false;
+      logo.classList.remove("open");
+      point(null);
+    });
+    // Meeting notes being taken: the coral dot, and the note becomes the stop square.
+    const meeting = (on) => logo.classList.toggle("meeting", !!on);
+    tauri.event.listen("meeting-running", ({ payload }) => meeting(payload));
+    invoke("meeting_state").then((state) => meeting(state && state.running)).catch(() => {});
   </script>
 </body>
 </html>

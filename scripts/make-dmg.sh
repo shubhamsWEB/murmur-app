@@ -13,6 +13,9 @@
 # On GitHub (the release workflow), notarization uses an App Store Connect API key instead of a keychain profile:
 # APPLE_API_KEY (the .p8 file's path), APPLE_API_KEY_ID and APPLE_API_ISSUER. REQUIRE_NOTARIZATION=1 makes a DMG that
 # isn't signed and notarized an error rather than a warning.
+#
+# The disk image opens as a window that says "Drag Murmur into Applications" (made with dmgbuild, fetched for the run).
+# PLAIN_DMG=1 skips that; REQUIRE_STYLED_DMG=1 makes its absence an error.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -77,13 +80,62 @@ fi
 echo "› Making $DMG"
 STAGE="$(mktemp -d)/Murmur"
 mkdir -p "$STAGE" "$DIST"
-ditto "$APP" "$STAGE/Murmur.app"
-ln -s /Applications "$STAGE/Applications"
-cat > "$STAGE/Read Me First.txt" <<TXT
+rm -f "$DMG"
+VOLUME="Murmur $VERSION"
+
+# The disk opens as one window with two things in it: Murmur and Applications, an arrow between them, and "Drag Murmur
+# into Applications" above (Resources/DiskImage). Where the icons sit, the window's size and its picture are written
+# into the disk by dmgbuild (a Python tool: it writes Finder's own layout file, so no Finder window has to be driven,
+# which doesn't work reliably on a build machine). It's installed into a throwaway place for this run.
+styled_dmg() {
+  local tools="$(dirname "$STAGE")/tools" background="$(dirname "$STAGE")/background.tiff" settings="$(dirname "$STAGE")/settings.py"
+  python3 -m venv "$tools" > /dev/null 2>&1 || return 1
+  "$tools/bin/pip" install --quiet --disable-pip-version-check dmgbuild > /dev/null 2>&1 || return 1
+  # One picture for ordinary and Retina screens.
+  tiffutil -cathidpicheck Resources/DiskImage/dmg-background.png Resources/DiskImage/dmg-background@2x.png \
+    -out "$background" > /dev/null 2>&1 || return 1
+  cat > "$settings" <<'PY'
+format = "UDZO"
+files = [defines["app"]]
+symlinks = {"Applications": "/Applications"}
+icon = defines["icon"]
+background = defines["background"]
+window_rect = ((240, 160), (660, 500))
+default_view = "icon-view"
+show_status_bar = False
+show_tab_view = False
+show_toolbar = False
+show_pathbar = False
+show_sidebar = False
+show_icon_preview = False
+arrange_by = None
+icon_size = 128
+text_size = 13
+icon_locations = {"Murmur.app": (170, 300), "Applications": (490, 300)}
+PY
+  "$tools/bin/dmgbuild" -s "$settings" -D app="$APP" -D icon="Resources/AppIcon.icns" -D background="$background" \
+    "$VOLUME" "$DMG" > /dev/null || return 1
+  [[ -s "$DMG" ]] || return 1
+  # The copy of Murmur inside must still be the signed app, whole.
+  local check="$(dirname "$STAGE")/check"
+  mkdir -p "$check"
+  hdiutil attach "$DMG" -readonly -noverify -noautoopen -nobrowse -mountpoint "$check" > /dev/null || return 1
+  local intact=0
+  codesign --verify --deep --strict "$check/Murmur.app" > /dev/null 2>&1 && [[ -L "$check/Applications" ]] && intact=1
+  hdiutil detach "$check" -quiet || hdiutil detach "$check" -force -quiet
+  [[ $intact == 1 ]]
+}
+
+# Without it (no Python, or no network for dmgbuild): the plain disk, as before. The app and an Applications shortcut
+# side by side, with a note; Murmur still offers to move itself when it's opened from the disk.
+plain_dmg() {
+  ditto "$APP" "$STAGE/Murmur.app"
+  ln -s /Applications "$STAGE/Applications"
+  cat > "$STAGE/Read Me First.txt" <<TXT
 Murmur $VERSION — voice for your Mac
 
-1. Open Murmur and click Move to Applications: it moves itself there, opens again and ejects this disk.
-   (Or drag Murmur onto Applications yourself, then open it from there.)
+1. Drag Murmur onto Applications, then open it from there.
+   (Or open Murmur here and click Move to Applications: it moves itself, opens again and ejects this disk.)
 2. Setup walks you through the microphone, typing in other apps, and the folders to search.
    On first launch Murmur downloads its speech and search models once (about 1.4 GB).
 3. Hold fn anywhere and talk.
@@ -93,20 +145,28 @@ $( [[ $SIGNED_FOR_RELEASE == 1 ]] && echo "" || echo "
 If macOS says Apple could not verify Murmur: open System Settings → Privacy & Security, scroll down,
 and click Open Anyway next to Murmur. You only do this once." )
 TXT
-# The disk shows Murmur's icon when it's open (on the desktop and in Finder's sidebar): the icon as .VolumeIcon.icns
-# at its top, and the top folder marked as having a custom icon. That mark has to be set on the mounted disk, so it's
-# made writable first and compressed after.
-cp Resources/AppIcon.icns "$STAGE/.VolumeIcon.icns"
-rm -f "$DMG"
-RW="$(dirname "$STAGE")/Murmur-rw.dmg"
-hdiutil create -volname "Murmur $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" > /dev/null
-MOUNT="$(dirname "$STAGE")/mount"
-mkdir -p "$MOUNT"
-hdiutil attach "$RW" -readwrite -noverify -noautoopen -nobrowse -mountpoint "$MOUNT" > /dev/null
-# Finder's "has a custom icon" flag (0x0400 in the folder's Finder info), without needing Xcode's SetFile.
-xattr -wx com.apple.FinderInfo "0000000000000000040000000000000000000000000000000000000000000000" "$MOUNT"
-hdiutil detach "$MOUNT" -quiet || hdiutil detach "$MOUNT" -force -quiet
-hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG" > /dev/null
+  # The disk shows Murmur's icon when it's open (on the desktop and in Finder's sidebar): the icon as
+  # .VolumeIcon.icns at its top, and the top folder marked as having a custom icon. That mark has to be set on the
+  # mounted disk, so it's made writable first and compressed after.
+  cp Resources/AppIcon.icns "$STAGE/.VolumeIcon.icns"
+  local rw="$(dirname "$STAGE")/Murmur-rw.dmg" mount="$(dirname "$STAGE")/mount"
+  hdiutil create -volname "$VOLUME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$rw" > /dev/null
+  mkdir -p "$mount"
+  hdiutil attach "$rw" -readwrite -noverify -noautoopen -nobrowse -mountpoint "$mount" > /dev/null
+  # Finder's "has a custom icon" flag (0x0400 in the folder's Finder info), without needing Xcode's SetFile.
+  xattr -wx com.apple.FinderInfo "0000000000000000040000000000000000000000000000000000000000000000" "$mount"
+  hdiutil detach "$mount" -quiet || hdiutil detach "$mount" -force -quiet
+  hdiutil convert "$rw" -format UDZO -imagekey zlib-level=9 -o "$DMG" > /dev/null
+}
+
+if [[ "${PLAIN_DMG:-}" != 1 ]] && styled_dmg; then
+  echo "  with the drag-to-Applications window"
+else
+  [[ "${PLAIN_DMG:-}" == 1 ]] || echo "  dmgbuild couldn't be used (needs python3 and a network connection): a plain disk image instead" >&2
+  if [[ "${REQUIRE_STYLED_DMG:-}" == 1 ]]; then echo "The disk image has no drag-to-Applications window: not a release" >&2; exit 1; fi
+  rm -f "$DMG"
+  plain_dmg
+fi
 rm -rf "$(dirname "$STAGE")"
 
 NOTARIZED=0

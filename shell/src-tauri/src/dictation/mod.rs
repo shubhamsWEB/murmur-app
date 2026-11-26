@@ -288,6 +288,21 @@ impl Dictation {
         self.inner.start_download();
     }
 
+    /// The Murmur button's microphone: starts hands-free dictation, as a double tap of the key does (the key, tapped,
+    /// finishes it; Esc cancels it). Clicked again while that's going, it finishes it.
+    pub fn hands_free(&self) {
+        let inner = self.inner.clone();
+        std::thread::spawn(move || {
+            if inner.recording.lock().unwrap().is_some() {
+                if inner.hands_free.load(Ordering::SeqCst) {
+                    inner.end();
+                }
+                return;
+            }
+            inner.begin(true);
+        });
+    }
+
     /// The tray's Paste Last Dictation: types the last dictation again where the cursor is now, once the menu has
     /// closed and the focus is back in that app.
     pub fn paste_last(&self) {
@@ -609,23 +624,45 @@ impl Inner {
             pill::flash(&self.app, &text, "info", 3.0);
             return;
         }
-        pill::show(&self.app, "starting", "Starting the microphone…");
+        // The pill opens saying what it'll say once the microphone is on (which takes a fifth of a second or so), so
+        // its words don't change, and its width with them, while it's still opening. Only a microphone that's slow
+        // to come on is said to be starting.
+        let words = if hands_free {
+            format!("Listening · tap {} to finish", config.key.title())
+        } else {
+            "Listening".to_string()
+        };
+        pill::show(&self.app, "listening", &words);
+        let waiting = Arc::new(Mutex::new(true));
+        {
+            let (app, waiting) = (self.app.clone(), waiting.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(600));
+                let waiting = waiting.lock().unwrap();
+                if *waiting {
+                    pill::show(&app, "starting", "Starting the microphone…");
+                }
+            });
+        }
         self.command.store(false, Ordering::SeqCst);
         self.typing.store(false, Ordering::SeqCst);
         self.look_around();
         let app = self.app.clone();
         let started = Instant::now();
-        match audio::Recording::start(&config.microphone, move |level| pill::level(&app, level)) {
+        let recording = audio::Recording::start(&config.microphone, move |level| pill::level(&app, level));
+        let was_slow = {
+            let mut waiting = waiting.lock().unwrap();
+            *waiting = false;
+            started.elapsed() >= Duration::from_millis(600)
+        };
+        match recording {
             Ok(recording) => {
                 self.note(&format!("listening with {} ({} Hz), on in {:.2} s (first sound after {:.2} s)",
                                    recording.device, recording.sample_rate, started.elapsed().as_secs_f64(),
                                    recording.opened_in.as_secs_f64()));
-                let words = if hands_free {
-                    format!("Listening · tap {} to finish", config.key.title())
-                } else {
-                    "Listening".to_string()
-                };
-                pill::show(&self.app, "listening", &words);
+                if was_slow {
+                    pill::show(&self.app, "listening", &words);
+                }
                 self.hands_free.store(hands_free, Ordering::SeqCst);
                 *self.recording.lock().unwrap() = Some(recording);
                 self.set_phase("listening");
@@ -769,7 +806,7 @@ impl Inner {
                     intent: crate::commands::intent::Intent::Dictation, reason: "Shift held".into(), explicit: true,
                 }
             } else {
-                assistant.decide(&text, &spot, front_app.as_deref(), forced)
+                assistant.decide(&text, &spot, front_app.as_deref(), title, forced)
             };
             self.note(&format!("intent: {} ({})", if decision.intent == crate::commands::intent::Intent::Command { "command" } else { "dictation" },
                                decision.reason));

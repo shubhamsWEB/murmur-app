@@ -1,0 +1,78 @@
+/* The tour of Murmur (tour.js), as the Mac's (Sources/MurmurApp/Tour.swift): the page dims, the starling flies to the
+   part being explained, the spotlight opens around it and a card unfolds out of the bird. */
+
+.tour { position: fixed; inset: 0; z-index: 900; }
+.tour[hidden] { display: none; }
+
+/* The spotlight: a clear rectangle whose shadow is the dimming everywhere else. With nothing to point at, it's a dot
+   in the middle and the whole window is dimmed. */
+.tour-hole {
+  position: absolute; border-radius: 14px; pointer-events: none;
+  box-shadow: 0 0 0 200vmax rgba(24, 18, 15, 0.56), 0 0 0 1.5px rgba(255, 111, 97, 0.9);
+  transition: left 0.55s cubic-bezier(0.3, 0.9, 0.3, 1), top 0.55s cubic-bezier(0.3, 0.9, 0.3, 1),
+    width 0.55s cubic-bezier(0.3, 0.9, 0.3, 1), height 0.55s cubic-bezier(0.3, 0.9, 0.3, 1), opacity 0.3s ease-out;
+}
+.tour-hole.none { box-shadow: 0 0 0 200vmax rgba(24, 18, 15, 0.56); }
+.tour.leaving .tour-hole { opacity: 0; }
+
+/* The starling: flies between stops, perches on the card's top edge. */
+.tour-bird {
+  position: absolute; left: 0; top: 0; width: 44px; height: 34px; margin: -30px 0 0 -22px; pointer-events: none;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.3)); will-change: transform; z-index: 2;
+}
+.tour-bird svg { width: 100%; height: 100%; display: block; transform-origin: 50% 70%; }
+.tour-bird.flying svg { animation: tour-flap 0.22s ease-in-out infinite alternate; }
+.tour-bird.left svg { scale: -1 1; }
+.tour-bird.tapping svg { animation: tour-tap 0.3s ease-in-out; }
+@keyframes tour-flap { from { transform: scaleY(1) rotate(-6deg); } to { transform: scaleY(0.82) rotate(4deg); } }
+@keyframes tour-tap { 50% { transform: translateY(5px) rotate(14deg); } }
+.tour-bird .wave { animation: tour-wave 1.3s ease-in-out infinite; }
+@keyframes tour-wave { 50% { transform: translateY(-1.5px); } }
+
+/* The sidebar item the bird taps on its way to another page. */
+.tour-tapped { background: var(--accent-tint, rgba(255, 111, 97, 0.16)) !important; transition: background 0.2s; }
+
+/* The card: unfolds out of the bird (its corner is where the bird sits). */
+.tour-card {
+  position: absolute; width: 348px; padding: 20px 20px 16px; border-radius: 16px; z-index: 1;
+  background: var(--card, #fff); color: var(--ink, #221e1c); border: 1px solid var(--line-soft, #e8e0d7);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32); user-select: none;
+  transform-origin: 34px 0; transform: scale(0.12); opacity: 0;
+  transition: transform 0.5s cubic-bezier(0.2, 1.25, 0.35, 1), opacity 0.22s ease-out;
+}
+.tour-card.open { transform: none; opacity: 1; }
+.tour-card.folding { transform: scale(0.12); opacity: 0; transition: transform 0.3s ease-in, opacity 0.24s 0.06s ease-in; }
+.tour-count { font-size: 11.5px; color: var(--ink3, #8a7d75); margin: 0 0 6px; min-height: 14px; }
+.tour-card h2 { margin: 0 0 8px; font-size: 19px; font-weight: 600; letter-spacing: -0.2px; line-height: 1.25; }
+.tour-card p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--ink2, #6b5f58); }
+
+/* A stop that waits for you: what to do, the box to do it in, and what's said once it's done. */
+.tour-try { margin-top: 14px; padding: 12px; border-radius: 12px; background: var(--card-alt, #fdfbf8); border: 1px solid var(--hairline, #f1ebe4); }
+.tour-try b { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 8px; color: var(--ink, #221e1c); }
+.tour-try textarea {
+  display: block; width: 100%; height: 62px; resize: none; padding: 8px 10px; border-radius: 8px; font: inherit;
+  font-size: 13px; line-height: 1.4; color: var(--ink, #221e1c); background: var(--card, #fff);
+  border: 1px solid var(--control, #e2d9cf); outline: none; user-select: text;
+}
+.tour-try textarea:focus { border-color: var(--accent, #e2554a); box-shadow: 0 0 0 3px rgba(226, 85, 74, 0.18); }
+.tour-try textarea[hidden] { display: none; }
+.tour-done { display: none; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; font-weight: 600; color: #2f8f5b; }
+.tour-done::before { content: "✓"; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: #2f8f5b; color: #fff; font-size: 11px; }
+.tour-card.did .tour-done { display: flex; }
+
+.tour-buttons { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.tour-buttons .spacer { flex: 1; }
+.tour-buttons button {
+  font: inherit; font-size: 13px; padding: 7px 16px; border-radius: 8px; border: 1px solid transparent; cursor: pointer;
+}
+.tour-next { background: var(--ink, #221e1c); color: var(--on-primary, #fff); font-weight: 600; }
+.tour-next:disabled { opacity: 0.35; cursor: default; }
+.tour-skip-step { background: transparent; color: var(--ink2, #6b5f58); border-color: var(--control, #e2d9cf) !important; }
+.tour-end { background: transparent; color: var(--ink3, #8a7d75); padding-left: 0 !important; padding-right: 8px !important; }
+.tour-end:hover, .tour-skip-step:hover { color: var(--ink, #221e1c); }
+.tour-buttons button:focus-visible { outline: 2px solid var(--accent, #e2554a); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-hole, .tour-card, .tour-card.folding { transition-duration: 0.01s; transition-delay: 0s; }
+  .tour-bird.flying svg, .tour-bird .wave { animation: none; }
+}

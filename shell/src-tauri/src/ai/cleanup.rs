@@ -5,6 +5,7 @@
 //! Murmur Cleanup or the model chosen for commands (local, or Claude/OpenAI with your key), and anything that looks like
 //! the model wrote, answered, rephrased or dropped something is thrown away: the words as heard are typed instead.
 
+use super::numbers;
 use std::collections::HashSet;
 
 /// The kind of app the words go into, which decides the style.
@@ -242,7 +243,11 @@ pub fn accept(original: &str, raw: &str, cleanup: bool, grammar: bool) -> Option
     }
     // Every word kept must be one that was said (a long passage may gain a word or two, "I am" → "I'm"): anything
     // else was written by the model, an answer or a rephrasing.
-    let said: HashSet<&str> = heard.iter().map(String::as_str).collect();
+    // A number said in words and written in digits ("two" → "2", "one point three" → "1", "3") was said, and a
+    // contraction's ending ("I am" → "I'm": "m") isn't a new word either.
+    let in_digits = words(&numbers::all_digits(original));
+    let said: HashSet<&str> = heard.iter().chain(in_digits.iter()).map(String::as_str)
+        .chain(["m", "s", "re", "ll", "d", "ve"]).collect();
     let new: Vec<&String> = kept.iter().filter(|word| !said.contains(word.as_str())).collect();
     if grammar {
         if !grammar_only(&heard, &kept, &new, cleanup) {
@@ -272,10 +277,77 @@ pub fn accept(original: &str, raw: &str, cleanup: bool, grammar: bool) -> Option
     if (kept.len() as f64) < heard.len() as f64 * if corrected { 0.3 } else { 0.6 } {
         return None;
     }
+    // And only those: a word of yours that went must be a filler, a word said twice, a small word folded into another
+    // ("I am" → "I'm"), or part of what you corrected. A sentence the model left out is never tidying.
+    if !only_tidying_dropped(&words(&numbers::all_digits(&heard.join(" "))), &words(&numbers::all_digits(&kept.join(" ")))) {
+        return None;
+    }
     if kept.len() > heard.len() + if grammar { (heard.len() / 5).max(2) } else { 2 } {
         return None;
     }
     Some(cleaned)
+}
+
+// MARK: What cleanup may drop
+
+/// Sounds and words that are only filler when dictated.
+const FILLERS: &[&str] = &["um", "umm", "uh", "uhh", "er", "erm", "hmm", "hm", "ah", "eh", "like", "you", "know", "so",
+                           "well", "basically", "actually", "literally", "okay", "ok", "right", "mean", "i", "yeah",
+                           "matlab", "na", "toh", "haan", "accha", "acha"];
+
+/// Whether every word that went between what was said (`heard`) and what came back (`kept`) is one tidying may take
+/// out: a filler, a word said twice in a row, a small word folded into another, a list's spoken marker, or one in the
+/// stretch a correction replaced (up to eight words before "no", "I mean", "actually"…). At most one other word may go
+/// (a stumble the lists don't name). As the Mac's `onlyTidyingDropped`.
+fn only_tidying_dropped(heard: &[String], kept: &[String]) -> bool {
+    let (n, m) = (heard.len(), kept.len());
+    if n == 0 {
+        return true;
+    }
+    // Which of the heard words are kept, in order (the longest common subsequence, forms of a word alike).
+    let same = |i: usize, j: usize| heard[i] == kept[j] || related(&heard[i], &kept[j]);
+    let mut table = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            table[i][j] = if same(i, j) { table[i + 1][j + 1] + 1 } else { table[i + 1][j].max(table[i][j + 1]) };
+        }
+    }
+    let mut dropped = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n {
+        if j < m && same(i, j) && table[i][j] == table[i + 1][j + 1] + 1 {
+            i += 1;
+            j += 1;
+        } else if j < m && table[i][j + 1] >= table[i + 1][j] {
+            j += 1;
+        } else {
+            dropped.push(i);
+            i += 1;
+        }
+    }
+    // The stretches corrections replaced: up to eight words before each cue, and the cue.
+    let mut corrected = HashSet::new();
+    for (k, word) in heard.iter().enumerate() {
+        let two = if k + 1 < n { format!("{word} {}", heard[k + 1]) } else { String::new() };
+        let Some(cue) = CORRECTION_CUES.iter().find(|cue| **cue == word.as_str() || **cue == two.as_str()) else { continue };
+        let length = cue.split(' ').count();
+        corrected.extend(k.saturating_sub(8)..n.min(k + length));
+    }
+    let other = dropped.iter().filter(|&&k| {
+        let word = heard[k].as_str();
+        if FILLERS.contains(&word) || GRAMMAR_WORDS.contains(&word) || LIST_MARKERS.contains(&word) {
+            return false;
+        }
+        if word.chars().count() == 1 && word.chars().all(|c| c.is_numeric()) {
+            return false; // "one …, two …" as a list
+        }
+        if corrected.contains(&k) {
+            return false;
+        }
+        // Said twice.
+        !((k > 0 && heard[k - 1] == word) || (k + 1 < n && heard[k + 1] == word))
+    }).count();
+    other <= 1
 }
 
 // MARK: Checking a grammar fix
@@ -305,8 +377,10 @@ fn grammar_only(heard: &[String], kept: &[String], new: &[&String], tidied: bool
     if if tidied { kept_not > said_not } else { kept_not != said_not } {
         return false;
     }
+    // Numbers that were said, in digits too ("two" → "2"): writing one in digits isn't changing it.
     let number = |w: &String| w.chars().any(|c| c.is_numeric());
-    if kept.iter().any(|w| number(w) && !heard.contains(w)) {
+    let in_digits = words(&numbers::all_digits(&heard.join(" ")));
+    if kept.iter().any(|w| number(w) && !heard.contains(w) && !in_digits.contains(w)) {
         return false;
     }
     in_order(heard, kept) as f64 >= kept.len() as f64 * 0.75
@@ -388,6 +462,27 @@ mod tests {
         assert_eq!(accept("main kal office aaunga aur meeting karenge", "I will come to the office tomorrow and we will have a meeting."), None);
         assert_eq!(accept("I think we should move the launch to next week because the build is not ready", "We should move the launch."), None);
         assert_eq!(accept("hello there my friend", "  "), None);
+    }
+
+    /// Cleanup takes out what's tidying, never what you said: a dropped sentence or clause means the words go in as heard.
+    #[test]
+    fn dropped_words_must_be_tidying() {
+        assert_eq!(accept("check if the onboarding covers the meeting notes and also the one tap feature we just built",
+                          "Check if the onboarding covers the meeting notes."), None);
+        assert_eq!(accept("please send the report today and copy Rahul on it so he knows", "Please send the report today."), None);
+        assert_eq!(accept("so um I I am going to send it you know by tonight", "I'm going to send it by tonight.").as_deref(),
+                   Some("I'm going to send it by tonight."));
+        assert_eq!(accept("let's do it on Monday no wait Tuesday afternoon", "Let's do it on Tuesday afternoon.").as_deref(),
+                   Some("Let's do it on Tuesday afternoon."));
+    }
+
+    /// Numbers written in digits are what was said: "version one point three" → "version 1.3".
+    #[test]
+    fn digits_for_spoken_numbers_are_kept() {
+        assert_eq!(accept("um complete the tasks in version one point three", "Complete the tasks in version 1.3.").as_deref(),
+                   Some("Complete the tasks in version 1.3."));
+        assert_eq!(accept("we have twenty five people coming", "We have 25 people coming.").as_deref(), Some("We have 25 people coming."));
+        assert_eq!(accept("we have some people coming", "We have 25 people coming."), None);
     }
 
     #[test]

@@ -72,6 +72,8 @@ function render() {
   }));
   ai.value = state.ai || "";
   $("meeting-speech").value = state.speech || "";
+  $("meeting-end-quiet").checked = !state.stayWhenQuiet;
+  renderPeople();
   const nav = $("nav-meeting");
   if (nav) nav.textContent = list.running ? "●" : "";
 
@@ -88,6 +90,36 @@ function render() {
     return;
   }
   box.replaceChildren(...meetings.map(card));
+}
+
+/// People: the voices you asked Murmur to remember, each with Rename and Forget.
+function renderPeople() {
+  const people = list.people || [];
+  $("people-label").hidden = $("people").hidden = !people.length;
+  $("people").replaceChildren(...people.map((person) => {
+    const row = element("div", "srow");
+    const text = element("div", "stext");
+    const seen = person.lastSeen ? new Date(person.lastSeen * 1000).toLocaleDateString() : "";
+    text.append(element("b", null, person.name),
+                element("span", null, `Known by voice · learned from ${person.samples} stretches of speech${seen ? ` · last heard ${seen}` : ""}`));
+    const controls = element("div", "sctl");
+    const rename = element("button", "secondary", "Rename");
+    rename.onclick = () => {
+      const input = element("input", "field");
+      input.value = person.name;
+      const done = () => { if (input.value.trim() && input.value.trim() !== person.name) act("renamePerson", { id: person.id, name: input.value.trim() }); else render(); };
+      input.onkeydown = (event) => { if (event.key === "Enter") done(); if (event.key === "Escape") render(); };
+      input.onblur = done;
+      text.replaceChildren(input);
+      input.focus();
+      input.select();
+    };
+    const forget = element("button", "secondary", "Forget");
+    forget.onclick = () => act("forgetPerson", person.id);
+    controls.append(rename, forget);
+    row.append(text, controls);
+    return row;
+  }));
 }
 
 function card(meeting) {
@@ -133,7 +165,9 @@ $("meeting-offers").onchange = () => act("offers", $("meeting-offers").checked);
 $("meeting-auto").onchange = () => act("auto", $("meeting-auto").checked);
 $("meeting-ai").onchange = () => act("ai", $("meeting-ai").value);
 $("meeting-speech").onchange = () => act("speech", $("meeting-speech").value);
+$("meeting-end-quiet").onchange = () => act("stayWhenQuiet", !$("meeting-end-quiet").checked);
 $("meetings-search").addEventListener("input", render);
+tauri.event.listen("meeting-people", () => load());
 tauri.event.listen("meetings-changed", () => load());
 tauri.event.listen("meeting-running", () => load());
 

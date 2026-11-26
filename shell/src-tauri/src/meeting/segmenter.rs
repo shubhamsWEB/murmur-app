@@ -25,6 +25,8 @@ pub struct Segmenter {
     last_pause: usize,
     /// The loudness of the last frame, 0…1 on a scale from −60 dBFS (silence) to −10 dBFS (loud), for a meter.
     pub level: f32,
+    /// How many samples came after the piece just finished (see `add_timed`).
+    after: usize,
 }
 
 impl Segmenter {
@@ -33,7 +35,7 @@ impl Segmenter {
             rate, pause: 0.6, longest: 20.0, least_speech: 0.35,
             frame: ((rate * 0.03) as usize).max(1),
             partial: Vec::new(), piece: Vec::new(), noise: 0.002, voiced: 0, silent_run: 0, heard: false, last_pause: 0,
-            level: 0.0,
+            level: 0.0, after: 0,
         }
     }
 
@@ -42,15 +44,24 @@ impl Segmenter {
     }
 
     /// Adds sound; returns the pieces it finished, in order.
+    #[cfg(test)]
     pub fn add(&mut self, samples: &[f32]) -> Vec<Vec<f32>> {
-        let mut done = Vec::new();
+        self.add_timed(samples).into_iter().map(|(piece, _)| piece).collect()
+    }
+
+    /// The same, each piece with how many samples came after it (up to the end of `samples`): the pause that ended
+    /// it, or the speech held for the next piece when a long one was cut. A piece began that much, and its own
+    /// length, before now.
+    pub fn add_timed(&mut self, samples: &[f32]) -> Vec<(Vec<f32>, usize)> {
+        let mut done: Vec<(Vec<f32>, usize)> = Vec::new();
         self.partial.extend_from_slice(samples);
         let mut start = 0;
         while self.partial.len() - start >= self.frame {
             let chunk: Vec<f32> = self.partial[start..start + self.frame].to_vec();
             start += self.frame;
             if let Some(finished) = self.take(&chunk) {
-                done.push(finished);
+                // What's been taken in since this piece ended, less what the frames after it will add below.
+                done.push((finished, self.after + self.partial.len() - start));
             }
         }
         self.partial.drain(..start);
@@ -110,6 +121,7 @@ impl Segmenter {
             let trailing = (self.silent_run * self.frame).saturating_sub((self.rate * 0.3) as usize);
             let keep = self.piece.len() - trailing.min(self.piece.len());
             let finished = self.piece[..keep].to_vec();
+            self.after = self.piece.len() - keep;
             self.piece.clear();
             self.reset();
             return enough.then_some(finished);
@@ -118,6 +130,7 @@ impl Segmenter {
             let cut = if self.last_pause > (self.rate * 5.0) as usize { self.last_pause } else { self.piece.len() };
             let finished = self.piece[..cut].to_vec();
             let rest = self.piece[cut..].to_vec();
+            self.after = rest.len();
             self.reset();
             self.heard = !rest.is_empty();
             self.piece = rest;

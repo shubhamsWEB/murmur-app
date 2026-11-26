@@ -210,3 +210,36 @@ body.strip .reader { padding-top: 8px; }
 .offer-text b { font-size: 14.5px; }
 .offer-text span { color: var(--secondary); }
 .offer-actions { width: 100%; display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Who said a line, on the call's side: a button that names the speaker (meeting.js editSpeaker). */
+.line button.who {
+  border: 0; background: none; padding: 0 3px; margin-left: -3px; border-radius: 5px; font: inherit; font-weight: 600;
+  color: var(--coral-deep); cursor: pointer;
+}
+.line button.who:hover { background: rgba(255, 111, 97, 0.14); }
+.speaker-card {
+  position: fixed; z-index: 50; width: 250px; padding: 12px; border-radius: 12px; background: var(--card);
+  border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); display: flex; flex-direction: column;
+  gap: 8px; font-size: 13px;
+}
+.speaker-card b { font-size: 13.5px; }
+.speaker-card .field {
+  width: 100%; padding: 6px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface);
+  color: var(--text); font: inherit; outline: none;
+}
+.speaker-card .field:focus { border-color: var(--coral); }
+.speaker-card .offers { display: flex; flex-wrap: wrap; gap: 5px; }
+.speaker-card .chip {
+  border: 0; border-radius: 999px; padding: 3px 9px; background: var(--fill); color: var(--text); font: inherit;
+  font-size: 12px; cursor: pointer;
+}
+.speaker-card .chip:hover { background: var(--fill-strong); }
+.speaker-card .remember { display: flex; align-items: flex-start; gap: 7px; color: var(--secondary); font-size: 12px; line-height: 1.35; }
+.speaker-card .remember input { margin: 1px 0 0; accent-color: var(--coral-deep); }
+.speaker-card .why { margin: 0; color: var(--tertiary); font-size: 11.5px; line-height: 1.35; }
+.speaker-card .buttons { display: flex; gap: 6px; }
+.speaker-card .buttons button {
+  border-radius: 7px; padding: 5px 12px; font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--line);
+  background: var(--card); color: var(--text);
+}
+.speaker-card .buttons .primary { background: var(--coral-deep); color: var(--on-coral); border-color: transparent; }

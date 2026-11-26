@@ -9,6 +9,7 @@
 
 pub mod check;
 pub mod cleanup;
+pub mod numbers;
 pub mod keys;
 pub mod output;
 pub mod stream;

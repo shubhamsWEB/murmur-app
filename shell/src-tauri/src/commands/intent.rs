@@ -57,6 +57,8 @@ pub struct Situation<'a> {
     pub forced_command: bool,
     pub focus: Focus,
     pub front_app: Option<&'a str>,
+    /// The front window's title when the key went down (another AI's page in a browser: what you say is typed).
+    pub window_title: Option<&'a str>,
     pub has_selection: bool,
     /// Seconds since the last command.
     pub since_last: Option<f64>,
@@ -178,6 +180,39 @@ fn selection_instruction(utterance: &str) -> Option<bool> {
     None
 }
 
+// MARK: Typed whatever it says
+
+/// Apps (by their program's name) where you talk to another AI: what you say into their text box is for that AI,
+/// however much it sounds like an instruction ("check if the onboarding covers it", "update the website and release
+/// it"). Not the terminals: there "build me an app" starts Claude Code, as it always has.
+const OTHER_AIS: &[&str] = &["claude", "chatgpt", "cursor", "codex", "windsurf", "gemini", "perplexity", "copilot", "code",
+                             "visual studio code", "zed", "kiro", "antigravity", "lm studio", "msty", "jan"];
+
+/// Why a dictation into a text box is typed whatever it says, or None: it's in another AI's box (the app, or its page
+/// in a browser, by the window's title), or it's long (a command for Murmur is a sentence or two). Saying "Murmur, …"
+/// or holding Alt still makes it a command. As the Mac's `IntentClassifier.typed`.
+pub fn typed(utterance: &str, focus: Focus, front_app: Option<&str>, window_title: Option<&str>, apps: &dyn Apps) -> Option<String> {
+    if focus != Focus::TextField || wake::strip(utterance).is_some() {
+        return None;
+    }
+    let words = quick::clean(utterance).split_whitespace().count();
+    // A short known command ("open Slack", "volume 30") is still for Murmur, wherever you are.
+    if words <= 6 && quick::parse_all(utterance, apps).is_some() {
+        return None;
+    }
+    let app = front_app.unwrap_or_default().to_lowercase();
+    if OTHER_AIS.contains(&app.as_str()) {
+        return Some(format!("in {}'s text box", front_app.unwrap_or("another AI")));
+    }
+    static TITLES: OnceLock<Regex> = OnceLock::new();
+    if let Some(title) = window_title {
+        if matches(&TITLES, r"(?i)\b(claude|chatgpt|gemini|perplexity|copilot|deepseek|grok|mistral le chat|meta ai)\b", title) {
+            return Some(format!("in another AI's text box ({})", title.chars().take(40).collect::<String>()));
+        }
+    }
+    (words > 25).then(|| format!("{words} words into a text box"))
+}
+
 // MARK: Deciding
 
 /// Command or dictation, with why. `router`: the model asked when the words alone don't settle it (none: typed).
@@ -192,6 +227,9 @@ pub async fn decide(utterance: &str, at: &Situation<'_>, apps: &dyn Apps, router
     // Text selected and "summarise this", "make it more formal", "translate this to Hindi".
     if at.has_selection && is_about_selection(utterance) {
         return Decision::command("an instruction about the selected text");
+    }
+    if let Some(reason) = typed(utterance, at.focus, at.front_app, at.window_title, apps) {
+        return Decision::dictation(&reason);
     }
     let quick_actions = quick::parse_all(utterance, apps);
     // "my photos from Goa are amazing" in a message is text; "find my photos…" is a search anywhere.
@@ -284,7 +322,7 @@ mod tests {
     }
 
     fn decide_now(text: &str, focus: Focus, selection: bool) -> Decision {
-        let at = Situation { forced_command: false, focus, front_app: Some("notepad"), has_selection: selection, since_last: None };
+        let at = Situation { forced_command: false, focus, front_app: Some("notepad"), window_title: None, has_selection: selection, since_last: None };
         crate::ai::blocking(decide(text, &at, &These(&["slack", "spotify", "notepad"]), None))
     }
 
@@ -303,7 +341,7 @@ mod tests {
         assert_eq!(intent("open notepad and write a shopping list"), Intent::Command);
         assert_eq!(intent("what's on my screen"), Intent::Command);
         assert_eq!(decide_now("summarise this", Focus::TextField, true).intent, Intent::Command);
-        let forced = Situation { forced_command: true, focus: Focus::TextField, front_app: None, has_selection: false, since_last: None };
+        let forced = Situation { forced_command: true, focus: Focus::TextField, front_app: None, window_title: None, has_selection: false, since_last: None };
         assert_eq!(crate::ai::blocking(decide("see you soon", &forced, &These(&[]), None)).reason, "Alt held");
     }
 
@@ -317,6 +355,26 @@ mod tests {
         let d = decide_now("check the numbers before Friday", Focus::TextField, false);
         assert_eq!(d.intent, Intent::Dictation);
         assert!(d.reason.contains("no model"));
+    }
+
+    /// The Mac's TypedIntoAnotherAITests.
+    #[test]
+    fn typed_into_another_ai_or_at_length() {
+        let apps = These(&["slack"]);
+        let long = "Check if the new functionality is working as expected and also the onboarding flow covers that as \
+            well. So I found one gap in the onboarding right now everything is perfect but it's just that let's say if \
+            we want to actually show how the one tap feature works there is no actual UI to show";
+        let typed = |text: &str, focus, app, title| typed(text, focus, Some(app), title, &apps).is_some();
+        assert!(typed("Ab jo murmur ki website hai usko bhi update kar do aur release karo", Focus::TextField, "Claude", Some("Claude")));
+        assert!(typed("Start with P2 P1 and complete all the tasks in version 1.3", Focus::TextField, "claude", None));
+        assert!(typed("summarise what we decided", Focus::TextField, "chrome", Some("Claude - Murmur website - Google Chrome")));
+        assert!(typed("fix the failing test", Focus::TextField, "Cursor", None));
+        assert!(typed(long, Focus::TextField, "slack", None));
+        // Named, a short known command, nowhere to type, or short in an ordinary app: the usual rules decide.
+        assert!(!typed("Murmur, open Slack", Focus::TextField, "Claude", None));
+        assert!(!typed("open Slack", Focus::TextField, "Claude", None));
+        assert!(!typed(long, Focus::NotText, "explorer", None));
+        assert!(!typed("check my messages from Priya", Focus::TextField, "slack", None));
     }
 
     #[test]

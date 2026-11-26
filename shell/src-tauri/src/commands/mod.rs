@@ -299,10 +299,18 @@ impl Assistant {
     /// grammar-fixed version of it.
     pub fn clean_up(&self, text: &str, program: Option<&str>, title: Option<&str>, log: &dyn Fn(&str)) -> Option<String> {
         let choices = self.choices();
+        // AI clean-up writes numbers as digits, whatever the model does: "version one point three" → "version 1.3"
+        // (Sarvam writes them out in words, and the model is told to leave them).
+        let numbered = if choices.cleanup { ai::numbers::digits(text) } else { text.to_string() };
+        let as_heard = (numbered != text).then(|| {
+            log("dictation: numbers written as digits");
+            numbered.clone()
+        });
+        let text = numbered.as_str();
         let tidy = choices.cleanup && cleanup::worth_cleaning(text);
         let grammar = choices.grammar && cleanup::worth_fixing(text);
         if !tidy && !grammar {
-            return None;
+            return as_heard;
         }
         let category = cleanup::category(program, title);
         let style = self.style(category);
@@ -332,12 +340,12 @@ impl Assistant {
                 if own {
                     *self.own_cleanup.lock().unwrap() = (None, None);
                 }
-                None
+                as_heard
             }
             Ok(reply) => match cleanup::accept(text, &ai::output::answer(&reply.text), tidy, grammar) {
                 None => {
                     log(&format!("{job} ({what}) changed more than it may in {took:.1} s: typed as heard"));
-                    None
+                    as_heard
                 }
                 Some(cleaned) => {
                     log(&format!("{job} ({what}) in {took:.1} s{}", if cleaned == text { ", nothing to change" } else { "" }));
@@ -349,7 +357,7 @@ impl Assistant {
 
     // MARK: Command or dictation
 
-    pub fn decide(&self, text: &str, spot: &Spot, front_app: Option<&str>, forced: bool) -> intent::Decision {
+    pub fn decide(&self, text: &str, spot: &Spot, front_app: Option<&str>, window_title: Option<&str>, forced: bool) -> intent::Decision {
         let choices = self.choices();
         if !choices.detect {
             return if forced {
@@ -371,6 +379,7 @@ impl Assistant {
             forced_command: forced,
             focus,
             front_app,
+            window_title,
             has_selection: spot.selection.is_some(),
             since_last: self.memory.since_last(),
         };

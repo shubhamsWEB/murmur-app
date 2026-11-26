@@ -17,7 +17,9 @@ pub const OPENAI_MODEL: &str = "gpt-4o-mini-transcribe";
 /// The longest piece sent to Sarvam, in seconds (under its 30, with room to spare), and the earliest point in a
 /// piece's last stretch where a cut may go (the quietest moment between the two).
 const MAX_SECONDS: f64 = 28.0;
-const EARLIEST_CUT: f64 = 20.0;
+const EARLIEST_CUT: f64 = 15.0;
+/// Silence before and after each piece: a speech model drops a word that starts or ends right at the edge of its audio.
+const EDGE_SILENCE: f64 = 0.3;
 
 /// How Sarvam writes what you say. In English letters unless chosen otherwise: people type Hindi and Hinglish in
 /// English letters (as the Hinglish model writes it).
@@ -102,7 +104,7 @@ pub async fn sarvam(samples: &[f32], rate: u32, choice: &Sarvam) -> Result<Strin
     fields.push(("language_code", language));
     // The pieces go together, and are put back in order.
     let handles: Vec<_> = ranges.into_iter().map(|range| {
-        let wav = wav(&audio[range], 16_000);
+        let wav = wav_padded(&audio[range], 16_000, EDGE_SILENCE);
         let fields = fields.clone();
         let key = key.clone();
         tauri::async_runtime::spawn(async move {
@@ -181,7 +183,8 @@ pub fn to_16k(samples: &[f32], rate: u32) -> Vec<f32> {
 }
 
 /// The pieces of `samples` (at `rate`) for Sarvam, in order, covering all of it: each at most 28 seconds, cut at the
-/// quietest 100 ms between 20 and 28 seconds in.
+/// quietest 100 ms between 15 and 28 seconds in (from 15, so there's
+/// nearly always a real pause to cut at, not the middle of a word).
 pub fn pieces(samples: &[f32], rate: f64) -> Vec<std::ops::Range<usize>> {
     let longest = (MAX_SECONDS * rate) as usize;
     let earliest = (EARLIEST_CUT * rate) as usize;
@@ -232,6 +235,15 @@ pub fn wav(samples: &[f32], rate: u32) -> Vec<u8> {
     data
 }
 
+/// The same, with `edge` seconds of silence before and after.
+pub fn wav_padded(samples: &[f32], rate: u32, edge: f64) -> Vec<u8> {
+    let pad = (edge * rate as f64) as usize;
+    let mut padded = vec![0.0f32; pad];
+    padded.extend_from_slice(samples);
+    padded.resize(padded.len() + pad, 0.0);
+    wav(&padded, rate)
+}
+
 /// A multipart/form-data body: the text fields, then the file.
 pub fn form(boundary: &str, fields: &[(&str, String)], file: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(file.len() + 512);
@@ -264,6 +276,17 @@ mod tests {
         let first = cut[0].end as f64 / 16_000.0;
         assert!((24.0..24.3).contains(&first), "cut in the pause: {first}");
         assert!(cut.iter().all(|r| r.len() <= 16_000 * 28));
+    }
+
+    /// Each piece goes with silence before and after, so a word at its edge isn't dropped, and stays under 30 s.
+    #[test]
+    fn each_piece_has_silence_at_its_edges() {
+        let wav = wav_padded(&[0.5, 0.5], 16_000, 0.3);
+        let pad = (0.3 * 16_000.0) as usize;
+        assert_eq!(wav.len(), 44 + (2 + 2 * pad) * 2);
+        let sample = |at: usize| i16::from_le_bytes([wav[at], wav[at + 1]]);
+        assert!(sample(44) == 0 && sample(44 + pad * 2) > 0);
+        assert!(MAX_SECONDS + 2.0 * EDGE_SILENCE < 30.0);
     }
 
     #[test]

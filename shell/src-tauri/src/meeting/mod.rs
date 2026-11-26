@@ -18,7 +18,9 @@ pub mod detect;
 pub mod documents;
 pub mod screen;
 pub mod segmenter;
+pub mod speakers;
 pub mod text;
+pub mod voices;
 
 use crate::ai::{self, output, stream::Picture, Provider};
 use crate::commands::Assistant;
@@ -27,6 +29,8 @@ use crate::settings::Settings;
 use segmenter::Segmenter;
 use serde::Serialize;
 use serde_json::{json, Value};
+use speakers::{Source, VoiceName};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -144,6 +148,22 @@ struct State {
     next_answer_id: u64,
     heard_call: bool,
     speech: String,
+    // Who's speaking (voices.rs, speakers.rs).
+    /// Every turn's voiceprint, grouped into the call's voices.
+    clusters: voices::Clusters,
+    /// The voices on show and their numbers ("Speaker 2").
+    numbers: HashMap<u32, u32>,
+    names: HashMap<u32, VoiceName>,
+    /// The voices found among the ones you saved, and which saved voice each is.
+    matched: HashMap<u32, u64>,
+    /// The names heard in the meeting, offered when you name a voice.
+    people: Vec<String>,
+    /// What your microphone heard for each of your lines, before the call's words were taken out of it.
+    mic_heard: HashMap<u64, String>,
+    lines_at_names: usize,
+    naming: bool,
+    /// When anything was last said (a meeting nobody's speaking in ends itself).
+    last_words: Instant,
 }
 
 impl State {
@@ -156,7 +176,9 @@ impl State {
             turn_changed: Instant::now(), turn_revision: 0, checked_revision: None, checking: false, last_verdict: None,
             answered_turn: vec![], answered_at: None, answering: false, replace_next: false, lines_at_notes: 0,
             last_notes: Instant::now(), notes_running: false, automatic: false, mic_free_since: None, next_id: 0,
-            next_answer_id: 0, heard_call: false, speech: String::new(),
+            next_answer_id: 0, heard_call: false, speech: String::new(), clusters: voices::Clusters::new(),
+            numbers: HashMap::new(), names: HashMap::new(), matched: HashMap::new(), people: vec![],
+            mic_heard: HashMap::new(), lines_at_names: 0, naming: false, last_words: Instant::now(),
         }
     }
 
@@ -221,10 +243,10 @@ impl Feed {
             if !inner.sound && samples.iter().any(|s| s.abs() > 1e-5) {
                 inner.sound = true;
             }
-            inner.segmenter.add(samples)
+            inner.segmenter.add_timed(samples)
         };
-        for piece in done {
-            self.deliver(piece);
+        for (piece, after) in done {
+            self.deliver(piece, after);
         }
     }
 
@@ -238,7 +260,7 @@ impl Feed {
             if inner.muted { None } else { inner.segmenter.flush() }
         };
         if let Some(last) = last {
-            self.deliver(last);
+            self.deliver(last, 0);
         }
     }
 
@@ -264,8 +286,9 @@ impl Feed {
         self.inner.lock().unwrap().sound
     }
 
-    fn deliver(&self, samples: Vec<f32>) {
-        let at = now() - samples.len() as f64 / self.rate as f64;
+    /// `after`: the samples heard since the piece ended (the pause that ended it), so `at` is when it began.
+    fn deliver(&self, samples: Vec<f32>, after: usize) {
+        let at = now() - (samples.len() + after) as f64 / self.rate as f64;
         let _ = self.send.send(Piece { speaker: self.speaker, samples, rate: self.rate, at });
     }
 }
@@ -303,20 +326,65 @@ pub struct Meeting {
     sent: Mutex<(Instant, bool)>,
     /// The ticker running now (a meeting started again soon after one stopped has a new one; the old one ends).
     ticks: AtomicU64,
+    /// The models that tell the call's voices apart, once they're downloaded and loaded (None: everyone's "Them").
+    voices: Mutex<Option<Arc<voices::Models>>>,
+    voices_loading: AtomicBool,
+    /// The voices you asked Murmur to remember.
+    library: Mutex<voices::Library>,
 }
+
+/// The call's voices as the panel lists them: each voice with a line, what it's shown as, its name and its source.
+fn voices_shown(state: &State) -> Vec<Value> {
+    let mut seen: Vec<u32> = Vec::new();
+    let mut out = Vec::new();
+    for line in state.lines.iter().filter(|l| l.speaker == Speaker::Them) {
+        let Some(voice) = line.voice else { continue };
+        if seen.contains(&voice) {
+            continue;
+        }
+        seen.push(voice);
+        let name = state.names.get(&voice);
+        let (seconds, turns) = state.clusters.heard(voice);
+        out.push(json!({
+            "voice": voice, "label": line.who, "name": name.map(|n| n.name.clone()).unwrap_or_default(),
+            "source": name.map(|n| n.source), "evidence": name.and_then(|n| n.evidence.clone()),
+            "canRemember": seconds >= voices::FEWEST_SECONDS && turns >= voices::FEWEST_TURNS,
+            "saved": state.matched.contains_key(&voice),
+        }));
+    }
+    out
+}
+
+/// Names to offer when you name a voice: the people heard in the meeting, then the voices you saved; none that's
+/// already on a voice.
+fn people_offered(state: &State, library: &voices::Library) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let taken: Vec<String> = state.names.values().map(|n| n.name.to_lowercase()).collect();
+    for name in state.people.iter().chain(library.profiles.iter().map(|p| &p.name)) {
+        let lower = name.to_lowercase();
+        if !taken.contains(&lower) && !out.iter().any(|have| have.to_lowercase() == lower) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// A meeting with nothing said for this long ends itself (unless that's turned off).
+const QUIET_END: Duration = Duration::from_secs(600);
 
 fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 impl Meeting {
-    pub fn new(app: &AppHandle, logs: &std::path::Path, store: Store) -> Arc<Meeting> {
+    pub fn new(app: &AppHandle, logs: &std::path::Path, data: &std::path::Path, store: Store) -> Arc<Meeting> {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(logs.join("meeting.log")).ok();
         let meeting = Arc::new(Meeting {
             app: app.clone(), store, state: Mutex::new(State::new()), sound: Mutex::new(None),
             generation: AtomicU64::new(0), worker: Mutex::new(None), watching: AtomicBool::new(false),
             offered: Mutex::new((None, None)), log: Mutex::new(log), sent: Mutex::new((Instant::now(), false)),
-            ticks: AtomicU64::new(0),
+            ticks: AtomicU64::new(0), voices: Mutex::new(None), voices_loading: AtomicBool::new(false),
+            library: Mutex::new(voices::Library::load(data.join("voices.json"))),
         });
         meeting.state.lock().unwrap().auto_answer = !(meeting.store.read)().meeting_auto_answer_off;
         meeting.watch();
@@ -526,6 +594,7 @@ impl Meeting {
         sound.call = call_feed.lock().unwrap().take();
         *self.sound.lock().unwrap() = Some(sound);
         register_hotkey(&self.app, true);
+        self.prepare_voices();
         self.ticker();
         self.show_panel();
         let (app_name, router) = (self.state.lock().unwrap().app_name.clone(), self.ai_name());
@@ -563,6 +632,7 @@ impl Meeting {
         let sound = self.sound.lock().unwrap().take();
         let worker = self.worker.lock().unwrap().take();
         self.changed();
+        let _ = self.app.emit("meeting-running", false);
         let meeting = self.clone();
         std::thread::spawn(move || {
             // What was still being said goes in, then the last notes.
@@ -595,6 +665,8 @@ impl Meeting {
             }
             let has_lines = !meeting.state.lock().unwrap().lines.is_empty();
             if has_lines {
+                // The last look for people who said their own name, so the notes and the saved transcript have it.
+                meeting.guess_names(true);
                 meeting.write_notes(true);
                 meeting.save();
             }
@@ -636,6 +708,12 @@ impl Meeting {
         // A change waiting to go to the panel (it's sent at most a few times a second).
         if self.sent.lock().unwrap().1 {
             self.changed();
+        }
+        // Nobody has said anything for ten minutes: the call is over, or was never one.
+        if self.state.lock().unwrap().last_words.elapsed() >= QUIET_END && !self.settings().meeting_stay_when_quiet {
+            self.note("nothing said for ten minutes: ending");
+            self.stop();
+            return;
         }
         let mut state = self.state.lock().unwrap();
         if !state.auto_answer || state.turn.is_empty() || state.answering || state.checking {
@@ -736,13 +814,28 @@ impl Meeting {
 
     fn transcribe(self: &Arc<Self>, piece: Piece) {
         let speech = self.state.lock().unwrap().speech.clone();
-        let local = || -> Result<String, String> {
+        // The call's side: where one voice stops and another starts inside this stretch (one turn when it's one voice).
+        let models = if piece.speaker == Speaker::Them { self.voices.lock().unwrap().clone() } else { None };
+        let heard = models.as_ref().map(|_| cloud::to_16k(&piece.samples, piece.rate));
+        let turns = match (&models, &heard) {
+            (Some(models), Some(heard)) => models.turns(heard),
+            _ => Vec::new(),
+        };
+        let mut timed: Option<Vec<voices::TimedWord>> = None;
+        let mut local = || -> Result<String, String> {
             let dictation = self.app.state::<Dictation>();
             let Some(engine) = dictation.engine() else {
                 dictation.ensure_loaded();
                 return Err("The speech model isn't ready yet. Set it up under Settings › Dictation.".into());
             };
             let leveled = level::normalize_with(&piece.samples, piece.rate as f32, 30.0, true);
+            // Two people in it: the words with their times, so each goes to the one who said it.
+            if turns.len() > 1 {
+                if let Some((words, times)) = engine.timed(&leveled.samples, piece.rate) {
+                    timed = Some(times.into_iter().map(|(text, start, end)| voices::TimedWord { text, start, end }).collect());
+                    return Ok(words);
+                }
+            }
             engine.words(&leveled.samples, piece.rate)
         };
         let result = match speech.as_str() {
@@ -778,40 +871,277 @@ impl Meeting {
         if !text::is_worth_keeping(&words) {
             return;
         }
-        self.add(piece.speaker, words, piece.at);
+        let length = piece.samples.len() as f64 / piece.rate as f64;
+        let print = |from: f64, to: f64| -> Option<Vec<f32>> {
+            let (models, heard) = (models.as_ref()?, heard.as_ref()?);
+            let rate = voices::RATE as f64;
+            let (a, b) = (((from * rate) as usize).min(heard.len()), ((to * rate) as usize).min(heard.len()));
+            models.print(&heard[a..b])
+        };
+        if turns.len() > 1 {
+            // Transcribed once, whole; each turn gets the words said in it.
+            let cuts: Vec<f64> = turns[..turns.len() - 1].iter().map(|turn| turn.end).collect();
+            let parts = timed.as_ref().and_then(|timed| voices::texts(timed, &cuts, &words))
+                .unwrap_or_else(|| voices::texts_by_share(&words, &turns));
+            if parts.len() == turns.len() {
+                self.note(&format!("{} people in one stretch of {length:.0} s: cut where the voice changes", turns.len()));
+                for (turn, part) in turns.iter().zip(parts) {
+                    if text::is_worth_keeping(&part) {
+                        self.add(piece.speaker, part, piece.at + turn.start, piece.at + turn.end, print(turn.start, turn.end));
+                    }
+                }
+                return;
+            }
+        }
+        let whole = print(0.0, length);
+        self.add(piece.speaker, words, piece.at, piece.at + length, whole);
     }
 
-    fn add(self: &Arc<Self>, speaker: Speaker, words: String, at: f64) {
+    /// `print`: the voiceprint of who said it (the call's side, when the voice models are in).
+    fn add(self: &Arc<Self>, speaker: Speaker, words: String, at: f64, end: f64, print: Option<Vec<f32>>) {
+        let mut guess = false;
         {
             let mut state = self.state.lock().unwrap();
-            if speaker == Speaker::Them {
-                state.heard_call = true;
-            }
             let id = state.next_id;
             state.next_id += 1;
-            let line = Line { id, speaker, text: words, at };
-            let recent: Vec<Line> = state.lines.iter().filter(|l| (l.at - at).abs() < 25.0).cloned().collect();
+            let mut line = Line::new(id, speaker, words, at, end);
             match speaker {
-                // On speakers, your microphone hears the call too: that isn't you speaking.
+                // On speakers, your microphone hears the call too: that isn't you speaking. It's compared with all they
+                // said while it was being heard, not one of their lines: the microphone cuts elsewhere than the call.
                 Speaker::You => {
-                    if recent.iter().any(|l| l.speaker == Speaker::Them && text::is_echo(&line.text, &l.text)) {
+                    let theirs: Vec<String> = text::during(&line, &state.lines).iter().map(|l| l.text.clone()).collect();
+                    let theirs: Vec<&str> = theirs.iter().map(String::as_str).collect();
+                    let Some(yours) = text::without_echo(&line.text, &theirs) else {
+                        drop(state);
+                        self.note("your microphone picked up the call (speakers?): left out");
                         return;
+                    };
+                    state.mic_heard.insert(id, line.text.clone());
+                    if yours != line.text {
+                        self.note("your microphone picked up the call under your words: their part left out");
+                        line.text = yours;
                     }
                 }
                 Speaker::Them => {
-                    let echoes: Vec<u64> = recent.iter().filter(|l| l.speaker == Speaker::You && text::is_echo(&l.text, &line.text))
-                        .map(|l| l.id).collect();
-                    state.lines.retain(|l| !echoes.contains(&l.id));
+                    state.heard_call = true;
+                    if let Some(print) = print {
+                        line.stretch = Some(state.clusters.add(print, end - at));
+                    }
                 }
             }
-            state.lines.push(line.clone());
+            // Lines stay in the order they were said: a long stretch finishes after shorter ones that began later.
+            let index = state.lines.iter().rposition(|l| l.at <= line.at).map_or(0, |i| i + 1);
+            state.lines.insert(index, line.clone());
+            state.lines_at_notes = state.lines_at_notes.min(index);
             if speaker == Speaker::Them {
+                // What your microphone heard of this, written down before their line was, goes now.
+                let yours: Vec<Line> = state.lines.iter()
+                    .filter(|l| l.speaker == Speaker::You && l.end >= line.at - text::ECHO_SLACK && l.at <= line.end + text::ECHO_SLACK)
+                    .cloned().collect();
+                for mine in yours {
+                    let heard = state.mic_heard.get(&mine.id).cloned().unwrap_or_else(|| mine.text.clone());
+                    let theirs: Vec<String> = text::during(&mine, &state.lines).iter().map(|l| l.text.clone()).collect();
+                    let theirs: Vec<&str> = theirs.iter().map(String::as_str).collect();
+                    let rest = text::without_echo(&heard, &theirs);
+                    if rest.as_deref() == Some(mine.text.as_str()) {
+                        continue;
+                    }
+                    let Some(at) = state.lines.iter().position(|l| l.id == mine.id) else { continue };
+                    match rest {
+                        Some(rest) => state.lines[at].text = rest,
+                        None => {
+                            state.lines.remove(at);
+                            if at < state.lines_at_notes {
+                                state.lines_at_notes -= 1;
+                            }
+                            if at < state.lines_at_names {
+                                state.lines_at_names -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+            state.last_words = Instant::now();
+            self.refresh_speakers(&mut state);
+            if speaker == Speaker::Them {
+                let line = state.lines.iter().find(|l| l.id == id).cloned().unwrap_or(line);
                 self.join_turn(&mut state, line);
+            }
+            if state.lines.len().saturating_sub(state.lines_at_names) >= 20 && !state.answering {
+                guess = true;
             }
         }
         let _ = self.app.emit_to(PANEL, "meeting-lines", ());
         self.changed();
+        if guess {
+            self.guess_names(false);
+        }
         self.write_notes_if_due();
+    }
+
+    // MARK: Who's speaking
+
+    /// The voice models, loaded in the background when a meeting starts (downloaded the first time: 32 MB). Until
+    /// they're in, the other side is "Them".
+    fn prepare_voices(self: &Arc<Self>) {
+        if self.voices.lock().unwrap().is_some() || self.voices_loading.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let meeting = self.clone();
+        std::thread::Builder::new().name("murmur-meeting-voices".into()).spawn(move || {
+            let loaded = (|| -> Result<voices::Models, String> {
+                let folder = voices::folder().ok_or("no folder for the voice models")?;
+                if !voices::installed(&folder) {
+                    meeting.note("voices: downloading the models that tell speakers apart (32 MB, once)");
+                    ai::blocking(voices::download(&folder))?;
+                }
+                voices::Models::load(&folder)
+            })();
+            match loaded {
+                Ok(models) => {
+                    *meeting.voices.lock().unwrap() = Some(Arc::new(models));
+                    meeting.note("voices: ready (speakers are told apart on this PC)");
+                }
+                Err(error) => meeting.note(&format!("voices: not available ({error}); the other side stays \"Them\"")),
+            }
+            meeting.voices_loading.store(false, Ordering::SeqCst);
+        }).ok();
+    }
+
+    /// Every line's voice as the meeting is grouped now, saved voices recognised, and what each line is shown as.
+    fn refresh_speakers(&self, state: &mut State) {
+        for index in 0..state.lines.len() {
+            if let Some(stretch) = state.lines[index].stretch {
+                state.lines[index].voice = state.clusters.voice(stretch);
+            }
+        }
+        // A voice heard enough that's plainly one you saved carries that name (yours for it, if you gave one, stays).
+        let voices: HashSet<u32> = state.lines.iter().filter_map(|l| l.voice).collect();
+        let mut library = self.library.lock().unwrap();
+        for voice in voices {
+            if state.names.get(&voice).is_some_and(|name| name.source >= Source::Library) {
+                continue;
+            }
+            let (seconds, turns) = state.clusters.heard(voice);
+            if seconds < voices::FEWEST_SECONDS || turns < voices::FEWEST_TURNS {
+                continue;
+            }
+            let Some(print) = state.clusters.centroid(voice) else { continue };
+            let Some((profile, score)) = library.who(&print).map(|(profile, score)| (profile.clone(), score)) else { continue };
+            // One saved voice is one person here: the voice that's most like it keeps the name.
+            if state.matched.values().any(|id| *id == profile.id) {
+                continue;
+            }
+            self.note(&format!("voices: voice {voice} is a saved voice ({:.2} alike)", score));
+            state.names.insert(voice, VoiceName { name: profile.name.clone(), source: Source::Library, evidence: None });
+            state.matched.insert(voice, profile.id);
+            library.seen(profile.id, now());
+        }
+        drop(library);
+        state.numbers = speakers::relabel(&mut state.lines, &state.names);
+    }
+
+    /// Asks the meeting's AI for the names in what's said, when some voice on show has no name of yours or saved. A
+    /// voice is named only when it says its own name on its own line (`speakers::read`); the other names heard are
+    /// offered when you name someone. `wait`: at the end of the meeting, before the notes are written.
+    fn guess_names(self: &Arc<Self>, wait: bool) {
+        let (content, router) = {
+            let mut state = self.state.lock().unwrap();
+            if state.naming {
+                return;
+            }
+            let Some(content) = speakers::content(&state.lines, &state.numbers, &state.names, state.started) else { return };
+            state.naming = true;
+            state.lines_at_names = state.lines.len();
+            (content, self.router())
+        };
+        if router.is_local() && !ai::ollama_installed() {
+            self.state.lock().unwrap().naming = false;
+            return;
+        }
+        let meeting = self.clone();
+        let ask = move || {
+            let reply = ai::blocking(router.write(speakers::INSTRUCTION, &content, None, 600, true, &mut |_| {}, &|| false));
+            let mut state = meeting.state.lock().unwrap();
+            state.naming = false;
+            let Ok(reply) = reply else { return };
+            let reply = output::answer(&reply);
+            let (found, refuted) = speakers::read(&reply, &state.lines, &state.numbers, state.started);
+            for voice in refuted {
+                if state.names.get(&voice).is_some_and(|name| name.source == Source::Conversation) {
+                    state.names.remove(&voice);
+                }
+            }
+            for (voice, name) in found {
+                meeting.note(&format!("voices: voice {voice} said their own name ({})", name.evidence.clone().unwrap_or_default()));
+                let merged = VoiceName::merge(state.names.get(&voice), name);
+                state.names.insert(voice, merged);
+            }
+            for person in speakers::people(&reply) {
+                if !state.people.iter().any(|have| have.to_lowercase() == person.to_lowercase()) {
+                    state.people.push(person);
+                }
+            }
+            meeting.refresh_speakers(&mut state);
+            drop(state);
+            meeting.changed();
+        };
+        if wait {
+            ask();
+        } else {
+            std::thread::spawn(ask);
+        }
+    }
+
+    /// You named a voice (or, with an empty name, said the name on it is wrong). `remember`: saved, so Murmur knows
+    /// the voice in later meetings.
+    fn name_voice(self: &Arc<Self>, voice: u32, name: &str, remember: bool) -> Result<(), String> {
+        let name = name.trim();
+        let mut state = self.state.lock().unwrap();
+        state.names.insert(voice, VoiceName { name: name.to_string(), source: Source::User, evidence: None });
+        if name.is_empty() {
+            state.matched.remove(&voice);
+        }
+        let mut result = Ok(());
+        if remember && !name.is_empty() {
+            let (seconds, turns) = state.clusters.heard(voice);
+            match state.clusters.centroid(voice) {
+                Some(print) if seconds >= voices::FEWEST_SECONDS && turns >= voices::FEWEST_TURNS => {
+                    self.library.lock().unwrap().remember(name, &print, turns, now());
+                    self.note(&format!("voices: voice {voice} saved ({turns} turns, {seconds:.0} s)"));
+                }
+                _ => result = Err("Murmur hasn't heard enough of this voice to remember it yet. Try again later in the call.".to_string()),
+            }
+        }
+        self.refresh_speakers(&mut state);
+        drop(state);
+        self.changed();
+        let _ = self.app.emit("meeting-people", ());
+        result
+    }
+
+    /// You said two voices are one person: `from`'s lines are `into`'s, now and as the meeting goes on.
+    fn merge_voices(self: &Arc<Self>, from: u32, into: u32) {
+        let mut state = self.state.lock().unwrap();
+        state.clusters.merge(from, into);
+        if let Some(name) = state.names.remove(&from) {
+            if !state.names.contains_key(&into) {
+                state.names.insert(into, name);
+            }
+        }
+        state.matched.remove(&from);
+        self.refresh_speakers(&mut state);
+        drop(state);
+        self.note(&format!("voices: voice {from} is voice {into} (you said so)"));
+        self.changed();
+    }
+
+    /// The voices you saved, for Meetings › People: newest seen first.
+    pub fn people(&self) -> Value {
+        let library = self.library.lock().unwrap();
+        let mut profiles: Vec<&voices::Profile> = library.profiles.iter().collect();
+        profiles.sort_by(|a, b| b.last_seen.total_cmp(&a.last_seen));
+        json!(profiles.iter().map(|p| json!({"id": p.id, "name": p.name, "samples": p.samples, "lastSeen": p.last_seen})).collect::<Vec<_>>())
     }
 
     fn join_turn(&self, state: &mut State, line: Line) {
@@ -1106,10 +1436,12 @@ impl Meeting {
                 if !state.notes.is_empty() {
                     prompt += &format!("Notes taken during the meeting:\n{}\n\n", state.notes);
                 }
+                prompt += &speakers::note(&state.lines);
                 prompt += &format!("The whole meeting (newest last):\n{}\n\nThe meeting has ended. Write the final notes from \
                                     the whole meeting, with a title line (# …) naming what it was actually about.",
                                    text::transcript(substantive.iter(), 30_000));
             } else {
+                prompt += &speakers::note(&state.lines);
                 prompt += &if state.notes.is_empty() { "No notes yet.\n\n".to_string() } else { format!("Notes so far:\n{}\n\n", state.notes) };
                 if !earlier.is_empty() {
                     let tail = &earlier[earlier.len().saturating_sub(6)..];
@@ -1122,7 +1454,8 @@ impl Meeting {
             prompt
         };
         self.changed();
-        let reply = ai::blocking(router.write(NOTES_SYSTEM, &prompt, None, 3_000, true, &mut |_| {}, &|| false));
+        // The final notes have room for a long meeting.
+        let reply = ai::blocking(router.write(NOTES_SYSTEM, &prompt, None, if last { 8_000 } else { 3_000 }, true, &mut |_| {}, &|| false));
         let mut state = self.state.lock().unwrap();
         state.writing_notes = false;
         match reply {
@@ -1161,7 +1494,7 @@ impl Meeting {
         let name = format!("{y:04}-{mo:02}-{d:02} {h:02}.{mi:02} {app}.md").replace(['/', '\\', ':'], "-");
         let mut body = if state.notes.is_empty() { "# Meeting notes\n".to_string() } else { state.notes.clone() };
         body += "\n\n## Transcript\n\n";
-        body += &state.lines.iter().map(|l| format!("**{} {}:** {}", text::clock_seconds(l.at), l.speaker.name(), l.text))
+        body += &state.lines.iter().map(|l| format!("**{} {}:** {}", text::clock_seconds(l.at), l.who, l.text))
             .collect::<Vec<_>>().join("\n\n");
         body += "\n";
         let path = folder.join(name);
@@ -1247,7 +1580,11 @@ impl Meeting {
             "started": state.started,
             // The latest 400 (the saved file has them all).
             "lines": state.lines[state.lines.len().saturating_sub(400)..].iter().map(|l| json!({"id": l.id,
-                "speaker": l.speaker.name(), "text": l.text, "time": text::clock(l.at)})).collect::<Vec<_>>(),
+                "speaker": l.who, "side": l.speaker.name(), "voice": l.voice, "text": l.text, "time": text::clock(l.at)})).collect::<Vec<_>>(),
+            // The call's voices, for naming them: what each is shown as, its name and where that came from.
+            "voices": voices_shown(&state),
+            "people": people_offered(&state, &self.library.lock().unwrap()),
+            "stayWhenQuiet": settings.meeting_stay_when_quiet,
             "lineCount": state.lines.len(),
             "answers": state.answers,
             "shown": state.shown,
@@ -1328,6 +1665,26 @@ impl Meeting {
             "instructions" => self.edit(|s| s.meeting_instructions = text.clone()),
             "about" => self.state.lock().unwrap().about = text,
             "offers" => self.edit(|s| s.meeting_offer_off = !flag),
+            "stayWhenQuiet" => self.edit(|s| s.meeting_stay_when_quiet = flag),
+            // {voice, name, remember}: a voice named by you (an empty name: "not them").
+            "nameVoice" => {
+                let voice = value["voice"].as_u64().ok_or("which voice?")? as u32;
+                return self.name_voice(voice, value["name"].as_str().unwrap_or_default(), value["remember"].as_bool().unwrap_or(false));
+            }
+            // {from, into}: two voices that are one person.
+            "mergeVoices" => {
+                let (Some(from), Some(into)) = (value["from"].as_u64(), value["into"].as_u64()) else { return Err("which voices?".into()) };
+                self.merge_voices(from as u32, into as u32);
+            }
+            // A saved voice forgotten, or renamed ({id, name}), from Meetings › People.
+            "forgetPerson" => {
+                self.library.lock().unwrap().forget(value.as_u64().ok_or("which person?")?);
+                let _ = self.app.emit("meeting-people", ());
+            }
+            "renamePerson" => {
+                self.library.lock().unwrap().rename(value["id"].as_u64().ok_or("which person?")?, value["name"].as_str().unwrap_or_default());
+                let _ = self.app.emit("meeting-people", ());
+            }
             "opacity" => {
                 let opacity = value.as_f64().unwrap_or(1.0).clamp(0.35, 1.0);
                 self.edit(|s| s.meeting_opacity = Some(opacity));
@@ -1676,7 +2033,8 @@ pub fn saved() -> Vec<Value> {
 // MARK: What the AI is told
 
 pub const ANSWER_SYSTEM: &str = "You help the user during a live meeting or call. In the transcript, \"Them\" is the other \
-people and \"You\" is the user; it's speech-to-text, so expect misheard words. The user glances at your answer and says it \
+people and \"You\" is the user (when the other side's voices are told apart, each is labelled by name or \"Speaker N\" \
+instead of \"Them\"); it's speech-to-text, so expect misheard words. The user glances at your answer and says it \
 out loud, live, so it must be quick to scan and natural to say, and complete, precise and correct. Reply in exactly this \
 shape, plain text, no preamble; use **bold** only for the one or two key words in a line:
 ANSWER: the direct answer in one short sentence the user can say first, in the first person.
@@ -1700,7 +2058,8 @@ inventing it. When a picture or the text of the meeting's screen comes with the 
 charts' numbers and trends, slides' points) and say which part you mean. Follow the user's instructions when they're given.";
 
 const FOLLOW_UP_SYSTEM: &str = "You help the user during a live meeting or call. In the transcript, \"Them\" is the other \
-people and \"You\" is the user; it's speech-to-text, so expect misheard words. Suggest questions the user could ask now: \
+people and \"You\" is the user (when the other side's voices are told apart, each is labelled by name or \"Speaker N\" \
+instead of \"Them\"); it's speech-to-text, so expect misheard words. Suggest questions the user could ask now: \
 sharp, specific to what was actually said, the kind a thoughtful person would ask to clarify, go deeper or move things \
 forward. Reply in exactly this shape, plain text, **bold** only for a key word:
 ANSWER: one short sentence on what's worth digging into right now.
@@ -1709,7 +2068,8 @@ ALSO:
 Use the meeting's context when given. No generic questions that would fit any meeting.";
 
 const RECAP_SYSTEM: &str = "You help the user during a live meeting or call. In the transcript, \"Them\" is the other \
-people and \"You\" is the user; it's speech-to-text, so expect misheard words. Recap the meeting so far for someone who \
+people and \"You\" is the user (when the other side's voices are told apart, each is labelled by name or \"Speaker N\" \
+instead of \"Them\"); it's speech-to-text, so expect misheard words. Recap the meeting so far for someone who \
 lost the thread for a few minutes. Reply in exactly this shape, plain text, **bold** only for key words:
 ANSWER: what the meeting is about, in one short sentence.
 POINTS:
@@ -1728,7 +2088,8 @@ Subject: a specific subject line
 the email";
 
 const DECIDE_SYSTEM: &str = "You watch a live meeting transcript (speech-to-text, so expect misheard words and missing \
-punctuation). \"Them\" is the other people and \"You\" is the user. Decide one thing about what the other side said since \
+punctuation). \"Them\" is the other people and \"You\" is the user (when the other side's voices are told apart, each is labelled by name or \"Speaker N\" \
+instead of \"Them\"). Decide one thing about what the other side said since \
 the last answer:
 \"answer\": they asked the user something, or asked them to explain, describe, show or do something (however it's phrased: \
 \"tell me about…\", \"I'd love to hear how you…\", \"walk us through…\", \"what's your take\"), and they've finished asking.
@@ -1736,7 +2097,8 @@ the last answer:
 \"no\": nothing for the user to answer: a statement, small talk, or talking to someone else.";
 
 const NOTES_SYSTEM: &str = "You are an excellent note-taker sitting in on the user's meeting. In the transcript, \"Them\" is \
-the other people and \"You\" is the user; it's speech-to-text, so fix obvious mishearings from context and ignore fragments \
+the other people and \"You\" is the user (when the other side's voices are told apart, each is labelled by name or \"Speaker N\" \
+instead of \"Them\"); it's speech-to-text, so fix obvious mishearings from context and ignore fragments \
 that make no sense.
 Note only what someone would want to look back at: what was decided, who will do what and by when, the facts, numbers, \
 names, dates and terms that came up, problems raised and how they were resolved, and questions left open. Leave out small \

@@ -34,6 +34,8 @@ fancy-regex = "0.14"
 # document given to the meeting (its zip read here; both already in Murmur's build through Tauri).
 png = "0.17"
 flate2 = "1"
+# Meeting voices: the downloaded models are checked against their SHA-256 (already in the build).
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

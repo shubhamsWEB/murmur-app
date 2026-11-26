@@ -21,13 +21,28 @@ impl Speaker {
     }
 }
 
-/// One line of a meeting's transcript: what one side said in one stretch of speech. `at`: seconds since 1970.
+/// One line of a meeting's transcript: what one side said in one stretch of speech (or one person's turn in it).
+/// `at` and `end`: seconds since 1970.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Line {
     pub id: u64,
     pub speaker: Speaker,
     pub text: String,
     pub at: f64,
+    pub end: f64,
+    /// Who it's shown as: "You", a name, "Speaker 2", or "Them" (speakers.rs).
+    pub who: String,
+    /// Which of the call's voices said it (1, 2… as the meeting's voices are grouped now); None: not told apart.
+    pub voice: Option<u32>,
+    /// Its voiceprint's place in the meeting's grouping (voices.rs), which `voice` is read from as the grouping changes.
+    #[serde(skip)]
+    pub stretch: Option<usize>,
+}
+
+impl Line {
+    pub fn new(id: u64, speaker: Speaker, text: impl Into<String>, at: f64, end: f64) -> Line {
+        Line { id, speaker, text: text.into(), at, end: end.max(at), who: speaker.name().into(), voice: None, stretch: None }
+    }
 }
 
 /// Whether a line asks something, so Murmur drafts an answer: a question mark (the speech models write them), or a
@@ -95,19 +110,126 @@ const PHRASES: [&str; 13] = ["tell me about", "tell me how", "walk me through", 
                              "explain why", "what do you think", "your thoughts on", "how would you", "talk me through",
                              "take me through", "describe how", "describe a time"];
 
-/// Whether `mine` (from your microphone) is the call's sound picked up again, on speakers rather than headphones:
-/// most of its words are in `theirs`.
-pub fn is_echo(mine: &str, theirs: &str) -> bool {
-    let (a, b) = (words(mine), words(theirs));
+/// Whether `mine` (from your microphone) is the call's sound picked up again, on speakers rather than headphones: the
+/// same words in the same order, heard at the same moment (`apart`: seconds between the two). A reply that takes up
+/// their words ("Can you share the pricing sheet?" / "Yes, I'll share the pricing sheet") is you speaking.
+pub fn is_echo(mine: &str, theirs: &str, apart: f64) -> bool {
+    if apart.abs() > ECHO_SLACK {
+        return false;
+    }
+    let (a, b) = (sequence(mine), sequence(theirs));
     if a.len() < 3 || b.len() < 3 {
         return false;
     }
-    let shared = a.intersection(&b).count();
-    shared as f64 / a.len().min(b.len()) as f64 >= 0.6
+    in_order(&a, &b) as f64 / a.len().max(b.len()) as f64 >= 0.75
 }
 
-fn words(text: &str) -> HashSet<String> {
+/// How much of `mine` is found in `theirs`, 0…1, in word pairs: the microphone hears the speakers worse than the call
+/// is heard, and cuts it elsewhere, so a whole-line comparison misses some echoes. From Cicada's `EchoMatch`
+/// (github.com/wquguru/cicada, Apache-2.0, © wquguru); a single word counts as itself.
+pub fn contained(mine: &str, theirs: &[&str]) -> f64 {
+    let a = pairs(&sequence(mine));
+    if a.len() < 2 {
+        return 0.0;
+    }
+    let b: HashSet<String> = theirs.iter().flat_map(|line| pairs(&sequence(line))).collect();
+    a.iter().filter(|pair| b.contains(*pair)).count() as f64 / a.len() as f64
+}
+
+/// Echo by containment: at least this share of your line is in what they said around then.
+pub const CONTAINED_ECHO: f64 = 0.6;
+/// The echo comes back within this long of the call playing it.
+pub const ECHO_SLACK: f64 = 6.0;
+/// In a line that's partly yours, one sentence is the call's only when it's this long (words) and this much of it is
+/// theirs.
+const ECHO_SENTENCE_WORDS: usize = 6;
+const ECHO_SENTENCE: f64 = 0.8;
+/// In a line that's mostly the call, a sentence is yours when it's this long and no more than this much of it is
+/// theirs (a sentence of the call the microphone misheard still shares more than that)…
+const YOURS_WORDS: usize = 3;
+const YOURS_SHARE: f64 = 0.2;
+/// …and fewer than this share of its words are in what they said at all.
+const YOURS_WORDS_SHARE: f64 = 0.6;
+
+/// The other side's lines being said while `line` was: their time overlaps its, give or take `ECHO_SLACK`. A
+/// microphone that hears the speakers doesn't cut where the call does (in a room it rarely hears a pause, so its
+/// stretches run long), so one of your lines can cover several of theirs.
+pub fn during<'a>(line: &Line, lines: &'a [Line]) -> Vec<&'a Line> {
+    let (from, to) = (line.at - ECHO_SLACK, line.end + ECHO_SLACK);
+    lines.iter().filter(|l| l.speaker == Speaker::Them && l.end >= from && l.at <= to).collect()
+}
+
+/// What's left of `mine` (what your microphone heard) once the call's own words are taken out, given what they said
+/// meanwhile: None when it's all the call; otherwise your words, without the sentences that are the call's.
+///
+/// Mostly the call (the same words in order as one of their lines, or most of its word pairs found in theirs): only
+/// sentences with next to nothing of theirs in them are yours ("Sorry, can I jump in?" said over the speakers).
+/// Mostly yours: only a long sentence that's nearly all theirs goes, because answering someone often repeats their
+/// words ("Yes, I'll share the pricing sheet"). As the Mac's `MeetingText.withoutEcho`.
+pub fn without_echo(mine: &str, theirs: &[&str]) -> Option<String> {
+    if theirs.is_empty() {
+        return Some(mine.to_string());
+    }
+    if theirs.iter().any(|line| is_echo(mine, line, 0.0)) {
+        return None;
+    }
+    let share = contained(mine, theirs);
+    if share <= 0.0 {
+        return Some(mine.to_string());
+    }
+    let mostly = share >= CONTAINED_ECHO;
+    let sentences = sentences(mine);
+    if sentences.len() <= 1 {
+        return (!mostly).then(|| mine.to_string());
+    }
+    let kept: Vec<&String> = sentences.iter().filter(|sentence| {
+        let (words, found) = (sequence(sentence).len(), contained(sentence, theirs));
+        if mostly {
+            words >= YOURS_WORDS && found <= YOURS_SHARE && words_found(sentence, theirs) < YOURS_WORDS_SHARE
+        } else {
+            words < ECHO_SENTENCE_WORDS || found < ECHO_SENTENCE
+        }
+    }).collect();
+    if kept.len() == sentences.len() {
+        return Some(mine.to_string());
+    }
+    let rest = kept.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+    is_worth_keeping(&rest).then_some(rest)
+}
+
+/// The share of `mine`'s words found anywhere in `theirs`.
+fn words_found(mine: &str, theirs: &[&str]) -> f64 {
+    let words = sequence(mine);
+    if words.is_empty() {
+        return 0.0;
+    }
+    let said: HashSet<String> = theirs.iter().flat_map(|line| sequence(line)).collect();
+    words.iter().filter(|word| said.contains(*word)).count() as f64 / words.len() as f64
+}
+
+fn pairs(words: &[String]) -> Vec<String> {
+    if words.len() < 2 {
+        return words.to_vec();
+    }
+    words.windows(2).map(|pair| format!("{} {}", pair[0], pair[1])).collect()
+}
+
+fn sequence(text: &str) -> Vec<String> {
     text.to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(String::from).collect()
+}
+
+/// How many words the two have in the same order (the longest common subsequence).
+fn in_order(a: &[String], b: &[String]) -> usize {
+    let mut row = vec![0usize; b.len() + 1];
+    for x in a {
+        let mut diagonal = 0;
+        for (j, y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if x == y { diagonal + 1 } else { row[j + 1].max(row[j]) };
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// "14:05" for seconds since 1970, in this PC's time.
@@ -143,7 +265,7 @@ pub fn transcript<'a>(lines: impl DoubleEndedIterator<Item = &'a Line>, limit: u
     let mut kept: Vec<String> = Vec::new();
     let mut total = 0;
     for line in lines.rev() {
-        let row = format!("[{}] {}: {}", clock(line.at), line.speaker.name(), line.text);
+        let row = format!("[{}] {}: {}", clock(line.at), line.who, line.text);
         let size = row.chars().count() + 1;
         if total + size > limit {
             break;
@@ -471,9 +593,45 @@ mod tests {
 
     #[test]
     fn echoes() {
-        assert!(is_echo("the release moved to friday", "So the release moved to Friday, right?"));
-        assert!(!is_echo("I think we should wait", "The release moved to Friday"));
-        assert!(!is_echo("ok", "ok then"));
+        assert!(is_echo("we should ship it on friday", "I think we should ship it on Friday.", 0.0));
+        assert!(!is_echo("sounds good to me", "I think we should ship it on Friday.", 0.0));
+        // Your reply takes up their words: that's you speaking, not the call heard again.
+        assert!(!is_echo("Yes, I'll share the pricing sheet", "Can you share the pricing sheet?", 0.0));
+        assert!(!is_echo("we should ship it on friday", "So we should ship it on Friday?", 12.0));
+        assert!(is_echo("we should ship it on friday", "I think we should ship it on Friday.", 1.5));
+    }
+
+    /// The Mac's testTheMicrophonesEchoOfTheCallIsLeftOut: the microphone cuts elsewhere than the call does.
+    #[test]
+    fn the_calls_words_are_taken_out_of_what_the_microphone_heard() {
+        let them = |id: u64, at: f64, seconds: f64, text: &str| Line::new(id, Speaker::Them, text, 1_000.0 + at, 1_000.0 + at + seconds);
+        let lines = vec![
+            them(1, 0.0, 7.0, "So I think the median future is actually not a very good thing to think about."),
+            them(2, 8.0, 9.0, "I would much rather talk about individual scenarios and how much chance we put on each."),
+            them(3, 18.0, 8.0, "For context, we did a similar discussion to this in November three years ago."),
+            them(4, 60.0, 5.0, "Something said a minute later that has nothing to do with it."),
+        ];
+        // Twenty seconds of the room: the microphone heard the speakers, cut where it liked, a few words off.
+        let heard = Line::new(9, Speaker::You, "future is actually not a very good thing to think about, I would much rather \
+            talk about individual scenarios and how much chance we put on each. For context we did a similar discussion \
+            to this in November", 1_002.0, 1_022.0);
+        let meanwhile: Vec<&str> = during(&heard, &lines).iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(meanwhile.len(), 3);
+        assert_eq!(without_echo(&heard.text, &meanwhile), None);
+        // No single line of theirs holds enough of it: why it used to stay in as "You".
+        assert!(lines.iter().all(|l| contained(&heard.text, &[l.text.as_str()]) < CONTAINED_ECHO));
+        // What you really said stays, word for word.
+        let reply = "I disagree, the median is still the most useful single number we have.";
+        assert_eq!(without_echo(reply, &meanwhile).as_deref(), Some(reply));
+        assert_eq!(without_echo("Yes. I'll share the pricing sheet tomorrow.", &["Can you share the pricing sheet?"]).as_deref(),
+                   Some("Yes. I'll share the pricing sheet tomorrow."));
+        assert_eq!(without_echo(reply, &[]).as_deref(), Some(reply));
+        // You spoke while the speakers played: their sentence goes, yours stays.
+        let mixed = "I would much rather talk about individual scenarios and how much chance we put on each. Sorry, can I jump in here?";
+        assert_eq!(without_echo(mixed, &meanwhile).as_deref(), Some("Sorry, can I jump in here?"));
+        // A scrap of the call the speech model wrote differently on the two sides is still the call.
+        let scrap = "I would much rather talk about individual scenarios and how much chance we put on each. Rather individual chance.";
+        assert_eq!(without_echo(scrap, &meanwhile), None);
     }
 
     #[test]
@@ -520,8 +678,8 @@ mod tests {
 
     #[test]
     fn transcript_and_context_fit() {
-        let lines: Vec<Line> = (0..50).map(|i| Line { id: i, speaker: if i % 2 == 0 { Speaker::Them } else { Speaker::You },
-                                                      text: format!("line number {i}"), at: 0.0 }).collect();
+        let lines: Vec<Line> = (0..50).map(|i| Line::new(i, if i % 2 == 0 { Speaker::Them } else { Speaker::You },
+                                                         format!("line number {i}"), 0.0, 0.0)).collect();
         let text = transcript(lines.iter(), 200);
         assert!(text.chars().count() <= 200);
         assert!(text.ends_with("line number 49"));
