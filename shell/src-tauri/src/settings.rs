@@ -89,6 +89,8 @@ pub struct Settings {
     /// answering by itself (on unless turned off), the AI for answers and notes ("" for the commands' model), who
     /// transcribes ("" for dictation's model, "sarvam", "openai"), your standing instructions, and the panel's look.
     pub meeting_offer_off: bool,
+    /// A meeting with nothing said for ten minutes ends itself, unless this is on.
+    pub meeting_stay_when_quiet: bool,
     pub meeting_auto_answer_off: bool,
     pub meeting_ai: String,
     pub meeting_speech: String,

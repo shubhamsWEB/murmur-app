@@ -5,6 +5,7 @@
   <title>Murmur</title>
   <link rel="stylesheet" href="window.css">
   <link rel="stylesheet" href="home.css">
+  <link rel="stylesheet" href="tour.css">
 </head>
 <!-- Murmur's window, as the Mac app's (Sources/MurmurApp/Home.swift): its sidebar (brand, pages, how Murmur is doing,
      About & Help) and the page. Search fills its page (window.js); Settings, Folders and About are settings.js's;
@@ -126,8 +127,9 @@
     <section class="page pane" id="page-meetings" hidden>
       <div class="column">
         <header class="page-head"><h1>Meetings</h1>
-          <p>Notes from your calls, newest first. Murmur listens to the call and your microphone, writes down what's said,
-            keeps notes, and drafts answers when someone asks you something. Its panel is left out of screen sharing.</p></header>
+          <p>Notes from your calls, newest first. Murmur listens to the call and your microphone, writes down who said
+            what, keeps notes, and drafts answers when someone asks you something. Its panel is left out of screen
+            sharing. Click a speaker in the panel's transcript to name them.</p></header>
         <div class="card rows">
           <div class="srow"><div class="stext"><b id="meeting-now-title">Take meeting notes</b>
             <span id="meeting-now-about">Start when the call starts. Press <b>Ctrl+Alt+Enter</b> during the call to answer
@@ -141,6 +143,9 @@
           <div class="srow"><div class="stext"><b>Answer by itself</b>
             <span>Draft an answer as soon as someone on the call finishes asking you something.</span></div>
             <label class="switch"><input type="checkbox" id="meeting-auto"><span></span></label></div>
+          <div class="srow"><div class="stext"><b>End by itself</b>
+            <span>When nobody has said anything for ten minutes, the notes are finished and saved.</span></div>
+            <label class="switch"><input type="checkbox" id="meeting-end-quiet"><span></span></label></div>
           <div class="srow"><div class="stext"><b>AI for answers and notes</b>
             <span>A cloud AI keeps the work off this PC; the conversation goes to that provider.</span></div>
             <select class="field" id="meeting-ai"></select></div>
@@ -152,6 +157,8 @@
               <option value="openai">OpenAI gpt-4o-mini-transcribe (cloud)</option>
             </select></div>
         </div>
+        <span class="section-label" id="people-label" hidden>People</span>
+        <div class="card rows" id="people" hidden></div>
         <input class="field wide" id="meetings-search" type="search" placeholder="Search your meetings: a name, a decision, a number" autocomplete="off">
         <div class="meetings" id="meetings-list"></div>
         <p class="problem" id="meetings-problem" hidden></p>
@@ -379,6 +386,12 @@
     <section class="page pane" id="page-about" hidden>
       <div class="column">
         <header class="page-head"><h1>About &amp; Help</h1><p>What Murmur runs, where it keeps things, and what it sends.</p></header>
+        <div class="card rows">
+          <div class="srow"><div class="stext"><b>A tour of Murmur</b>
+            <span>The starling shows you around the window: talking, commands, file search, meeting notes and the
+              settings worth knowing. Two minutes.</span></div>
+            <button class="secondary" id="tour-start">Take the Tour</button></div>
+        </div>
         <span class="section-label">Models</span>
         <div class="card facts">
           <div class="fact"><span>Speech</span><span id="about-speech"></span></div>
@@ -407,5 +420,6 @@
   <script src="assistant.js"></script>
   <script src="meetings.js"></script>
   <script src="home.js"></script>
+  <script src="tour.js"></script>
 </body>
 </html>

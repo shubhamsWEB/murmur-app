@@ -156,6 +156,21 @@ impl Recognizer {
         texts.iter().map(|text| text.trim()).filter(|text| !text.is_empty()).collect::<Vec<_>>().join(" ")
     }
 
+    /// The words in `samples` with when each was said (seconds from the start), for the models that say: Parakeet.
+    /// None for Whisper, or a recording too long for one pass.
+    pub fn timed(&self, samples: &[f32], sample_rate: u32) -> Option<(String, Vec<(String, f64, f64)>)> {
+        if self.model == Model::Hinglish {
+            return None;
+        }
+        let stream = self.inner.create_stream();
+        stream.accept_waveform(sample_rate as i32, samples);
+        self.inner.decode(&stream);
+        let result = stream.get_result()?;
+        let times = result.timestamps.as_ref().filter(|times| times.len() == result.tokens.len())?;
+        let length = samples.len() as f64 / sample_rate as f64;
+        Some((tidy(&result.text), words_of(&result.tokens, times, length)))
+    }
+
     /// What's typed for `samples`: the words, tidied, or nothing when the model only made something up. Whisper writes
     /// "nan" for silence or a breath (Apex does; other Whispers write "Thank you."), which isn't a dictation.
     pub fn words(&self, samples: &[f32], sample_rate: u32) -> String {
@@ -238,6 +253,29 @@ pub fn default_folder(model: Model) -> Option<PathBuf> {
     base.map(|base| base.join("Speech Models").join(model.folder_name()))
 }
 
+/// The model's pieces of words ("▁Hel", "lo", "▁there.") as whole words, each from when its first piece began to when
+/// the next word did (the last: to the end of the sound, at most a second on).
+fn words_of(tokens: &[String], starts: &[f32], length: f64) -> Vec<(String, f64, f64)> {
+    let mut words: Vec<(String, f64, f64)> = Vec::new();
+    for (token, &start) in tokens.iter().zip(starts) {
+        let begins = token.starts_with('▁') || token.starts_with(' ');
+        let piece = token.trim_start_matches(['▁', ' ']);
+        if begins || words.is_empty() {
+            if piece.is_empty() {
+                continue;
+            }
+            words.push((piece.to_string(), start as f64, start as f64));
+        } else if let Some(word) = words.last_mut() {
+            word.0.push_str(piece);
+        }
+    }
+    for index in 0..words.len() {
+        let next = words.get(index + 1).map_or((words[index].1 + 1.0).min(length.max(words[index].1)), |next| next.1);
+        words[index].2 = next.max(words[index].1);
+    }
+    words
+}
+
 /// What Parakeet writes, tidied for typing: single spaces, no leading or trailing space.
 pub fn tidy(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -246,6 +284,13 @@ pub fn tidy(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_models_pieces_make_words_with_their_times() {
+        let tokens: Vec<String> = ["▁Hel", "lo", "▁there", ".", "▁Yes"].iter().map(|t| t.to_string()).collect();
+        let words = words_of(&tokens, &[0.25, 0.5, 0.75, 1.0, 2.0], 2.5);
+        assert_eq!(words, vec![("Hello".to_string(), 0.25, 0.75), ("there.".to_string(), 0.75, 2.0), ("Yes".to_string(), 2.0, 2.5)]);
+    }
 
     #[test]
     fn tidies_spaces() {

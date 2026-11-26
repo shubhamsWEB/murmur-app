@@ -13,6 +13,17 @@ The Hinglish speech model, downloaded on first use: Oriserve Whisper-Hindi2Hingl
 (https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex), Apache License 2.0, a
 fine-tune of OpenAI Whisper (MIT); Core ML conversion by raghuramr14 on Hugging Face.
 
+Cicada (https://github.com/wquguru/cicada), Apache License 2.0, Copyright wquguru.
+Parts of meeting notes are adapted from it: how speakers are labelled and named, how
+saved voices are matched, and how the microphone's echo of a call is found.
+
+Meeting notes on Windows tell speakers apart with two models, downloaded on first use:
+pyannote segmentation 3.0 (https://huggingface.co/pyannote/segmentation-3.0), MIT
+License, Copyright (c) 2022 CNRS, as exported for sherpa-onnx
+(https://github.com/k2-fsa/sherpa-onnx, Apache License 2.0); and WeSpeaker's
+ResNet34-LM voiceprint model trained on VoxCeleb (https://github.com/wenet-e2e/wespeaker,
+Apache License 2.0; the model under Creative Commons Attribution 4.0).
+
 ================================================================================
 llama.cpp and ggml (https://github.com/ggml-org/llama.cpp), the embedding runtime,
 linked into Murmur's helper (with one small change, in scripts/llama.cpp-no-logits.patch)

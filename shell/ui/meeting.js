@@ -237,11 +237,97 @@ function renderLines() {
     return;
   }
   lines.replaceChildren(...state.lines.map((line) => {
-    const row = element("p", "line " + line.speaker.toLowerCase());
-    row.append(element("span", "time", line.time), element("span", "who", line.speaker), line.text);
+    const row = element("p", "line " + (line.side || line.speaker).toLowerCase());
+    // The call's voices can be named: click who said it.
+    const who = element(line.voice ? "button" : "span", "who", line.speaker);
+    if (line.voice) {
+      who.title = "Name this speaker";
+      who.onclick = (event) => editSpeaker(line.voice, event.currentTarget);
+    }
+    row.append(element("span", "time", line.time), who, line.text);
     return row;
   }));
   if (atEnd) lines.scrollTop = lines.scrollHeight;
+}
+
+// MARK: Naming a speaker
+
+/// A small card under the speaker's label: their name (the names heard in the meeting and the voices you saved are
+/// offered), whether to remember the voice for later meetings, and "the same person as" another voice.
+function editSpeaker(voice, anchor) {
+  closeSpeaker();
+  const info = (state.voices || []).find((v) => v.voice === voice) || { voice, label: "Them", name: "" };
+  const card = element("div", "speaker-card");
+  card.id = "speaker-card";
+  const title = element("b", null, info.name ? info.name : `Who is ${info.label}?`);
+  const input = element("input", "field");
+  input.type = "text";
+  input.value = info.name || "";
+  input.placeholder = "Their name";
+  input.setAttribute("list", "speaker-people");
+  const people = element("datalist");
+  people.id = "speaker-people";
+  for (const name of state.people || []) people.append(Object.assign(document.createElement("option"), { value: name }));
+  const offers = element("div", "offers");
+  for (const name of (state.people || []).slice(0, 6)) {
+    const chip = element("button", "chip", name);
+    chip.onclick = () => { input.value = name; input.focus(); };
+    offers.append(chip);
+  }
+  const remember = element("label", "remember");
+  const box = element("input");
+  box.type = "checkbox";
+  box.checked = !!info.saved;
+  box.disabled = !info.canRemember;
+  remember.append(box, info.canRemember ? "Remember this voice in later meetings"
+    : "Murmur needs to hear a little more of this voice to remember it");
+  const why = info.evidence ? element("p", "why", `Named from ${info.evidence}`) : null;
+  const buttons = element("div", "buttons");
+  const save = element("button", "primary", "Save");
+  const done = (name) => {
+    act("nameVoice", { voice, name, remember: box.checked && !!name });
+    closeSpeaker();
+  };
+  save.onclick = () => done(input.value.trim());
+  input.onkeydown = (event) => {
+    if (event.key === "Enter") done(input.value.trim());
+    if (event.key === "Escape") closeSpeaker();
+  };
+  buttons.append(save);
+  if (info.name) {
+    const wrong = element("button", "secondary", "Not them");
+    wrong.onclick = () => done("");
+    buttons.append(wrong);
+  }
+  // Two labels for one person: put them together.
+  const others = (state.voices || []).filter((v) => v.voice !== voice);
+  let same = null;
+  if (others.length) {
+    same = element("select", "field");
+    same.append(Object.assign(document.createElement("option"), { value: "", textContent: "Same person as…" }));
+    for (const other of others) same.append(Object.assign(document.createElement("option"), { value: other.voice, textContent: other.label }));
+    same.onchange = () => {
+      if (same.value) act("mergeVoices", { from: voice, into: Number(same.value) });
+      closeSpeaker();
+    };
+  }
+  card.append(title, input, people, ...(offers.childElementCount ? [offers] : []), remember, ...(why ? [why] : []), buttons, ...(same ? [same] : []));
+  document.body.append(card);
+  const box2 = anchor.getBoundingClientRect();
+  card.style.left = Math.max(8, Math.min(box2.left, window.innerWidth - card.offsetWidth - 8)) + "px";
+  card.style.top = Math.max(8, Math.min(box2.bottom + 6, window.innerHeight - card.offsetHeight - 8)) + "px";
+  input.focus();
+  input.select();
+  setTimeout(() => document.addEventListener("mousedown", outsideSpeaker), 0);
+}
+
+function outsideSpeaker(event) {
+  if (!event.target.closest("#speaker-card")) closeSpeaker();
+}
+
+function closeSpeaker() {
+  document.removeEventListener("mousedown", outsideSpeaker);
+  $("speaker-card")?.remove();
 }
 
 function renderContext() {

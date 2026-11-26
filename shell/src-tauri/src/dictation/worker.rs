@@ -66,6 +66,15 @@ impl Engine {
         }
     }
 
+    /// The words with when each was said, when the model is in Murmur and says (Parakeet): meeting notes cut a stretch
+    /// between two people by them.
+    pub fn timed(&self, samples: &[f32], rate: u32) -> Option<(String, Vec<(String, f64, f64)>)> {
+        match self {
+            Engine::Here(recognizer) => recognizer.timed(samples, rate),
+            _ => None,
+        }
+    }
+
     /// The words in a recording; an error when the worker has stopped (with how it ended), or Sarvam couldn't do it.
     pub fn words(&self, samples: &[f32], rate: u32) -> Result<String, String> {
         match self {
